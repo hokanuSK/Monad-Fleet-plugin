@@ -1,0 +1,108 @@
+name: elabftw
+
+services:
+  web:
+    image: elabftw/elabimg:stable
+    restart: always
+    container_name: elabftw
+    depends_on:
+      mysql:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - FOWNER
+      - DAC_OVERRIDE
+    environment:
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_NAME=elabftw
+      - DB_USER=elabftw
+      - DB_PASSWORD=OfSeuXOmu1WrjIcKaD6zi7KBnernjKH
+      - PHP_TIMEZONE=Europe/Bratislava
+      - TZ=Europe/Bratislava
+      - SECRET_KEY=def0000019d4bb3be0d4c8ea75a3d9be4c8b7742a134dab3535651b5131bf06151f2b19f750741de2c1aaee6dd4ad9f180a6cd9125c2abf1a739a3bd77278144ebd1415e
+      - SITE_URL=https://localhost:8443
+      - SERVER_NAME=localhost
+      - DISABLE_HTTPS=false      # NECHÁME HTTPS ZAPNUTÉ
+      - ENABLE_LETSENCRYPT=false
+    ports:
+      - "127.0.0.1:8443:443"      # v prehliadači choď na https://localhost:8443
+    volumes:
+      - ./data/web:/elabftw/uploads
+    networks:
+      - elabftw-net
+
+  mysql:
+    image: mysql:8.4
+    restart: always
+    container_name: mysql
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: "/usr/bin/mysql --user=$$MYSQL_USER --password=$$MYSQL_PASSWORD --execute 'SHOW DATABASES;'"
+      interval: 5s
+      timeout: 5s
+      retries: 42
+    cap_drop:
+      - AUDIT_WRITE
+      - MKNOD
+      - SYS_CHROOT
+      - SETFCAP
+      - NET_RAW
+    cap_add:
+      - SYS_NICE
+    environment:
+      - MYSQL_ROOT_PASSWORD=rlb03Gyt4TmKhfVu8TYNoHUNCuBvsAo
+      - MYSQL_DATABASE=elabftw
+      - MYSQL_USER=elabftw
+      - MYSQL_PASSWORD=OfSeuXOmu1WrjIcKaD6zi7KBnernjKH
+      - TZ=Europe/Bratislava
+    volumes:
+      - ./data/mysql:/var/lib/mysql
+    expose:
+      - "3306"
+    networks:
+      - elabftw-net
+
+  fleet-gateway:
+    build: ./gateway-plugin
+    container_name: fleet-gateway
+    restart: always
+    depends_on:
+      - web
+    environment:
+      - GATEWAY_PORT=50060
+      - SCAN_CIDR=172.20.0.0/16
+      - ELAB_API_BASE_URL=https://web/api/v2
+      # TU DOSAĎ SVOJ REST API KEY (celý reťazec z My Profile → API Keys → REST API key)
+      - ELAB_API_KEY=1-1649cbce945c8d66e44992b2a851028fa098d6fb0a9611c01fb8628cc73de13df885c270062c43f6407d1
+    networks:
+      - elabftw-net
+    ports:
+      - "50060:50060"
+
+  model-device:
+    build: ./device-sim
+    container_name: model-device
+    restart: always
+    depends_on:
+      - fleet-gateway
+    environment:
+      - DEVICE_MAC=02:42:ac:14:00:03
+      - GATEWAY_HOST=fleet-gateway
+      - GATEWAY_PORT=50060
+    mac_address: 02:42:ac:14:00:03
+    networks:
+      - elabftw-net
+
+networks:
+  elabftw-net:
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
