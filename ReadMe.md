@@ -1,0 +1,2 @@
+# Monad Fleet as ElabFTW plugin service
+This repository consist of 3 parts and can be runned using docker-compose. First part is Elabftw platform, second is plugin in gateway-plugin folder and third is simulator of devices connecting to GRPC server that is our plugin. Device simulator is in device-sim folder
