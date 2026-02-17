@@ -390,6 +390,10 @@ class ElabFTWClient:
         payload = {
             "type": "resources",
             "title": f"Device {device_id}",
+            "is_bookable": 1,
+            "book_max_minutes": 180,
+            "book_can_overlap": 1,
+            "book_is_cancellable": 1,
             "body": stable_dumps(
                 {
                     "device_id": device_id,
@@ -414,6 +418,9 @@ class ElabFTWClient:
     def patch_item_body(self, item_id: int, body: str) -> dict[str, Any]:
         payload = {"body": body}
         return self.request_json("PATCH", f"/items/{item_id}", json=payload) or {}
+
+    def patch_item_fields(self, item_id: int, fields: dict[str, Any]) -> dict[str, Any]:
+        return self.request_json("PATCH", f"/items/{item_id}", json=fields) or {}
 
     def list_experiments_by_tag(self, tag: str, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         params: dict[str, Any] = {
@@ -511,6 +518,35 @@ class FleetManagerServicer(fleet_gateway_pb2_grpc.FleetManagerServicer):
         item_id = item.get("id")
         if not item_id:
             return
+
+        desired_book_max_minutes = max(1, int(self._cfg.get("book_max_minutes", 180)))
+        desired_book_can_overlap = 1 if bool(self._cfg.get("book_can_overlap", True)) else 0
+        desired_book_is_cancellable = 1 if bool(self._cfg.get("book_is_cancellable", True)) else 0
+        current_is_bookable = int(item.get("is_bookable") or 0)
+        current_book_max_minutes = int(item.get("book_max_minutes") or 0)
+        current_book_can_overlap = int(item.get("book_can_overlap") or 0)
+        current_book_is_cancellable = int(item.get("book_is_cancellable") or 0)
+
+        if (
+            current_is_bookable != 1
+            or current_book_max_minutes != desired_book_max_minutes
+            or current_book_can_overlap != desired_book_can_overlap
+            or current_book_is_cancellable != desired_book_is_cancellable
+        ):
+            try:
+                patched = self._elab_client.patch_item_fields(
+                    int(item_id),
+                    {
+                        "is_bookable": 1,
+                        "book_max_minutes": desired_book_max_minutes,
+                        "book_can_overlap": desired_book_can_overlap,
+                        "book_is_cancellable": desired_book_is_cancellable,
+                    },
+                )
+                if isinstance(patched, dict):
+                    item.update(patched)
+            except Exception as exc:
+                log.warning("patch_item_fields(bookable) failed for item_id=%s: %s", item_id, exc)
 
         metadata = parse_maybe_json(item.get("metadata"), {})
         if not isinstance(metadata, dict):
@@ -1446,6 +1482,9 @@ def serve():
         "experiments_batch_size": int(os.environ.get("EXPERIMENTS_BATCH_SIZE", "200")),
         "max_event_history": int(os.environ.get("MAX_EVENT_HISTORY", "100")),
         "event_duration_minutes": int(os.environ.get("EVENT_DURATION_MINUTES", "60")),
+        "book_max_minutes": int(os.environ.get("BOOK_MAX_MINUTES", "180")),
+        "book_can_overlap": normalize_string(os.environ.get("BOOK_CAN_OVERLAP", "true")).lower() in {"1", "true", "yes"},
+        "book_is_cancellable": normalize_string(os.environ.get("BOOK_IS_CANCELLABLE", "true")).lower() in {"1", "true", "yes"},
         "max_dedupe_events": int(os.environ.get("MAX_DEDUPE_EVENTS", "50000")),
         "allow_live_events": normalize_string(os.environ.get("ALLOW_LIVE_EVENTS", "false")).lower() in {"1", "true", "yes"},
     }
