@@ -23,7 +23,15 @@ docker compose exec -T model-device sh -lc \
 Automated from this repo host:
 ```bash
 PI_HOST=192.168.0.234 scripts/rpi/deploy_agent.sh
+PI_HOST=192.168.0.234 FLEET_MANAGER_HOST=192.168.0.70 scripts/rpi/install_systemd_service.sh
 PI_HOST=192.168.0.234 FLEET_MANAGER_HOST=192.168.0.70 scripts/rpi/smoke_test_agent.sh
+```
+
+Check service logs on Pi:
+```bash
+ssh admin@monad-rpi5.local
+sudo systemctl status --no-pager monad-fleet-agent.service
+sudo journalctl -u monad-fleet-agent.service -n 100 --no-pager
 ```
 
 Manual fallback (if you do not use scripts):
