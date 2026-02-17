@@ -121,6 +121,10 @@ def event_type_for_exit(exit_code: int) -> int:
     return fleet_gateway_v2_pb2.COMMAND_FINISHED if exit_code == 0 else fleet_gateway_v2_pb2.COMMAND_FAILED
 
 
+def reached_max_cycles(cycles: int, max_cycles: int) -> bool:
+    return max_cycles > 0 and cycles >= max_cycles
+
+
 def main() -> None:
     fleet_host = os.environ.get("FLEET_MANAGER_HOST", "monad-fleet-service")
     fleet_port = int(os.environ.get("FLEET_MANAGER_PORT", "50060"))
@@ -169,6 +173,8 @@ def main() -> None:
         )
         if assignment.status != fleet_gateway_v2_pb2.GetAssignmentResponse.ASSIGNED:
             log.info("No assignment")
+            if reached_max_cycles(cycles, max_cycles):
+                break
             time.sleep(poll)
             continue
 
@@ -182,10 +188,14 @@ def main() -> None:
         )
         if policy_resp.status == fleet_gateway_v2_pb2.GetPolicyResponse.NOT_MODIFIED:
             log.info("Policy not modified: %s", last_policy_id)
+            if reached_max_cycles(cycles, max_cycles):
+                break
             time.sleep(poll)
             continue
         if policy_resp.status != fleet_gateway_v2_pb2.GetPolicyResponse.OK:
             log.info("No policy available")
+            if reached_max_cycles(cycles, max_cycles):
+                break
             time.sleep(poll)
             continue
 
@@ -211,6 +221,8 @@ def main() -> None:
         )
         if prep.status != fleet_gateway_v2_pb2.AckPreparedResponse.ACCEPTED:
             log.warning("AckPrepared rejected: %s", prep.reason)
+            if reached_max_cycles(cycles, max_cycles):
+                break
             time.sleep(poll)
             continue
 
@@ -323,6 +335,8 @@ def main() -> None:
             fleet_gateway_v2_pb2.PublishReportResponse.DUPLICATE,
         ):
             last_policy_id = policy.policy_id
+        if reached_max_cycles(cycles, max_cycles):
+            break
         time.sleep(poll)
 
 

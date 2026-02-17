@@ -20,10 +20,17 @@ docker compose exec -T model-device sh -lc \
 ```
 
 ## Run v2 agent on Raspberry Pi (Wi-Fi only mode)
-Copy `device-sim/agent_v2_client.py` and `device-sim/proto/fleet_gateway_v2.proto` to the Pi, then generate stubs:
+Automated from this repo host:
 ```bash
-python3 -m pip install grpcio grpcio-tools protobuf
-python3 -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. fleet_gateway_v2.proto
+PI_HOST=192.168.0.234 scripts/rpi/deploy_agent.sh
+PI_HOST=192.168.0.234 FLEET_MANAGER_HOST=192.168.0.70 scripts/rpi/smoke_test_agent.sh
+```
+
+Manual fallback (if you do not use scripts):
+```bash
+python3 -m venv ~/fleet-agent-venv
+~/fleet-agent-venv/bin/python -m pip install --upgrade pip grpcio grpcio-tools protobuf
+~/fleet-agent-venv/bin/python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. fleet_gateway_v2.proto
 ```
 Run:
 ```bash
@@ -32,5 +39,6 @@ export FLEET_MANAGER_PORT=50060
 export AGENT_ID=<pi-agent-id>
 export CONTROL_PLANE_MODE=RF_SHARING
 export CONTROL_PLANE_IFACE=wlan0
-python3 -u agent_v2_client.py
+export MAX_SYNC_CYCLES=1
+~/fleet-agent-venv/bin/python -u agent_v2_client.py
 ```

@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PI_HOST="${PI_HOST:-${1:-monad-rpi5.local}}"
+PI_USER="${PI_USER:-admin}"
+PI_DIR="${PI_DIR:-/home/${PI_USER}/monad-fleet-agent}"
+
+FLEET_MANAGER_HOST="${FLEET_MANAGER_HOST:-192.168.0.70}"
+FLEET_MANAGER_PORT="${FLEET_MANAGER_PORT:-50060}"
+AGENT_ID="${AGENT_ID:-02:42:ac:14:00:04}"
+CONTROL_PLANE_MODE="${CONTROL_PLANE_MODE:-RF_SHARING}"
+CONTROL_PLANE_IFACE="${CONTROL_PLANE_IFACE:-wlan0}"
+EXECUTE_POLICY="${EXECUTE_POLICY:-false}"
+MAX_SYNC_CYCLES="${MAX_SYNC_CYCLES:-1}"
+
+echo "Running one-cycle smoke test on ${PI_USER}@${PI_HOST}"
+ssh "${PI_USER}@${PI_HOST}" "bash -lc '
+set -euo pipefail
+cd \"${PI_DIR}\"
+FLEET_MANAGER_HOST=\"${FLEET_MANAGER_HOST}\" \\
+FLEET_MANAGER_PORT=\"${FLEET_MANAGER_PORT}\" \\
+AGENT_ID=\"${AGENT_ID}\" \\
+CONTROL_PLANE_MODE=\"${CONTROL_PLANE_MODE}\" \\
+CONTROL_PLANE_IFACE=\"${CONTROL_PLANE_IFACE}\" \\
+MAX_SYNC_CYCLES=\"${MAX_SYNC_CYCLES}\" \\
+EXECUTE_POLICY=\"${EXECUTE_POLICY}\" \\
+\"${PI_DIR}/venv/bin/python\" -u \"${PI_DIR}/agent_v2_client.py\"
+'"
