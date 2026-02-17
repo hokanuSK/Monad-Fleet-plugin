@@ -2,13 +2,16 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends iproute2 net-tools tcpdump && \
+    rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY proto ./proto
-COPY sim_device_client.py ./sim_device_client.py
-COPY agent_v2_client.py ./agent_v2_client.py
+COPY gateway_server.py ./gateway_server.py
 
 RUN python -m grpc_tools.protoc \
     -I./proto \
@@ -17,4 +20,6 @@ RUN python -m grpc_tools.protoc \
     proto/fleet_gateway.proto \
     proto/fleet_gateway_v2.proto
 
-CMD ["python", "-u", "sim_device_client.py"]
+EXPOSE 50060
+
+CMD ["python", "-u", "gateway_server.py"]
