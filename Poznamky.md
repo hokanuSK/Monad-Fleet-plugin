@@ -1,42 +1,54 @@
-
-
-## TODO
-###  analyza 
-- analyza plugin systemu 
-- zistit co vsetko robia veci v GUI  compounds a steps. 
-- doriesit ci vyuzivame vsetky moznosti elabftw pre nase potreby
-- analyza datovych schem
-  - vediet ako funguju vztahy medzi tabulkami a kde sa co vytvara vzhladom na GUI
-- anylaza API - moznosti integracie
-
-### navrh 
-- namapovanie elabFTW moznosti na nas usecase
-- namapovanie datovych schem na nas usecase 
-- budu resources predstavovat jedno zariadenie alebo viac?
-- custom field pre resources - mac adresa
-  
-### Implementacia
-- postavit "plugin" s grpc a funkcionalitou pingu na zariadenie. zariadenie sa zobudi a ozve sa GRPC serveru. 
- funckia grpc bude mat macadresu ako vstup.ak zariadenie sa uz ozvalo vratim kedy sa ozvalo a ak neexistuje tak ho vytvorim. Last seen at polozka v tagu?
-
-## question
-- merane data - co su to za data? 
-  - data s merani su binarne data a nevieme zatial ci pojdu do elabftw
-
-
-# analyza
-## Datova struktura
-## Navrh 
+# Analýza experimentu
 
 
 
-# Monad Fleet Plugin For ElabFTW platform
-- this plugin will be able upload whole infrastrucutre define as docker images into device
-## Example Device Nodes
+## ANALÝZA: „WIFI SENSE“ (ČO, PREČO, AKO)
 
-### Rasberry Pi with Dual band wifi
-- 2,4 GHz interface will be used for comunication, mesaurement will be done only on 5Ghz interface.
-- GRPC client
-- Prometeus for loging
+- Spraviť analytickú časť o „Wi-Fi sense“ v kontexte práce:
+    - čo sa tým myslí v tomto projekte,
+    - aké metriky/údaje sa budú zbierať,
+    - prečo práve tieto metriky dávajú zmysel pre experiment.
+    - Cieľ tejto analýzy: podložiť metodiku merania, nie len popísať, že „budeme merať“.
 
+## HARDWARE REQUIREMENTS
 
+- Zadefinovať hardvérové požiadavky pre meranie.
+- Požiadavka na Wi-Fi kartu: dual-band karta 
+- Vymedziť, aké vlastnosti musí mať HW
+
+## POROVNANIE PRODUKTOV NA TRHU
+
+- Urobiť porovnanie dostupných riešení / produktov na trhu:
+    - porovnať relevantné Wi-Fi adaptéry / karty (z pohľadu merania),
+    - určiť, ktoré riešenie je najvhodnejšie pre cieľ experimentu.
+    - Výstup: zdôvodnený výber HW a spôsobu merania („ako najlepšie robiť merania“).
+
+## „FILOZOFIA“ / KONCEPCIA EXPERIMENTU
+
+„Pohrať sa s filozofiou experimentu“ = jasne popísať:
+    - čo je cieľ merania, prečo sa meria, aká je logika experimentu (čo považujeme za úspešné/validné meranie).
+    - Nastaviť experiment tak, aby bol prakticky realizovateľný (celodenné behy) a aby dáta dávali zmysel pre ďalšie spracovanie.
+
+## SYNCHRONIZÁCIA
+
+- interval synchronizácie (ako často sa a hlavne kedy sa synchronizuju dáta).
+- Určiť, ako sa bude riešiť synchronizácia počas dlhého merania (celé dni).
+## VZORKOVANIE MERANIA
+
+Otázka: nechceme zaviesť vzorkovanie merania (sampling)?
+
+- Zvážiť, či je potrebné merať nepretržite alebo merať v intervaloch alebo niaky adaptivny rezim podla prave nameranych metrik(aktivita RSSI) - zvoliť vhodnú frekvenciu merania
+
+- Z toho odvodiť odporúčaný režim merania pre experiment.
+
+## OBJEM DÁT PRI CELODENNOM MERANÍ
+
+- Kľúčová otázka: koľko dát sa bude generovať, ak meranie beží celé dni.
+
+- Urobiť odhad dátového objemu:
+    - podľa zvolených metrík,podľa frekvencie merania, podľa formátu ukladania.
+- Vyhodnotiť, na zakladne moznosti s predchadzajucich kapitol, či je objem dát udržateľný pre ukladanie (napr. SD karta) a následné spracovanie.
+
+## Umiestnenie ZARIADENÍ (POLOHA MERACÍCH BODOV)
+
+- kde majú byť zariadenia, ktoré merajú.

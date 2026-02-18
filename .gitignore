@@ -5,6 +5,15 @@ output/playwright/
 # macOS
 .DS_Store
 
+# Local scratch / secrets
+tmp/
+
+# Vendored upstream clones (too large for this repo; keep as separate submodule or external checkout)
+src/
+
+# Nested git checkouts inside the workspace (never commit these internals)
+**/.git/
+
 # Python
 __pycache__/
 *.pyc

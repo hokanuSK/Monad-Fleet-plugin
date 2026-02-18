@@ -1,0 +1,14 @@
+sequenceDiagram
+    autonumber
+    participant Device
+    participant Fleet as Monad Fleet service
+    participant API as /events/{item}
+    participant State as state.json
+
+    Device->>Fleet: PublishEvent(COMMAND_STARTED, event_id, ...)
+    Fleet->>State: lookup run key
+    State-->>Fleet: not found
+    Fleet->>API: POST /events/{item} (title, start, end, metadata)
+    API-->>Fleet: 201 Created (Location: /event/{id})
+    Fleet->>State: store run key -> event id + status
+    Fleet-->>Device: Ack(ok=true, stored in event/{id})

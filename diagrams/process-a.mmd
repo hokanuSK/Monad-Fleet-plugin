@@ -1,0 +1,31 @@
+sequenceDiagram
+    autonumber
+    actor Researcher
+    participant GUI as Web GUI
+    participant API as eLabFTW API
+    participant Fleet as Monad Fleet service
+    participant Device
+
+    Researcher->>GUI: Create or update experiment
+    GUI->>API: POST/PATCH /experiments/{id}
+    GUI->>API: PATCH /experiments/{id} metadata.policy (JSON editor)
+    GUI->>API: POST /experiments/{id}/tags (fleet, device:...)
+    API-->>GUI: 200/201 OK
+
+    Device->>Fleet: GetPolicy(device_id, last_policy_revision)
+    Fleet->>API: GET /items?search=device_id
+    API-->>Fleet: resource metadata + tags
+    Fleet->>API: GET /experiments?tags[]=fleet
+    API-->>Fleet: candidate experiments
+
+    Note over Fleet: Select best matching experiment\n(latest + selector match)
+
+    Fleet->>API: GET /experiments/{selected_id}
+    API-->>Fleet: tags + metadata (includes policy)
+    Fleet->>API: GET /experiments/{selected_id} (read metadata policy)
+    API-->>Fleet: policy JSON
+    Fleet-->>Device: PolicyResponse(policy_revision, policy_json)
+
+    alt Revision unchanged
+        Fleet-->>Device: not_modified=true
+    end

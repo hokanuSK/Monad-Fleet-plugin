@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="600" font-family="Arial, Helvetica, sans-serif" font-size="12">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="10" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000"/>
+    </marker>
+    <style>
+      .box {fill:#eef3ff;stroke:#4a67b3;stroke-width:1.2;}
+      .life {stroke:#888;stroke-dasharray:4 4;stroke-width:1;}
+      .msg {stroke:#000;stroke-width:1.1;fill:none;marker-end:url(#arrow);}
+      .label {font-size:12px;}
+      .title {font-size:16px;font-weight:bold;}
+      .loop {stroke:#444;stroke-width:1;fill:none;stroke-dasharray:5 3;}
+    </style>
+  </defs>
+
+  <text x="540" y="24" text-anchor="middle" class="title">Proces A - Experiment v eLabFTW -> dostupna politika pre zariadenie</text>
+
+  <!-- Participants -->
+  <rect x="25"  y="45" width="100" height="26" rx="4" class="box"/><text x="75"  y="63" text-anchor="middle" class="label">Researcher</text>
+  <rect x="215" y="45" width="100" height="26" rx="4" class="box"/><text x="265" y="63" text-anchor="middle" class="label">Web GUI</text>
+  <rect x="405" y="45" width="120" height="26" rx="4" class="box"/><text x="465" y="63" text-anchor="middle" class="label">eLabFTW API</text>
+  <rect x="625" y="45" width="170" height="26" rx="4" class="box"/><text x="710" y="63" text-anchor="middle" class="label">Monad Fleet service</text>
+  <rect x="905" y="45" width="100" height="26" rx="4" class="box"/><text x="955" y="63" text-anchor="middle" class="label">Device</text>
+
+  <!-- Lifelines -->
+  <line x1="75"  y1="71" x2="75"  y2="560" class="life"/>
+  <line x1="265" y1="71" x2="265" y2="560" class="life"/>
+  <line x1="465" y1="71" x2="465" y2="560" class="life"/>
+  <line x1="710" y1="71" x2="710" y2="560" class="life"/>
+  <line x1="955" y1="71" x2="955" y2="560" class="life"/>
+
+  <!-- GUI side -->
+  <line x1="75" y1="120" x2="265" y2="120" class="msg"/><text x="170" y="112" text-anchor="middle">Vytvori alebo upravi experiment</text>
+  <line x1="265" y1="150" x2="465" y2="150" class="msg"/><text x="365" y="142" text-anchor="middle">POST or PUT /experiments/{id}</text>
+  <line x1="265" y1="180" x2="465" y2="180" class="msg"/><text x="365" y="172" text-anchor="middle">POST /experiments/{id}/uploads (policy JSON)</text>
+  <line x1="265" y1="210" x2="465" y2="210" class="msg"/><text x="365" y="202" text-anchor="middle">POST /experiments/{id}/tags (fleet, device:...)</text>
+  <line x1="465" y1="240" x2="265" y2="240" class="msg"/><text x="365" y="232" text-anchor="middle">200 or 201 OK</text>
+
+  <!-- Device pull trigger -->
+  <line x1="955" y1="280" x2="710" y2="280" class="msg"/><text x="832" y="272" text-anchor="middle">gRPC GetPolicy(device_id, last_policy_revision)</text>
+
+  <!-- Service selection flow -->
+  <line x1="710" y1="310" x2="465" y2="310" class="msg"/><text x="588" y="302" text-anchor="middle">GET /items?search=device_id</text>
+  <line x1="465" y1="335" x2="710" y2="335" class="msg"/><text x="588" y="327" text-anchor="middle">resource metadata and tags</text>
+
+  <line x1="710" y1="365" x2="465" y2="365" class="msg"/><text x="588" y="357" text-anchor="middle">GET /experiments?tags[]=fleet</text>
+  <line x1="465" y1="390" x2="710" y2="390" class="msg"/><text x="588" y="382" text-anchor="middle">experiment list</text>
+
+  <rect x="520" y="410" width="260" height="115" class="loop" rx="6"/>
+  <text x="535" y="428" class="label">loop pre kandidatske experimenty</text>
+
+  <line x1="710" y1="445" x2="465" y2="445" class="msg"/><text x="588" y="437" text-anchor="middle">GET /experiments/{id}</text>
+  <line x1="465" y1="470" x2="710" y2="470" class="msg"/><text x="588" y="462" text-anchor="middle">tags plus uploads</text>
+  <line x1="710" y1="495" x2="465" y2="495" class="msg"/><text x="588" y="487" text-anchor="middle">GET /experiments/{id}/uploads/{upload}?format=binary</text>
+  <line x1="465" y1="520" x2="710" y2="520" class="msg"/><text x="588" y="512" text-anchor="middle">policy JSON</text>
+
+  <line x1="710" y1="550" x2="955" y2="550" class="msg"/><text x="832" y="542" text-anchor="middle">PolicyResponse(policy_revision, policy_json)</text>
+</svg>

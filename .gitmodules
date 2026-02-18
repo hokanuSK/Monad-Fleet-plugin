@@ -1,0 +1,4 @@
+[submodule "elabimg"]
+	path = elabimg
+	url = https://github.com/elabftw/elabimg.git
+

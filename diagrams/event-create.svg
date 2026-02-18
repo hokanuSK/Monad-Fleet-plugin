@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="930" height="430" font-family="Arial, Helvetica, sans-serif" font-size="12">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1f2937"/>
+    </marker>
+    <style>
+      .title { font-size:16px; font-weight:bold; fill:#111827; }
+      .box { fill:#eef4ff; stroke:#35589a; stroke-width:1.2; }
+      .life { stroke:#9aa4b3; stroke-dasharray:5 5; stroke-width:1.1; }
+      .msg { stroke:#1f2937; stroke-width:1.2; fill:none; marker-end:url(#arrow); }
+      .ret { stroke:#4b5563; stroke-width:1.1; fill:none; stroke-dasharray:4 4; marker-end:url(#arrow); }
+      .alt { fill:#fbfdff; stroke:#1f2937; stroke-width:1.5; stroke-dasharray:8 4; }
+      .label { fill:#111827; }
+    </style>
+  </defs>
+
+  <text x="465" y="26" text-anchor="middle" class="title">Event Create - first PublishEvent creates run event in eLabFTW</text>
+
+  <rect x="35" y="48" width="90" height="26" rx="4" class="box"/><text x="80" y="66" text-anchor="middle" class="label">Device</text>
+  <rect x="240" y="48" width="175" height="26" rx="4" class="box"/><text x="328" y="66" text-anchor="middle" class="label">Monad Fleet service</text>
+  <rect x="505" y="48" width="120" height="26" rx="4" class="box"/><text x="565" y="66" text-anchor="middle" class="label">/events/{item}</text>
+  <rect x="735" y="48" width="95" height="26" rx="4" class="box"/><text x="782" y="66" text-anchor="middle" class="label">state.json</text>
+
+  <line x1="80" y1="78" x2="80" y2="388" class="life"/>
+  <line x1="328" y1="78" x2="328" y2="388" class="life"/>
+  <line x1="565" y1="78" x2="565" y2="388" class="life"/>
+  <line x1="782" y1="78" x2="782" y2="388" class="life"/>
+
+  <line x1="80" y1="114" x2="328" y2="114" class="msg"/>
+  <text x="204" y="106" text-anchor="middle" class="label">PublishEvent(COMMAND_STARTED, event_id, ...)</text>
+
+  <line x1="328" y1="148" x2="782" y2="148" class="msg"/>
+  <text x="555" y="140" text-anchor="middle" class="label">lookup run key (experiment_id + revision + device_id)</text>
+
+  <line x1="782" y1="178" x2="328" y2="178" class="ret"/>
+  <text x="555" y="170" text-anchor="middle" class="label">not found -> create needed</text>
+
+  <rect x="210" y="198" width="470" height="130" rx="7" class="alt"/>
+  <text x="225" y="214" class="label">first event for this run</text>
+
+  <line x1="328" y1="235" x2="565" y2="235" class="msg"/>
+  <text x="447" y="227" text-anchor="middle" class="label">POST /events/{item} (title, start, end, metadata)</text>
+
+  <line x1="565" y1="265" x2="328" y2="265" class="ret"/>
+  <text x="447" y="257" text-anchor="middle" class="label">201 Created (Location: /event/{id})</text>
+
+  <line x1="328" y1="295" x2="782" y2="295" class="msg"/>
+  <text x="555" y="287" text-anchor="middle" class="label">persist run key -> event_id + status</text>
+
+  <line x1="328" y1="350" x2="80" y2="350" class="ret"/>
+  <text x="204" y="342" text-anchor="middle" class="label">Ack(ok=true, message=stored in event/{id})</text>
+</svg>

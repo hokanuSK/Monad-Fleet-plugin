@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="350" font-family="Arial, Helvetica, sans-serif" font-size="12">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="10" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000"/>
+    </marker>
+    <style>
+      .box {fill:#eef3ff;stroke:#4a67b3;stroke-width:1.2;}
+      .life {stroke:#888;stroke-dasharray:4 4;stroke-width:1;}
+      .msg {stroke:#000;stroke-width:1.2;fill:none;marker-end:url(#arrow);}
+      .title {font-size:15px;font-weight:bold;}
+    </style>
+  </defs>
+
+  <text x="410" y="24" text-anchor="middle" class="title">Event Update - kazdy dalsi PublishEvent aktualizuje metadata a summary</text>
+
+  <!-- Participants -->
+  <rect x="35"  y="40" width="90"  height="24" rx="4" class="box"/><text x="80"  y="56" text-anchor="middle">Device</text>
+  <rect x="245" y="40" width="170" height="24" rx="4" class="box"/><text x="330" y="56" text-anchor="middle">Monad Fleet service</text>
+  <rect x="500" y="40" width="95" height="24" rx="4" class="box"/><text x="548" y="56" text-anchor="middle">/event/{id}</text>
+  <rect x="690" y="40" width="90"  height="24" rx="4" class="box"/><text x="735" y="56" text-anchor="middle">DB</text>
+
+  <!-- Lifelines -->
+  <line x1="80"  y1="64" x2="80"  y2="310" class="life"/>
+  <line x1="330" y1="64" x2="330" y2="310" class="life"/>
+  <line x1="548" y1="64" x2="548" y2="310" class="life"/>
+  <line x1="735" y1="64" x2="735" y2="310" class="life"/>
+
+  <!-- Flow -->
+  <line x1="80" y1="95" x2="330" y2="95" class="msg"/>
+  <text x="205" y="88" text-anchor="middle">PublishEvent(COMMAND_FINISHED or ERROR or ARTIFACT_UPLOADED)</text>
+
+  <line x1="330" y1="130" x2="548" y2="130" class="msg"/>
+  <text x="439" y="123" text-anchor="middle">PATCH metadata (events[], last_event, summary, status)</text>
+
+  <line x1="548" y1="165" x2="735" y2="165" class="msg"/>
+  <text x="642" y="158" text-anchor="middle">UPDATE metadata JSON</text>
+
+  <line x1="735" y1="195" x2="548" y2="195" class="msg"/>
+  <text x="642" y="188" text-anchor="middle">OK</text>
+
+  <line x1="548" y1="225" x2="330" y2="225" class="msg"/>
+  <text x="439" y="218" text-anchor="middle">200 plus updated event</text>
+
+  <line x1="330" y1="255" x2="80" y2="255" class="msg"/>
+  <text x="205" y="248" text-anchor="middle">Ack(ok=true)</text>
+
+  <line x1="330" y1="285" x2="548" y2="285" class="msg"/>
+  <text x="439" y="278" text-anchor="middle">terminal status -> set completed_at</text>
+</svg>
