@@ -7,8 +7,12 @@ MAX_SYNC_CYCLES="${MAX_SYNC_CYCLES:-1}"
 
 RESET_STATE="${RESET_STATE:-true}"
 RESET_METRICS="${RESET_METRICS:-true}"
+RESET_GRAFANA="${RESET_GRAFANA:-false}"
 CLEANUP="${CLEANUP:-false}"
 DO_BUILD="${DO_BUILD:-false}"
+
+RUN_PI="${RUN_PI:-false}"
+PI_HOST="${PI_HOST:-monad-rpi5.local}"
 
 SMOKE_TITLE_PREFIX="${SMOKE_TITLE_PREFIX:-Fleet Smoke v3}"
 SMOKE_TAGS_CSV="${SMOKE_TAGS_CSV:-fleet,smoke:v3,created-by:monad-fleet}"
@@ -39,8 +43,16 @@ else
   echo "[3/8] Skip metrics reset (RESET_METRICS=${RESET_METRICS})"
 fi
 
+if [[ "${RESET_GRAFANA}" == "true" ]]; then
+  echo "[3b/8] Reset Grafana local data (dashboards/users are wiped; metrics live in Mimir)"
+  docker compose exec -T grafana sh -lc "rm -rf /var/lib/grafana/* || true"
+  docker compose restart grafana >/dev/null
+else
+  echo "[3b/8] Skip Grafana reset (RESET_GRAFANA=${RESET_GRAFANA})"
+fi
+
 echo "[4/8] Create a new eLabFTW smoke experiment with v3 WiFi/BLE/CSI policy (no existing experiments modified)"
-SMOKE_EXPERIMENT_ID="$(docker compose exec -T monad-fleet-service sh -lc "DEVICE_MODEL='${DEVICE_MODEL}' DEVICE_PI='${DEVICE_PI}' SMOKE_TITLE_PREFIX='${SMOKE_TITLE_PREFIX}' SMOKE_TAGS_CSV='${SMOKE_TAGS_CSV}' python - <<'PY'
+SMOKE_EXPERIMENT_ID="$(docker compose exec -T monad-fleet-service sh -lc "DEVICE_MODEL='${DEVICE_MODEL}' DEVICE_PI='${DEVICE_PI}' RUN_PI='${RUN_PI}' SMOKE_TITLE_PREFIX='${SMOKE_TITLE_PREFIX}' SMOKE_TAGS_CSV='${SMOKE_TAGS_CSV}' python - <<'PY'
 import json
 import os
 import re
@@ -54,11 +66,15 @@ base = os.environ.get('ELAB_BASE_URL', 'https://web/api/v2').rstrip('/')
 key = os.environ.get('ELAB_API_KEY', '')
 device_model = (os.environ.get('DEVICE_MODEL') or '02:42:ac:14:00:04').lower().strip()
 device_pi = (os.environ.get('DEVICE_PI') or '').lower().strip()
+run_pi = (os.environ.get('RUN_PI') or '').lower().strip() in {'1','true','yes'}
 title_prefix = (os.environ.get('SMOKE_TITLE_PREFIX') or 'Fleet Smoke v3').strip() or 'Fleet Smoke v3'
 tags_csv = os.environ.get('SMOKE_TAGS_CSV') or 'fleet,smoke:v3,created-by:monad-fleet'
 now = datetime.now(timezone.utc)
 
-device_ids = [d for d in [device_model, device_pi] if d]
+if run_pi and device_pi:
+    device_ids = [device_pi]
+else:
+    device_ids = [device_model]
 
 policy = {
     'target_selector': {'device_ids': device_ids},
@@ -72,9 +88,10 @@ policy = {
             'name': 'WiFi BLE CSI v3',
             'failure_mode': 'FAIL_FAST',
             'commands': [
-                {'id': 'wifi-scan', 'type': 'WIFI_SCAN', 'cmd': 'echo wifi-scan-v3', 'timeout_s': 10, 'retries': 0},
-                {'id': 'ble-scan', 'type': 'BLE_SCAN', 'cmd': 'echo ble-scan-v3', 'timeout_s': 10, 'retries': 0},
-                {'id': 'csi-capture', 'type': 'CAPTURE_CSI', 'cmd': 'echo csi-capture-v3', 'timeout_s': 10, 'retries': 0},
+                # Typed commands: agents provide their own implementation (iw/bluetoothctl/tooling).
+                {'id': 'wifi-scan', 'type': 'WIFI_SCAN', 'timeout_s': 15, 'retries': 0},
+                {'id': 'ble-scan', 'type': 'BLE_SCAN', 'timeout_s': 15, 'retries': 0},
+                {'id': 'csi-capture', 'type': 'CAPTURE_CSI', 'timeout_s': 15, 'retries': 0},
             ],
         }
     ],
@@ -121,8 +138,13 @@ PY"
 )"
 echo "Created smoke experiment id=${SMOKE_EXPERIMENT_ID}"
 
-echo "[5/8] Run local model-device one-cycle report"
-docker compose exec -T model-device sh -lc "MAX_SYNC_CYCLES='${MAX_SYNC_CYCLES}' EXECUTE_POLICY='false' AGENT_ID='${DEVICE_MODEL}' CONTROL_PLANE_MODE='RF_SHARING' python -u agent_v2_client.py"
+if [[ "${RUN_PI}" == "true" ]]; then
+  echo "[5/8] Run Raspberry Pi one-cycle report (real Wi-Fi/BLE collection if tools are available)"
+  EXECUTE_POLICY="true" MAX_SYNC_CYCLES="${MAX_SYNC_CYCLES}" scripts/rpi/smoke_test_agent.sh "${PI_HOST}"
+else
+  echo "[5/8] Run local model-device one-cycle report"
+  docker compose exec -T model-device sh -lc "MAX_SYNC_CYCLES='${MAX_SYNC_CYCLES}' EXECUTE_POLICY='false' AGENT_ID='${DEVICE_MODEL}' CONTROL_PLANE_MODE='RF_SHARING' python -u agent_v2_client.py"
+fi
 
 echo "[6/8] Send hypothetical low-level board payload to HTTP ingest"
 docker compose exec -T monad-fleet-service sh -lc "python - <<'PY'
@@ -146,13 +168,22 @@ echo "[7/8] Wait for Prometheus scrape + remote_write"
 sleep 20
 
 echo "[8/8] Verify metrics in Prometheus and Mimir"
-docker compose exec -T monad-fleet-service python - <<'PY'
+docker compose exec -T monad-fleet-service sh -lc "DEVICE_ID='${DEVICE_PI}' RUN_PI='${RUN_PI}' DEVICE_MODEL='${DEVICE_MODEL}' python - <<'PY'
 import requests
+import os
+
+run_pi = (os.environ.get('RUN_PI') or '').lower().strip() in {'1','true','yes'}
+target = (os.environ.get('DEVICE_ID') or '').strip().lower()
+if not run_pi:
+    target = (os.environ.get('DEVICE_MODEL') or '').strip().lower()
 
 queries = [
-    'monad_fleet_metric_value{metric=\"wifi_ap_total\"}',
-    'monad_fleet_metric_value{metric=\"ble_adv_total\"}',
-    'monad_fleet_metric_value{metric=\"csi_frames_total\"}',
+    f'monad_fleet_metric_value{{device_id=\"{target}\",metric=\"wifi_ap_total\"}}',
+    f'monad_fleet_metric_value{{device_id=\"{target}\",metric=\"wifi_avg_rssi_dbm\"}}',
+    f'monad_fleet_metric_value{{device_id=\"{target}\",metric=\"wifi_link_quality\"}}',
+    f'monad_fleet_metric_value{{device_id=\"{target}\",metric=\"ble_adv_total\"}}',
+    f'monad_fleet_metric_value{{device_id=\"{target}\",metric=\"ble_scan_ok\"}}',
+    f'monad_fleet_metric_value{{device_id=\"{target}\",metric=\"csi_frames_total\"}}',
     'monad_fleet_metric_value{device_id=\"lowlevel-board-01\"}',
 ]
 
@@ -168,6 +199,7 @@ for q in queries:
     mres = do_query('http://mimir:9009/prometheus/api/v1/query', q)
     print('mimir     ', q, '=>', len(mres), mres[:1])
 PY
+"
 
 echo "Smoke test completed."
 echo "eLabFTW smoke experiment id: ${SMOKE_EXPERIMENT_ID}"

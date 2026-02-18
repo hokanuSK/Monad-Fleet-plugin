@@ -43,6 +43,9 @@ DO_BUILD=true         # rebuild containers first
 CLEANUP=true          # delete the created smoke experiment at the end
 RESET_STATE=false     # keep /data/state.json
 RESET_METRICS=false   # keep Prometheus/Mimir data
+RESET_GRAFANA=true    # wipe Grafana local DB (dashboards/users)
+RUN_PI=true           # run Raspberry Pi one-cycle instead of model-device
+PI_HOST=monad-rpi5.local
 ```
 
 Reset only Fleet + metrics state (without touching MySQL/eLabFTW DB):
@@ -83,6 +86,7 @@ PI_HOST=192.168.0.234 scripts/rpi/deploy_agent.sh
 PI_HOST=192.168.0.234 FLEET_MANAGER_HOST=192.168.0.70 scripts/rpi/install_systemd_service.sh
 PI_HOST=192.168.0.234 FLEET_MANAGER_HOST=192.168.0.70 scripts/rpi/smoke_test_agent.sh
 ```
+For real Wi-Fi/BLE metrics collection, ensure `EXECUTE_POLICY=true` on the Pi agent and that `iw` + `bluetoothctl` are available.
 
 Check service logs on Pi:
 ```bash
@@ -104,7 +108,9 @@ export FLEET_MANAGER_PORT=50060
 export AGENT_ID=<pi-agent-id>
 export CONTROL_PLANE_MODE=RF_SHARING
 export CONTROL_PLANE_IFACE=wlan0
+export WIFI_SCAN_IFACE=wlan0
 export MAX_SYNC_CYCLES=1
+export EXECUTE_POLICY=true
 export DATA_ROOT=./data
 export SENT_RETENTION_DAYS=14
 ~/fleet-agent-venv/bin/python -u agent_v2_client.py
