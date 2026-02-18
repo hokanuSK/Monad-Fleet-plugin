@@ -6,6 +6,14 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PI_HOST="${PI_HOST:-${1:-monad-rpi5.local}}"
 PI_USER="${PI_USER:-admin}"
 PI_DIR="${PI_DIR:-/home/${PI_USER}/monad-fleet-agent}"
+SSH_IDENTITY_FILE="${SSH_IDENTITY_FILE:-}"
+
+SSH_ARGS=()
+SCP_ARGS=()
+if [[ -n "${SSH_IDENTITY_FILE}" ]]; then
+  SSH_ARGS+=(-i "${SSH_IDENTITY_FILE}" -o IdentitiesOnly=yes)
+  SCP_ARGS+=(-i "${SSH_IDENTITY_FILE}" -o IdentitiesOnly=yes)
+fi
 
 AGENT_SRC="${ROOT_DIR}/device-sim/agent_v2_client.py"
 PROTO_SRC="${ROOT_DIR}/device-sim/proto/fleet_gateway_v2.proto"
@@ -20,21 +28,21 @@ if [[ ! -f "${PROTO_SRC}" ]]; then
 fi
 
 echo "[1/4] Preparing directory on ${PI_USER}@${PI_HOST}:${PI_DIR}"
-ssh "${PI_USER}@${PI_HOST}" "mkdir -p '${PI_DIR}'"
+ssh "${SSH_ARGS[@]}" "${PI_USER}@${PI_HOST}" "mkdir -p '${PI_DIR}'"
 
 echo "[2/4] Copying agent and proto"
-scp "${AGENT_SRC}" "${PI_USER}@${PI_HOST}:${PI_DIR}/agent_v2_client.py"
-scp "${PROTO_SRC}" "${PI_USER}@${PI_HOST}:${PI_DIR}/fleet_gateway_v2.proto"
+scp "${SCP_ARGS[@]}" "${AGENT_SRC}" "${PI_USER}@${PI_HOST}:${PI_DIR}/agent_v2_client.py"
+scp "${SCP_ARGS[@]}" "${PROTO_SRC}" "${PI_USER}@${PI_HOST}:${PI_DIR}/fleet_gateway_v2.proto"
 
 echo "[3/4] Creating venv and installing dependencies"
-ssh "${PI_USER}@${PI_HOST}" "bash -lc '
+ssh "${SSH_ARGS[@]}" "${PI_USER}@${PI_HOST}" "bash -lc '
 set -euo pipefail
 python3 -m venv \"${PI_DIR}/venv\"
 \"${PI_DIR}/venv/bin/python\" -m pip install --upgrade pip grpcio grpcio-tools protobuf
 '"
 
 echo "[4/4] Generating protobuf stubs"
-ssh "${PI_USER}@${PI_HOST}" "bash -lc '
+ssh "${SSH_ARGS[@]}" "${PI_USER}@${PI_HOST}" "bash -lc '
 set -euo pipefail
 \"${PI_DIR}/venv/bin/python\" -m grpc_tools.protoc \\
   -I\"${PI_DIR}\" \\

@@ -21,5 +21,6 @@ RUN python -m grpc_tools.protoc \
     proto/fleet_gateway_v2.proto
 
 EXPOSE 50060
+EXPOSE 9108
 
 CMD ["python", "-u", "gateway_server.py"]

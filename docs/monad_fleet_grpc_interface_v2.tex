@@ -1,0 +1,407 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[a4paper,margin=2.5cm]{geometry}
+\usepackage[hidelinks]{hyperref}
+\usepackage{enumitem}
+\usepackage{longtable}
+
+\setlist{noitemsep,topsep=4pt}
+
+\title{Monad Fleet gRPC Interface Specification (fleet.v2)\\Implementation Reference for Wi-Fi Devices}
+\author{FleetManager Project}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Purpose and Scope}
+This document specifies the currently implemented gRPC interface for device agents that communicate with Monad Fleet service.
+The goal is interoperability: any device capable of Wi-Fi networking can implement this client contract and participate in fleet experiments.
+
+This specification is implementation-based, aligned with the running code and protobuf files in this repository.
+It also documents the current device-side data persistence model (local spool with deferred upload).
+
+\section{Source of Truth}
+\begin{itemize}
+  \item Protobuf contract (v2): \texttt{monad-fleet-service/proto/fleet\_gateway\_v2.proto}
+  \item Reference client (v2): \texttt{device-sim/agent\_v2\_client.py}
+  \item Server behavior: \texttt{monad-fleet-service/gateway\_server.py}
+  \item Legacy API (v1, still served): \texttt{monad-fleet-service/proto/fleet\_gateway.proto}
+\end{itemize}
+
+\section{System Context}
+\begin{itemize}
+  \item \textbf{Agent}: software running on a measurement device (for example Raspberry Pi).
+  \item \textbf{Monad Fleet service}: gRPC server, policy resolver, and report ingestor.
+  \item \textbf{eLabFTW}: experiment registry and scheduler/event storage backend used by Monad Fleet.
+\end{itemize}
+
+Communication path:
+\begin{verbatim}
+Device Agent <-> gRPC (fleet.v2) <-> Monad Fleet <-> eLabFTW REST API
+\end{verbatim}
+
+\section{Transport and Endpoint}
+\begin{itemize}
+  \item Protocol: gRPC over HTTP/2.
+  \item Default port: \texttt{50060}.
+  \item Default deployment endpoint in this project: \texttt{<host>:50060}.
+  \item Current reference client uses \texttt{grpc.insecure\_channel()} (no TLS).
+  \item HTTP sidecar for observability and lightweight ingest: \texttt{<host>:9108}.
+  \item HTTP endpoints: \texttt{GET /metrics}, \texttt{POST /ingest/v1/metrics}, \texttt{GET /healthz}.
+\end{itemize}
+
+\textbf{Recommendation:} run on trusted LAN/VPN, or add mTLS in a future hardening step.
+
+\section{Service Definition}
+The served package is \texttt{fleet.v2} with service \texttt{FleetManager}.
+
+\begin{verbatim}
+rpc Hello(HelloRequest) returns (HelloResponse);
+rpc GetAssignment(GetAssignmentRequest) returns (GetAssignmentResponse);
+rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse);
+rpc AckPrepared(AckPreparedRequest) returns (AckPreparedResponse);
+rpc PublishReport(PublishReportRequest) returns (PublishReportResponse);
+rpc PublishEvents(PublishEventsRequest) returns (PublishEventsResponse); // optional
+\end{verbatim}
+
+\section{Operational Model}
+\subsection{Phases}
+\begin{itemize}
+  \item \textbf{PREPARE}: \texttt{Hello}, \texttt{GetAssignment}, \texttt{GetPolicy}, \texttt{AckPrepared}
+  \item \textbf{MEASURE}: local command execution on device
+  \item \textbf{REPORT}: \texttt{PublishReport} (and optional \texttt{PublishEvents})
+\end{itemize}
+
+\subsection{Default Polling}
+Server returns \texttt{recommended\_prepare\_poll\_sec} in \texttt{HelloResponse}. Agents should poll using this value.
+
+\section{Control Plane Modes}
+\begin{itemize}
+  \item \texttt{RF\_SHARING}: expected for Wi-Fi-only devices.
+  \item \texttt{DUAL\_NIC}: allowed only if device advertises Ethernet and selected control interface is Ethernet-like (\texttt{eth*}).
+\end{itemize}
+
+Implemented server behavior:
+\begin{itemize}
+  \item If agent requests \texttt{DUAL\_NIC} without Ethernet interface, server downgrades to \texttt{RF\_SHARING}.
+  \item \texttt{AckPrepared} rejects \texttt{DUAL\_NIC} when \texttt{route\_verified=false} or \texttt{control\_plane\_iface} is not Ethernet-like.
+\end{itemize}
+
+\section{RPC Semantics}
+\subsection{\texttt{Hello}}
+\textbf{Required input}: \texttt{agent.agent\_id}.
+
+\textbf{Purpose}:
+\begin{itemize}
+  \item register/refresh device presence,
+  \item update metadata (hostname, interfaces, capabilities, selected mode),
+  \item negotiate allowed control-plane mode.
+\end{itemize}
+
+\textbf{Important response fields}:
+\begin{itemize}
+  \item \texttt{allowed\_mode}
+  \item \texttt{mode\_reason}
+  \item \texttt{recommended\_prepare\_poll\_sec}
+\end{itemize}
+
+\subsection{\texttt{GetAssignment}}
+\textbf{Required input}: \texttt{agent\_id}.
+
+Response:
+\begin{itemize}
+  \item \texttt{ASSIGNED}: returns \texttt{experiment\_id}, \texttt{policy\_id}, measurement window.
+  \item \texttt{NO\_WORK}: no matching policy currently available.
+\end{itemize}
+
+\subsection{\texttt{GetPolicy}}
+\textbf{Required input}: \texttt{agent\_id}. Optional: \texttt{experiment\_id}, \texttt{last\_policy\_id}.
+
+Response:
+\begin{itemize}
+  \item \texttt{OK}: full \texttt{Policy}.
+  \item \texttt{NOT\_MODIFIED}: same revision as \texttt{last\_policy\_id}.
+  \item \texttt{NO\_POLICY}: no policy for this device or experiment mismatch.
+\end{itemize}
+
+\subsection{\texttt{AckPrepared}}
+\textbf{Required input}: \texttt{agent\_id}, \texttt{preparation\_id}, \texttt{policy\_id}.
+
+Validation behavior:
+\begin{itemize}
+  \item rejects if no policy currently assigned to device,
+  \item rejects on policy revision mismatch,
+  \item for \texttt{DUAL\_NIC}, rejects if route/interface requirements fail.
+\end{itemize}
+
+Idempotency:
+\begin{itemize}
+  \item duplicate \texttt{preparation\_id} is accepted and treated as already acknowledged.
+\end{itemize}
+
+\subsection{\texttt{PublishReport}}
+\textbf{Required input}: \texttt{agent\_id} (or \texttt{report.agent\_id}) and \texttt{report.run\_id}.
+
+Behavior:
+\begin{itemize}
+  \item converts v2 report/events to internal v1 event model,
+  \item appends/updates eLabFTW scheduler event metadata,
+  \item stores artifact references as \texttt{ARTIFACT\_UPLOADED} events.
+\end{itemize}
+
+Status:
+\begin{itemize}
+  \item \texttt{ACCEPTED}
+  \item \texttt{DUPLICATE} (same \texttt{run\_id|agent\_id|policy\_id})
+  \item \texttt{REJECTED}
+\end{itemize}
+
+\subsection{\texttt{PublishEvents}}
+\textbf{Default in this deployment}: disabled (\texttt{ALLOW\_LIVE\_EVENTS=false}).
+
+When disabled, every ack is \texttt{REJECTED} with reason \texttt{live events disabled}.
+
+\section{Idempotency and De-duplication}
+\begin{itemize}
+  \item Event dedupe key: \texttt{event\_id}
+  \item Prepare dedupe key: \texttt{preparation\_id}
+  \item Report dedupe key: \texttt{run\_id|agent\_id|policy\_id}
+\end{itemize}
+
+Server state is persisted in:
+\begin{itemize}
+  \item \texttt{/data/state.json} (container path)
+\end{itemize}
+
+\section{Device Data Storage Architecture}
+\subsection{Design goal}
+Measurement output is first persisted on the device and uploaded after the run ends.
+This avoids data loss during temporary network outages and supports delayed reporting.
+
+\subsection{Local spool layout}
+Agent persists run data under \texttt{DATA\_ROOT} (default \texttt{./data} in agent working directory):
+\begin{verbatim}
+DATA_ROOT/
+  pending/<run_id>/
+    context.json
+    events.ndjson
+    report.json
+    artifacts/
+      <command-id>-<timestamp>.log
+      run-summary.json
+  sent/<run_id>/
+    ...same structure after successful upload...
+\end{verbatim}
+
+\subsection{Upload semantics}
+\begin{itemize}
+  \item After command execution, agent builds \texttt{Report}, writes it to \texttt{pending/<run\_id>/report.json}, then tries upload.
+  \item Agent replays pending reports through \texttt{PublishReport}.
+  \item On \texttt{ACCEPTED} or \texttt{DUPLICATE}, run is moved to \texttt{sent/<run\_id>/}.
+  \item Sent runs are pruned by \texttt{SENT\_RETENTION\_DAYS} (default 14).
+\end{itemize}
+
+\subsection{Artifact references}
+Current implementation stores artifact metadata in gRPC report and eLabFTW event metadata:
+\begin{itemize}
+  \item per-command log artifacts,
+  \item \texttt{run-summary.json},
+  \item URI format currently \texttt{spool://<run-id>/artifacts/<artifact-name>}.
+\end{itemize}
+
+This is a deferred-report architecture; binary upload to central object storage can be added later without changing core run lifecycle.
+
+\section{Metrics Storage Pipeline (v3)}
+\subsection{Goal}
+Store Wi-Fi/BLE/CSI metrics in a time-series backend (Mimir) and visualize in Grafana without requiring Prometheus on devices.
+
+\subsection{Pipeline}
+\begin{verbatim}
+Device Agent / Embedded Sender -> Monad Fleet HTTP ingest (/ingest/v1/metrics)
+                                  + gRPC PublishReport summary metrics
+                               -> Monad Fleet /metrics
+                               -> Prometheus scrape + remote_write
+                               -> Mimir
+                               -> Grafana
+\end{verbatim}
+
+\subsection{Low-resource sender contract}
+Hypothetical low-level boards (no OS, low storage) can send compact JSON payloads to Monad Fleet:
+\begin{verbatim}
+POST /ingest/v1/metrics
+{
+  "source": "embedded-hypothetical",
+  "device_id": "lowlevel-board-01",
+  "metrics": [
+    {"name": "wifi_rssi_dbm", "value": -58.2},
+    {"name": "ble_adv_count", "value": 81},
+    {"name": "csi_frames_count", "value": 420}
+  ]
+}
+\end{verbatim}
+
+This allows telemetry forwarding to Mimir even when the sender cannot run Prometheus.
+
+\section{Policy Source and Selection}
+\subsection{Where policy is read from}
+Fleet policies are read from eLabFTW experiments tagged by \texttt{FLEET\_EXPERIMENT\_TAG} (default \texttt{fleet}).
+
+Default metadata keys checked in order:
+\begin{verbatim}
+fleet.policy, policy, fleet_policy, policy_json
+\end{verbatim}
+
+\subsection{Selection logic}
+\begin{itemize}
+  \item candidate experiments are filtered by fleet tag,
+  \item optional tag matching by prefix (\texttt{RESOURCE\_TAG\_PREFIX}, default \texttt{device:}),
+  \item optional \texttt{target\_selector} filtering on \texttt{device\_ids}, \texttt{device\_types}, \texttt{locations},
+  \item newest modified matching experiment wins.
+\end{itemize}
+
+\subsection{Policy revision}
+Server canonicalizes policy JSON and computes:
+\begin{verbatim}
+policy_id = sha256:<digest>
+\end{verbatim}
+
+\section{eLabFTW Mapping}
+\subsection{Device resource items}
+On first contact, server creates a resource item named \texttt{Device <agent\_id>} and updates its metadata on each heartbeat.
+
+Current implementation enforces bookable defaults for device resources:
+\begin{itemize}
+  \item \texttt{is\_bookable=1}
+  \item \texttt{book\_max\_minutes=180} (configurable)
+  \item \texttt{book\_can\_overlap=1} (configurable)
+  \item \texttt{book\_is\_cancellable=1} (configurable)
+\end{itemize}
+
+\subsection{Scheduler events}
+Run data is stored in eLabFTW scheduler events linked to device resource items.
+
+Run aggregation key:
+\begin{verbatim}
+experiment_id | policy_revision | device_id
+\end{verbatim}
+
+Event metadata includes:
+\begin{itemize}
+  \item current status (\texttt{RUNNING}, \texttt{COMPLETED}, etc.),
+  \item event history,
+  \item summary metrics (\texttt{events\_total}, \texttt{commands\_failed}, artifacts count),
+  \item last event payload.
+\end{itemize}
+
+\section{Wi-Fi Device Interoperability Guide}
+\subsection{Minimal requirements}
+\begin{itemize}
+  \item Wi-Fi connectivity to Monad Fleet service host and port.
+  \item Generated client stubs from \texttt{fleet\_gateway\_v2.proto}.
+  \item Stable \texttt{agent\_id} (recommended: lower-case MAC or UUID).
+\end{itemize}
+
+\subsection{Wi-Fi-only mode recommendation}
+For Wi-Fi-only devices, use:
+\begin{itemize}
+  \item \texttt{requested\_mode = RF\_SHARING}
+  \item \texttt{control\_plane\_iface = wlan0} (or actual Wi-Fi iface)
+\end{itemize}
+
+\subsection{Reference environment variables}
+\begin{verbatim}
+FLEET_MANAGER_HOST=<server_host>
+FLEET_MANAGER_PORT=50060
+AGENT_ID=<stable_device_id>
+CONTROL_PLANE_MODE=RF_SHARING
+CONTROL_PLANE_IFACE=wlan0
+MAX_SYNC_CYCLES=0
+EXECUTE_POLICY=false
+CAPABILITIES=csi,ble,wifi
+DATA_ROOT=./data
+SENT_RETENTION_DAYS=14
+\end{verbatim}
+
+\section{Recommended Client Loop}
+\begin{verbatim}
+1) Hello(agent descriptor)
+2) loop:
+   a) GetAssignment(agent_id)
+   b) if NO_WORK -> sleep(poll)
+   c) GetPolicy(agent_id, experiment_id, last_policy_id)
+   d) if NOT_MODIFIED -> sleep(poll)
+   e) AckPrepared(...)
+   f) execute command_groups/commands in order
+   g) PublishReport(run_id, events, artifacts, summary)
+   h) set last_policy_id on ACCEPTED or DUPLICATE
+   i) sleep(poll)
+\end{verbatim}
+
+\section{Policy JSON Example (stored in eLabFTW metadata)}
+\begin{verbatim}
+{
+  "fleet": {
+    "policy": {
+      "target_selector": {
+        "device_ids": ["2c:cf:67:80:f5:d9"]
+      },
+      "range": {
+        "from": "2026-02-17T19:41:31Z",
+        "to":   "2026-02-17T21:42:31Z"
+      },
+      "command_groups": [
+        {
+          "id": "wifi-smoke-01",
+          "name": "WiFi Smoke",
+          "failure_mode": "FAIL_FAST",
+          "commands": [
+            {
+              "id": "echo-1",
+              "type": "SHELL",
+              "cmd": "echo hello-from-device",
+              "timeout_s": 15,
+              "retries": 0
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
+\end{verbatim}
+
+\section{Implementation Notes}
+\begin{itemize}
+  \item \texttt{PublishEvents} is optional and disabled by default in RF-sharing deployments.
+  \item If \texttt{Report.events} is empty, server synthesizes one \texttt{RUN\_FINISHED} event from report summary.
+  \item \texttt{RetryPolicy.max\_attempts} in v2 Policy is derived from JSON retries and may be transformed by server normalization.
+  \item v3 smoke flow emits summary metrics (\texttt{wifi\_ap\_total}, \texttt{ble\_adv\_total}, \texttt{csi\_frames\_total}) for time-series ingestion.
+\end{itemize}
+
+\section{Versioning and Compatibility}
+\begin{itemize}
+  \item Preferred interface for new device implementations: \texttt{fleet.v2}.
+  \item Legacy \texttt{fleet.v1} remains available for backward compatibility.
+  \item New clients should treat unknown fields and enum values as forward-compatible additions.
+\end{itemize}
+
+\section{Appendix: Current Deployment Defaults}
+From current compose/runtime configuration:
+\begin{itemize}
+  \item gRPC listen: \texttt{0.0.0.0:50060}
+  \item HTTP sidecar listen: \texttt{0.0.0.0:9108}
+  \item eLabFTW API base: \texttt{https://web/api/v2}
+  \item Fleet experiment tag: \texttt{fleet}
+  \item Policy keys: \texttt{fleet.policy,policy,fleet\_policy,policy\_json}
+  \item Live events: disabled
+  \item Device spool root default: \texttt{./data}
+  \item Sent-run retention default: \texttt{14 days}
+  \item Prometheus: \texttt{http://localhost:9090}
+  \item Mimir: \texttt{http://localhost:9009}
+  \item Grafana: \texttt{http://localhost:3000} (default \texttt{admin/admin})
+\end{itemize}
+
+\end{document}

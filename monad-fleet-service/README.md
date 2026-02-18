@@ -10,6 +10,9 @@ Python gRPC service that integrates devices with eLabFTW for Wi-Fi sensing autom
 - Versioned API:
   - `fleet.v1.FleetManager` (legacy-compatible)
   - `fleet.v2.FleetManager` (standardized PREPARE/REPORT draft)
+- HTTP sidecar:
+  - `GET /metrics` (Prometheus scrape endpoint, default port `9108`)
+  - `POST /ingest/v1/metrics` (lightweight JSON ingest for constrained senders)
 - Device resource discovery/creation in eLabFTW Items/Resources.
 - Device `last_seen_at` and capabilities updates on `Hello`.
 - Policy fetch from fleet-tagged experiments (`fleet` by default), using experiment metadata from JSON editor/custom fields.
@@ -36,6 +39,9 @@ Python gRPC service that integrates devices with eLabFTW for Wi-Fi sensing autom
 - `HELLO_POLL_INTERVAL_S` (`30`)
 - `REQUIRED_MIN_AGENT_VERSION` (empty by default)
 - `ALLOW_LIVE_EVENTS` (`false`)
+- `METRICS_BIND` (`0.0.0.0`)
+- `METRICS_PORT` (`9108`)
+- `INGEST_API_TOKEN` (empty by default; set to require `x-ingest-token` on HTTP ingest)
 
 ## Build/run
 The protobuf code is generated during Docker build:

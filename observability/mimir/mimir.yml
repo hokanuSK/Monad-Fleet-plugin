@@ -1,0 +1,33 @@
+multitenancy_enabled: false
+
+server:
+  http_listen_port: 9009
+  log_level: info
+
+common:
+  storage:
+    backend: filesystem
+    filesystem:
+      dir: /data/storage
+
+blocks_storage:
+  backend: filesystem
+  filesystem:
+    dir: /data/tsdb
+
+compactor:
+  data_dir: /data/compactor
+
+ruler:
+  rule_path: /data/rules
+  enable_api: true
+
+ingester:
+  ring:
+    kvstore:
+      store: inmemory
+    replication_factor: 1
+
+store_gateway:
+  sharding_ring:
+    replication_factor: 1

@@ -2,7 +2,7 @@ name: elabftw
 
 services:
   web:
-    image: elabftw/elabimg:stable
+    image: elabftw/elabimg:custom
     restart: always
     container_name: elabftw
     depends_on:
@@ -70,34 +70,103 @@ services:
     networks:
       - elabftw-net
 
-  fleet-gateway:
-    build: ./gateway-plugin
-    container_name: fleet-gateway
+  monad-fleet-service:
+    build: ./monad-fleet-service
+    container_name: monad-fleet-service
     restart: always
     depends_on:
       - web
     environment:
       - GATEWAY_PORT=50060
       - SCAN_CIDR=172.20.0.0/16
-      - ELAB_API_BASE_URL=https://web/api/v2
+      - "ELAB_BASE_URL=https://web/api/v2"
+      - "FLEET_EXPERIMENT_TAG=fleet"
+      - "RESOURCE_TAG_PREFIX=device:"
+      - "POLICY_METADATA_KEYS=fleet.policy,policy,fleet_policy,policy_json"
+      - "ALLOW_LIVE_EVENTS=false"
+      - "EVENT_DURATION_MINUTES=180"
+      - "BOOK_MAX_MINUTES=180"
+      - "BOOK_CAN_OVERLAP=true"
+      - "BOOK_IS_CANCELLABLE=true"
+      - "DATA_DIR=/data"
+      - "METRICS_PORT=9108"
+      - "INGEST_API_TOKEN="
       # TU DOSAĎ SVOJ REST API KEY (celý reťazec z My Profile → API Keys → REST API key)
-      - ELAB_API_KEY=1-1649cbce945c8d66e44992b2a851028fa098d6fb0a9611c01fb8628cc73de13df885c270062c43f6407d1
+      - ELAB_API_KEY=apiKey4Test
+    volumes:
+      - ./data/fleet:/data
     networks:
       - elabftw-net
     ports:
       - "50060:50060"
+      - "9108:9108"
 
   model-device:
     build: ./device-sim
     container_name: model-device
     restart: always
     depends_on:
-      - fleet-gateway
+      - monad-fleet-service
     environment:
-      - DEVICE_MAC=02:42:ac:14:00:03
-      - GATEWAY_HOST=fleet-gateway
-      - GATEWAY_PORT=50060
-    mac_address: 02:42:ac:14:00:03
+      - DEVICE_MAC=02:42:ac:14:00:04
+      - DEVICE_TYPE=rpi-dualband
+      - FLEET_MANAGER_HOST=monad-fleet-service
+      - FLEET_MANAGER_PORT=50060
+      - MAX_SYNC_CYCLES=0
+      - EXECUTE_POLICY=false
+    mac_address: 02:42:ac:14:00:04
+    networks:
+      - elabftw-net
+
+  mimir:
+    image: grafana/mimir:2.12.0
+    container_name: mimir
+    restart: always
+    command:
+      - "-config.file=/etc/mimir/mimir.yml"
+      - "-target=all"
+    volumes:
+      - ./observability/mimir/mimir.yml:/etc/mimir/mimir.yml:ro
+      - mimir-data:/data
+    ports:
+      - "9009:9009"
+    networks:
+      - elabftw-net
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: prometheus
+    restart: always
+    depends_on:
+      - monad-fleet-service
+      - mimir
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - elabftw-net
+
+  grafana:
+    image: grafana/grafana-oss:11.1.4
+    container_name: grafana
+    restart: always
+    depends_on:
+      - mimir
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
     networks:
       - elabftw-net
 
@@ -106,3 +175,8 @@ networks:
     ipam:
       config:
         - subnet: 172.20.0.0/16
+
+volumes:
+  mimir-data:
+  prom-data:
+  grafana-data:

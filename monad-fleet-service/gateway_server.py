@@ -7,6 +7,7 @@ import threading
 import time
 from concurrent import futures
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ import grpc
 import requests
 import urllib3
 from google.protobuf.timestamp_pb2 import Timestamp
+from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, Gauge, generate_latest
 from urllib3.exceptions import InsecureRequestWarning
 
 import fleet_gateway_pb2
@@ -37,6 +39,47 @@ DEFAULT_POLICY_METADATA_KEYS = (
     "fleet_policy",
     "policy_json",
 )
+PROM_REGISTRY = CollectorRegistry()
+
+REPORTS_TOTAL = Counter(
+    "monad_fleet_reports_total",
+    "Total v2 reports processed by status.",
+    ["status"],
+    registry=PROM_REGISTRY,
+)
+EVENTS_TOTAL = Counter(
+    "monad_fleet_events_total",
+    "Total event messages ingested.",
+    ["event_type"],
+    registry=PROM_REGISTRY,
+)
+METRIC_UPDATES_TOTAL = Counter(
+    "monad_fleet_metric_updates_total",
+    "Total numeric metric updates accepted by source.",
+    ["source"],
+    registry=PROM_REGISTRY,
+)
+INGEST_HTTP_REQUESTS_TOTAL = Counter(
+    "monad_fleet_ingest_http_requests_total",
+    "Total HTTP ingest requests by status code.",
+    ["status_code"],
+    registry=PROM_REGISTRY,
+)
+METRIC_VALUE = Gauge(
+    "monad_fleet_metric_value",
+    "Latest numeric metric value for device+metric.",
+    ["device_id", "metric"],
+    registry=PROM_REGISTRY,
+)
+DEVICE_LAST_SEEN_UNIX = Gauge(
+    "monad_fleet_device_last_seen_unix",
+    "Last observed timestamp per device.",
+    ["device_id"],
+    registry=PROM_REGISTRY,
+)
+
+INGEST_JOURNAL_PATH: Path | None = None
+INGEST_JOURNAL_LOCK = threading.Lock()
 
 
 def utc_now() -> datetime:
@@ -89,6 +132,93 @@ def parse_tags(raw_tags: Any) -> list[str]:
 
 def stable_dumps(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def safe_metric_token(value: Any, default: str = "unknown") -> str:
+    text = normalize_string(value).lower()
+    text = re.sub(r"[^a-z0-9_]", "_", text)
+    text = re.sub(r"_+", "_", text).strip("_")
+    return text or default
+
+
+def to_float(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = normalize_string(value)
+    if not text:
+        return None
+    try:
+        return float(text)
+    except Exception:
+        return None
+
+
+def append_ingest_journal(payload: dict[str, Any]) -> None:
+    path = INGEST_JOURNAL_PATH
+    if path is None:
+        return
+    line = stable_dumps(payload) + "\n"
+    with INGEST_JOURNAL_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(line)
+
+
+def mark_device_seen(device_id: str) -> None:
+    token = normalize_device_id(device_id)
+    if not token:
+        return
+    DEVICE_LAST_SEEN_UNIX.labels(device_id=token).set(time.time())
+
+
+def ingest_numeric_metric(source: str, device_id: str, metric_name: str, value: float) -> None:
+    source_token = safe_metric_token(source, "unknown")
+    metric_token = safe_metric_token(metric_name, "metric")
+    device_token = normalize_device_id(device_id) or "unknown"
+    METRIC_UPDATES_TOTAL.labels(source=source_token).inc()
+    METRIC_VALUE.labels(device_id=device_token, metric=metric_token).set(float(value))
+
+
+def ingest_external_payload(payload: dict[str, Any]) -> int:
+    if not isinstance(payload, dict):
+        return 0
+
+    source = normalize_string(payload.get("source") or "external")
+    device_id = normalize_device_id(payload.get("device_id") or payload.get("agent_id") or "unknown")
+    mark_device_seen(device_id)
+
+    accepted = 0
+    values_map = payload.get("values")
+    if isinstance(values_map, dict):
+        for key, raw_value in values_map.items():
+            numeric = to_float(raw_value)
+            if numeric is None:
+                continue
+            ingest_numeric_metric(source, device_id, normalize_string(key), numeric)
+            accepted += 1
+
+    metrics_rows = payload.get("metrics")
+    if isinstance(metrics_rows, list):
+        for row in metrics_rows:
+            if not isinstance(row, dict):
+                continue
+            name = normalize_string(row.get("name") or row.get("metric"))
+            numeric = to_float(row.get("value"))
+            if not name or numeric is None:
+                continue
+            ingest_numeric_metric(source, device_id, name, numeric)
+            accepted += 1
+
+    append_ingest_journal(
+        {
+            "received_at": utc_now_iso(),
+            "device_id": device_id,
+            "source": source,
+            "accepted_points": accepted,
+            "payload": payload,
+        }
+    )
+    return accepted
 
 
 def read_metadata_value(metadata: Any, key: str) -> Any:
@@ -476,6 +606,99 @@ class ElabFTWClient:
 
     def patch_event_metadata(self, event_id: int, metadata: dict[str, Any]) -> dict[str, Any] | None:
         return self.request_json("PATCH", f"/event/{event_id}", json={"metadata": stable_dumps(metadata)})
+
+
+class MetricsIngestHttpHandler(BaseHTTPRequestHandler):
+    cfg: dict[str, Any] = {}
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
+        log.info("http-ingest: " + format, *args)
+
+    def _write_json(self, status_code: int, payload: dict[str, Any]) -> None:
+        body = json.dumps(payload, sort_keys=True).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _auth_failed(self) -> bool:
+        expected = normalize_string(self.cfg.get("ingest_api_token"))
+        if not expected:
+            return False
+        provided = normalize_string(self.headers.get("x-ingest-token"))
+        return provided != expected
+
+    def do_GET(self) -> None:  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        if path == "/healthz":
+            self._write_json(200, {"ok": True, "time": utc_now_iso()})
+            return
+        if path == "/metrics":
+            body = generate_latest(PROM_REGISTRY)
+            self.send_response(200)
+            self.send_header("Content-Type", CONTENT_TYPE_LATEST)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self._write_json(404, {"ok": False, "error": "not found"})
+
+    def do_POST(self) -> None:  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        if path != "/ingest/v1/metrics":
+            INGEST_HTTP_REQUESTS_TOTAL.labels(status_code="404").inc()
+            self._write_json(404, {"ok": False, "error": "not found"})
+            return
+
+        if self._auth_failed():
+            INGEST_HTTP_REQUESTS_TOTAL.labels(status_code="401").inc()
+            self._write_json(401, {"ok": False, "error": "unauthorized"})
+            return
+
+        raw_len = normalize_string(self.headers.get("Content-Length"))
+        content_len = int(raw_len) if raw_len.isdigit() else 0
+        if content_len <= 0:
+            INGEST_HTTP_REQUESTS_TOTAL.labels(status_code="400").inc()
+            self._write_json(400, {"ok": False, "error": "empty body"})
+            return
+
+        try:
+            payload = json.loads(self.rfile.read(content_len).decode("utf-8"))
+        except Exception:
+            INGEST_HTTP_REQUESTS_TOTAL.labels(status_code="400").inc()
+            self._write_json(400, {"ok": False, "error": "invalid json"})
+            return
+
+        accepted = 0
+        if isinstance(payload, dict):
+            accepted = ingest_external_payload(payload)
+        elif isinstance(payload, list):
+            for row in payload:
+                if isinstance(row, dict):
+                    accepted += ingest_external_payload(row)
+        else:
+            INGEST_HTTP_REQUESTS_TOTAL.labels(status_code="400").inc()
+            self._write_json(400, {"ok": False, "error": "payload must be object or list"})
+            return
+
+        INGEST_HTTP_REQUESTS_TOTAL.labels(status_code="202").inc()
+        self._write_json(202, {"ok": True, "accepted_points": accepted})
+
+
+def start_http_sidecar(cfg: dict[str, Any]) -> ThreadingHTTPServer:
+    port = int(cfg.get("metrics_port", 9108))
+    bind = normalize_string(cfg.get("metrics_bind", "0.0.0.0")) or "0.0.0.0"
+
+    class BoundHandler(MetricsIngestHttpHandler):
+        pass
+
+    BoundHandler.cfg = cfg
+    httpd = ThreadingHTTPServer((bind, port), BoundHandler)
+    thread = threading.Thread(target=httpd.serve_forever, name="http-sidecar", daemon=True)
+    thread.start()
+    log.info("HTTP sidecar started on http://%s:%d (metrics + ingest)", bind, port)
+    return httpd
 
 
 class FleetManagerServicer(fleet_gateway_pb2_grpc.FleetManagerServicer):
@@ -878,6 +1101,7 @@ class FleetManagerServicer(fleet_gateway_pb2_grpc.FleetManagerServicer):
 
         try:
             self._get_or_create_device_item(device_id, request)
+            mark_device_seen(device_id)
             return fleet_gateway_pb2.ServerConfig(
                 server_unix_time_ms=int(time.time() * 1000),
                 poll_interval_s=int(self._cfg["poll_interval_s"]),
@@ -948,6 +1172,14 @@ class FleetManagerServicer(fleet_gateway_pb2_grpc.FleetManagerServicer):
 
             self._state.mark_event(event_id)
             self._state.set_run_event_id(self._run_key(request), run_event_id, status)
+            mark_device_seen(device_id)
+            EVENTS_TOTAL.labels(event_type=safe_metric_token(request.type, "unknown")).inc()
+
+            for key, raw_value in dict(request.metrics).items():
+                numeric = to_float(raw_value)
+                if numeric is None:
+                    continue
+                ingest_numeric_metric("event", device_id, normalize_string(key), numeric)
 
             return fleet_gateway_pb2.Ack(ok=True, message=f"stored in event/{run_event_id}")
         except Exception as exc:
@@ -1239,6 +1471,24 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
             artifacts={"uri": normalize_string(artifact.uri)},
         )
 
+    def _record_report_metrics(self, report: fleet_gateway_v2_pb2.Report, fallback_agent_id: str) -> None:
+        device_id = normalize_device_id(report.agent_id or fallback_agent_id) or "unknown"
+        mark_device_seen(device_id)
+        REPORTS_TOTAL.labels(status=safe_metric_token(report.status, "unknown")).inc()
+
+        for key, raw_value in dict(report.summary_metrics).items():
+            numeric = to_float(raw_value)
+            if numeric is None:
+                continue
+            ingest_numeric_metric("report", device_id, normalize_string(key), numeric)
+
+        for event in report.events:
+            for key, raw_value in dict(event.metrics).items():
+                numeric = to_float(raw_value)
+                if numeric is None:
+                    continue
+                ingest_numeric_metric("report_event", device_id, normalize_string(key), numeric)
+
     def Hello(self, request, context):
         agent = request.agent
         agent_id = normalize_device_id(agent.agent_id)
@@ -1249,6 +1499,7 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
             item = self._core._get_or_create_device_item(agent_id, v1)
             self._update_v2_presence(item, agent)
             allowed_mode, reason = self._choose_allowed_mode(agent)
+            mark_device_seen(agent_id)
             return fleet_gateway_v2_pb2.HelloResponse(
                 server_version="monad-fleet-service-v2-draft",
                 server_time=timestamp_from_unix_ms(int(time.time() * 1000)),
@@ -1419,6 +1670,7 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
             )
 
         self._state.mark_report(report_key)
+        self._record_report_metrics(report, agent_id)
         return fleet_gateway_v2_pb2.PublishReportResponse(
             status=fleet_gateway_v2_pb2.PublishReportResponse.ACCEPTED,
             reason="report accepted",
@@ -1487,10 +1739,15 @@ def serve():
         "book_is_cancellable": normalize_string(os.environ.get("BOOK_IS_CANCELLABLE", "true")).lower() in {"1", "true", "yes"},
         "max_dedupe_events": int(os.environ.get("MAX_DEDUPE_EVENTS", "50000")),
         "allow_live_events": normalize_string(os.environ.get("ALLOW_LIVE_EVENTS", "false")).lower() in {"1", "true", "yes"},
+        "metrics_bind": os.environ.get("METRICS_BIND", "0.0.0.0"),
+        "metrics_port": int(os.environ.get("METRICS_PORT", "9108")),
+        "ingest_api_token": os.environ.get("INGEST_API_TOKEN", ""),
     }
 
     data_dir = Path(os.environ.get("DATA_DIR", "/data"))
     data_dir.mkdir(parents=True, exist_ok=True)
+    global INGEST_JOURNAL_PATH
+    INGEST_JOURNAL_PATH = data_dir / "ingest-metrics.ndjson"
     state = LocalState(data_dir / "state.json", max_event_ids=cfg["max_dedupe_events"])
 
     elab_client = ElabFTWClient(base_url=base_url, api_key=api_key, verify_tls=verify_tls)
@@ -1506,6 +1763,8 @@ def serve():
         v2_servicer,
         server,
     )
+
+    start_http_sidecar(cfg)
 
     port = int(os.environ.get("GATEWAY_PORT", "50060"))
     listen_addr = f"[::]:{port}"
