@@ -463,6 +463,14 @@ monad_fleet_metric_value{device_id="02:42:ac:14:00:04",metric="wifi_ap_total"}
 monad_fleet_metric_value{device_id="02:42:ac:14:00:04",metric="ble_adv_total"}
 monad_fleet_metric_value{device_id="02:42:ac:14:00:04",metric="csi_frames_total"}
 
+# Wi-Fi link quality / RSSI (real devices, Linux):
+monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="wifi_avg_rssi_dbm"}
+monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="wifi_link_quality"}
+monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="wifi_connected"}
+
+# BLE scan status (1 = scan command executed, even if 0 devices observed):
+monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="ble_scan_ok"}
+
 # Low-level sender example:
 monad_fleet_metric_value{device_id="lowlevel-board-01"}
 
