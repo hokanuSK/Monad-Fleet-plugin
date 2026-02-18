@@ -1057,11 +1057,27 @@ class FleetManagerServicer(fleet_gateway_pb2_grpc.FleetManagerServicer):
         self._state.set_run_event_id(run_key, created_event_id, status)
         return created_event_id
 
-    def _update_run_event(self, event_id: int, event: fleet_gateway_pb2.Event, status: str) -> None:
+    def _update_run_event(self, event_id: int, event: fleet_gateway_pb2.Event, status: str) -> str:
         current_event = self._elab_client.get_event(event_id) or {}
         metadata = parse_maybe_json(current_event.get("metadata"), {})
         if not isinstance(metadata, dict):
             metadata = {}
+
+        # Never downgrade status due to late artifact uploads or other out-of-order events.
+        # Prefer terminal / more severe states when merging.
+        current_status = normalize_string(metadata.get("status")).upper()
+        incoming_status = normalize_string(status).upper() or "RUNNING"
+        severity = {
+            "PLANNED": 0,
+            "RUNNING": 1,
+            "COMPLETED": 2,
+            "PARTIAL": 3,
+            "FAILED": 4,
+        }
+        if current_status in severity and incoming_status in severity:
+            merged_status = incoming_status if severity[incoming_status] >= severity[current_status] else current_status
+        else:
+            merged_status = incoming_status or current_status or "RUNNING"
 
         history = metadata.get("events")
         if not isinstance(history, list):
@@ -1083,16 +1099,17 @@ class FleetManagerServicer(fleet_gateway_pb2_grpc.FleetManagerServicer):
         if normalize_string(event.type).upper() == "ERROR":
             summary["commands_failed"] = int(summary.get("commands_failed", 0)) + 1
 
-        metadata["status"] = status
+        metadata["status"] = merged_status
         metadata["last_update"] = utc_now_iso()
         metadata["last_event"] = payload
         metadata["events"] = history
         metadata["summary"] = summary
 
-        if status in TERMINAL_STATUSES:
+        if merged_status in TERMINAL_STATUSES:
             metadata["completed_at"] = utc_now_iso()
 
         self._elab_client.patch_event_metadata(event_id, metadata)
+        return merged_status
 
     def Hello(self, request, context):
         device_id = normalize_device_id(request.device_id)
@@ -1168,10 +1185,10 @@ class FleetManagerServicer(fleet_gateway_pb2_grpc.FleetManagerServicer):
             status = self._status_from_event(request)
 
             run_event_id = self._ensure_run_event(item, request, status)
-            self._update_run_event(run_event_id, request, status)
+            merged_status = self._update_run_event(run_event_id, request, status)
 
             self._state.mark_event(event_id)
-            self._state.set_run_event_id(self._run_key(request), run_event_id, status)
+            self._state.set_run_event_id(self._run_key(request), run_event_id, merged_status)
             mark_device_seen(device_id)
             EVENTS_TOTAL.labels(event_type=safe_metric_token(request.type, "unknown")).inc()
 

@@ -31,10 +31,24 @@ docker compose exec -T model-device sh -lc \
 scripts/smoke/v3_end_to_end_smoke.sh
 ```
 This smoke test:
-- updates fleet experiment policy to include `WIFI_SCAN`, `BLE_SCAN`, `CAPTURE_CSI`,
-- runs one device cycle and publishes report,
+- resets Fleet service state + Prometheus/Mimir data (does not touch MySQL/eLabFTW user content),
+- creates a new eLabFTW smoke experiment tagged `fleet` and stores policy JSON in experiment metadata,
+- runs one device cycle and publishes a report,
 - sends hypothetical low-level board JSON to `POST /ingest/v1/metrics`,
 - verifies metrics in both Prometheus and Mimir query APIs.
+
+Useful environment toggles:
+```bash
+DO_BUILD=true         # rebuild containers first
+CLEANUP=true          # delete the created smoke experiment at the end
+RESET_STATE=false     # keep /data/state.json
+RESET_METRICS=false   # keep Prometheus/Mimir data
+```
+
+Reset only Fleet + metrics state (without touching MySQL/eLabFTW DB):
+```bash
+scripts/reset/dev_reset.sh
+```
 
 Example low-level sender payload:
 ```json
