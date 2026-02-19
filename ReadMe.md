@@ -30,12 +30,15 @@ docker compose exec -T model-device sh -lc \
 ```bash
 scripts/smoke/v3_end_to_end_smoke.sh
 ```
+Detailed runbook: `docs/monad_fleet_smoke_real_data_v3.tex`.
+
 This smoke test:
 - resets Fleet service state + Prometheus/Mimir data (does not touch MySQL/eLabFTW user content),
 - creates a new eLabFTW smoke experiment tagged `fleet` and stores policy JSON in experiment metadata,
 - runs one device cycle and publishes a report,
-- sends hypothetical low-level board JSON to `POST /ingest/v1/metrics`,
-- verifies metrics in both Prometheus and Mimir query APIs.
+- verifies metrics in Prometheus and Mimir query APIs,
+- verifies artifact uploads in the created eLabFTW experiment,
+- when `RUN_PI=true`, runs strict report validation with `scripts/rpi/verify_real_run.sh`.
 
 Useful environment toggles:
 ```bash
@@ -46,7 +49,25 @@ RESET_METRICS=false   # keep Prometheus/Mimir data
 RESET_GRAFANA=true    # wipe Grafana local DB (dashboards/users)
 RUN_PI=true           # run Raspberry Pi one-cycle instead of model-device
 PI_HOST=monad-rpi5.local
+INJECT_HYPOTHETICAL_METRICS=false  # default; keep real-only path
+REAL_DATA_ENFORCE=true             # default when RUN_PI=true
+REQUIRE_REAL_WIFI=true
+REQUIRE_REAL_BLE=true
+REQUIRE_REAL_CSI=true
+REQUIRE_CSI_FRAMES_MIN=1
 ```
+
+Strict real-data command (Pi):
+```bash
+RUN_PI=true PI_HOST=monad-rpi5.local \
+SMOKE_PROFILE=wireless_spec \
+REAL_DATA_ENFORCE=true REQUIRE_REAL_WIFI=true REQUIRE_REAL_BLE=true REQUIRE_REAL_CSI=true \
+CSI_COLLECTOR_CMD='sudo feitcsi --frequency 5180 --channel-width 80 --format HESU --output-file /tmp/csi.dat -v' \
+CSI_OUTPUT_PATH=/tmp/csi.dat \
+scripts/smoke/v3_end_to_end_smoke.sh
+```
+If control-plane route is Wi-Fi and `REQUIRE_REAL_CSI=true`, the Pi smoke helper fails fast unless `ALLOW_WIFI_DISRUPTIVE_CSI=true`.
+Using that override may interrupt SSH during capture.
 
 Reset only Fleet + metrics state (without touching MySQL/eLabFTW DB):
 ```bash
@@ -85,8 +106,10 @@ Automated from this repo host:
 PI_HOST=192.168.0.234 scripts/rpi/deploy_agent.sh
 PI_HOST=192.168.0.234 FLEET_MANAGER_HOST=192.168.0.70 scripts/rpi/install_systemd_service.sh
 PI_HOST=192.168.0.234 FLEET_MANAGER_HOST=192.168.0.70 scripts/rpi/smoke_test_agent.sh
+SMOKE_EXPERIMENT_ID=<id> scripts/rpi/verify_real_run.sh 192.168.0.234
 ```
 For real Wi-Fi/BLE metrics collection, ensure `EXECUTE_POLICY=true` on the Pi agent and that `iw` + `bluetoothctl` are available.
+For strict CSI validation, a working CSI collector command is required.
 
 Check service logs on Pi:
 ```bash

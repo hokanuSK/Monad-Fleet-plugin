@@ -9,11 +9,18 @@ PI_DIR="${PI_DIR:-/home/${PI_USER}/monad-fleet-agent}"
 SSH_IDENTITY_FILE="${SSH_IDENTITY_FILE:-}"
 USE_DEFAULT_SSH_KEY="${USE_DEFAULT_SSH_KEY:-false}"
 DEFAULT_SSH_KEY="${ROOT_DIR}/scripts/rpi/keys/monad_rpi5_ed25519"
+SSH_CONNECT_TIMEOUT_S="${SSH_CONNECT_TIMEOUT_S:-10}"
+SSH_SERVER_ALIVE_INTERVAL_S="${SSH_SERVER_ALIVE_INTERVAL_S:-5}"
+SSH_SERVER_ALIVE_COUNT_MAX="${SSH_SERVER_ALIVE_COUNT_MAX:-3}"
 if [[ -z "${SSH_IDENTITY_FILE}" && "${USE_DEFAULT_SSH_KEY}" == "true" && -f "${DEFAULT_SSH_KEY}" ]]; then
   SSH_IDENTITY_FILE="${DEFAULT_SSH_KEY}"
 fi
 
-SSH_ARGS=()
+SSH_ARGS=(
+  -o "ConnectTimeout=${SSH_CONNECT_TIMEOUT_S}"
+  -o "ServerAliveInterval=${SSH_SERVER_ALIVE_INTERVAL_S}"
+  -o "ServerAliveCountMax=${SSH_SERVER_ALIVE_COUNT_MAX}"
+)
 if [[ -n "${SSH_IDENTITY_FILE}" ]]; then
   SSH_ARGS+=(-i "${SSH_IDENTITY_FILE}" -o IdentitiesOnly=yes)
 fi
@@ -44,6 +51,13 @@ REPORT_RPC_TIMEOUT_S="${REPORT_RPC_TIMEOUT_S:-120}"
 CONTROL_RPC_TIMEOUT_S="${CONTROL_RPC_TIMEOUT_S:-30}"
 ALLOW_WIFI_DISRUPTIVE_CSI="${ALLOW_WIFI_DISRUPTIVE_CSI:-false}"
 DISABLE_CSI_CAPTURE="${DISABLE_CSI_CAPTURE:-}"
+REQUIRE_REAL_CSI="${REQUIRE_REAL_CSI:-false}"
+CSI_COLLECTOR_CMD="${CSI_COLLECTOR_CMD:-}"
+CSI_OUTPUT_PATH="${CSI_OUTPUT_PATH:-}"
+CSI_OUTPUT_GLOB="${CSI_OUTPUT_GLOB:-}"
+CSI_FRAMES_REGEX="${CSI_FRAMES_REGEX:-}"
+CSI_OUTPUT_MAX_FILES="${CSI_OUTPUT_MAX_FILES:-}"
+CSI_PARSE_MAX_BYTES="${CSI_PARSE_MAX_BYTES:-}"
 
 if [[ -z "${AGENT_ID}" ]]; then
   AGENT_ID="$(run_ssh "${PI_USER}@${PI_HOST}" "cat /sys/class/net/${CONTROL_PLANE_IFACE}/address")"
@@ -59,6 +73,17 @@ printf \"%s\" \"\${iface}\"
 '"
 )"
 
+if [[ "${REQUIRE_REAL_CSI}" == "true" && -n "${ROUTE_IFACE}" && "${ROUTE_IFACE}" == wl* ]]; then
+  if [[ "${ALLOW_WIFI_DISRUPTIVE_CSI}" == "true" ]]; then
+    echo "WARNING: REQUIRE_REAL_CSI=true while Fleet route uses ${ROUTE_IFACE}."
+    echo "CSI may disrupt SSH/control-plane on single-Wi-Fi setups."
+  else
+    echo "ERROR: REQUIRE_REAL_CSI=true but Fleet route uses ${ROUTE_IFACE}."
+    echo "Use Ethernet for control-plane, or set ALLOW_WIFI_DISRUPTIVE_CSI=true if you accept SSH drops."
+    exit 2
+  fi
+fi
+
 if [[ -z "${DISABLE_CSI_CAPTURE}" ]]; then
   if [[ "${ALLOW_WIFI_DISRUPTIVE_CSI}" != "true" ]]; then
     # Safe default: avoid disruptive CSI capture whenever current Fleet route uses Wi-Fi.
@@ -69,6 +94,11 @@ if [[ -z "${DISABLE_CSI_CAPTURE}" ]]; then
       echo "Set ALLOW_WIFI_DISRUPTIVE_CSI=true to force CSI capture while routed over Wi-Fi."
     fi
   fi
+fi
+
+if [[ "${REQUIRE_REAL_CSI}" == "true" && "${DISABLE_CSI_CAPTURE}" == "true" ]]; then
+  echo "ERROR: REQUIRE_REAL_CSI=true but DISABLE_CSI_CAPTURE=true after safety evaluation."
+  exit 2
 fi
 
 echo "Running one-cycle smoke test on ${PI_USER}@${PI_HOST}"
@@ -90,6 +120,12 @@ ARTIFACT_UPLOAD_MAX_BYTES=\"${ARTIFACT_UPLOAD_MAX_BYTES}\" \\
 REPORT_RPC_TIMEOUT_S=\"${REPORT_RPC_TIMEOUT_S}\" \\
 CONTROL_RPC_TIMEOUT_S=\"${CONTROL_RPC_TIMEOUT_S}\" \\
 DISABLE_CSI_CAPTURE=\"${DISABLE_CSI_CAPTURE}\" \\
+CSI_COLLECTOR_CMD=\"${CSI_COLLECTOR_CMD}\" \\
+CSI_OUTPUT_PATH=\"${CSI_OUTPUT_PATH}\" \\
+CSI_OUTPUT_GLOB=\"${CSI_OUTPUT_GLOB}\" \\
+CSI_FRAMES_REGEX=\"${CSI_FRAMES_REGEX}\" \\
+CSI_OUTPUT_MAX_FILES=\"${CSI_OUTPUT_MAX_FILES}\" \\
+CSI_PARSE_MAX_BYTES=\"${CSI_PARSE_MAX_BYTES}\" \\
 MAX_SYNC_CYCLES=\"${MAX_SYNC_CYCLES}\" \\
 EXECUTE_POLICY=\"${EXECUTE_POLICY}\" \\
 \"${PI_DIR}/venv/bin/python\" -u \"${PI_DIR}/agent_v2_client.py\"

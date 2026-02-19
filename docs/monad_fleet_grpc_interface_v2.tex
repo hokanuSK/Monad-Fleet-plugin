@@ -580,6 +580,7 @@ scripts/rpi/setup_ssh_key.sh
 scripts/rpi/deploy_agent.sh
 scripts/rpi/install_systemd_service.sh
 scripts/rpi/smoke_test_agent.sh
+scripts/rpi/verify_real_run.sh
 \end{verbatim}
 
 \subsection{Recommended environment}
@@ -618,6 +619,7 @@ DISABLE_CSI_CAPTURE=false
 \textbf{Note:} real Wi-Fi/BLE metrics depend on local tools (\texttt{iw}, \texttt{bluetoothctl}) and radio access.
 \textbf{CSI note:} this interface now supports an external CSI collector hook. Without configured collector command/output, CSI metrics will remain at zero and report explicit collector-status metrics.
 \textbf{Control-plane safety note:} when the current route to Fleet Manager is over Wi-Fi, active CSI collection can disrupt connectivity. The smoke tooling defaults to \texttt{DISABLE\_CSI\_CAPTURE=true} in this case unless explicitly overridden.
+\textbf{Strict CSI gate note:} if \texttt{REQUIRE\_REAL\_CSI=true} and route to Fleet Manager is over Wi-Fi, \texttt{scripts/rpi/smoke\_test\_agent.sh} now fails fast unless \texttt{ALLOW\_WIFI\_DISRUPTIVE\_CSI=true}.
 
 \subsection{CSI collector profile}
 For \texttt{CAPTURE\_CSI}, the agent now supports two modes:
@@ -722,6 +724,13 @@ CSI_PARSE_MAX_BYTES=1048576
 ALLOW_WIFI_DISRUPTIVE_CSI=true|false
 DISABLE_CSI_CAPTURE=true|false
 
+# Strict real-data gates (enabled by default when RUN_PI=true)
+REAL_DATA_ENFORCE=true|false
+REQUIRE_REAL_WIFI=true|false
+REQUIRE_REAL_BLE=true|false
+REQUIRE_REAL_CSI=true|false
+REQUIRE_CSI_FRAMES_MIN=1
+
 # Optional artifact upload controls
 ENABLE_ELAB_ARTIFACT_UPLOAD=true|false
 ARTIFACT_UPLOAD_MAX_BYTES=20971520
@@ -734,7 +743,8 @@ For Raspberry Pi runs, a higher interval is recommended (for example 5s or 10s),
 \textbf{Real-only recommendation:} run with \texttt{RUN\_PI=true} and \texttt{INJECT\_HYPOTHETICAL\_METRICS=false}.
 \textbf{Upload stability note:} sampled Wi-Fi commands persist first+last sample artifacts by default (\texttt{*\_ARTIFACT\_STRIDE=0}) to keep report size bounded; use stride \texttt{1} if full per-sample artifacts are explicitly needed.
 \textbf{Automation note:} Pi smoke scripts use SSH and are designed for key-based login (password-only SSH can block unattended runs).
-\textbf{SSH bootstrap note:} run \texttt{scripts/rpi/setup\_ssh\_key.sh} to create a dedicated keypair under \texttt{scripts/rpi/keys/}. Pi helper scripts automatically use \texttt{scripts/rpi/keys/monad\_rpi5\_ed25519} when present (unless \texttt{SSH\_IDENTITY\_FILE} is explicitly set).
+\textbf{SSH bootstrap note:} run \texttt{scripts/rpi/setup\_ssh\_key.sh} to create a dedicated keypair under \texttt{scripts/rpi/keys/}. Pi helper scripts use that key when \texttt{USE\_DEFAULT\_SSH\_KEY=true} (or when \texttt{SSH\_IDENTITY\_FILE} is explicitly set).
+\textbf{Real-data verification note:} \texttt{scripts/rpi/verify\_real\_run.sh} validates the run report for the created experiment and fails when required Wi-Fi/BLE/CSI evidence is missing.
 
 \subsection{Reference real-device smoke command}
 \begin{verbatim}
@@ -757,7 +767,19 @@ If a real CSI collector is available on Pi, append collector variables:
 CSI_COLLECTOR_CMD='sudo feitcsi --frequency 5180 --channel-width 80 --format HESU \
   --output-file /tmp/csi.dat -v' CSI_OUTPUT_PATH=/tmp/csi.dat
 \end{verbatim}
-\textbf{Important:} for Wi-Fi-only Pi control-plane, set \texttt{ALLOW\_WIFI\_DISRUPTIVE\_CSI=false} (default) unless you accept SSH drops during capture.
+\textbf{Important:} for Wi-Fi-only Pi control-plane, keep \texttt{ALLOW\_WIFI\_DISRUPTIVE\_CSI=false} (default) unless you accept SSH drops during capture.
+When strict CSI is required (\texttt{REQUIRE\_REAL\_CSI=true}), use Ethernet control-plane or explicitly set \texttt{ALLOW\_WIFI\_DISRUPTIVE\_CSI=true}.
+
+\subsection{Reference strict real-data command (Wi-Fi+BLE+CSI)}
+\begin{verbatim}
+SMOKE_PROFILE=wireless_spec RUN_PI=true INJECT_HYPOTHETICAL_METRICS=false \
+REAL_DATA_ENFORCE=true REQUIRE_REAL_WIFI=true REQUIRE_REAL_BLE=true \
+REQUIRE_REAL_CSI=true REQUIRE_CSI_FRAMES_MIN=1 \
+CSI_COLLECTOR_CMD='sudo feitcsi --frequency 5180 --channel-width 80 --format HESU \
+  --output-file /tmp/csi.dat -v' CSI_OUTPUT_PATH=/tmp/csi.dat \
+scripts/smoke/v3_end_to_end_smoke.sh
+\end{verbatim}
+This mode fails the smoke run unless Wi-Fi/BLE/CSI command evidence and artifacts are present.
 
 \subsection{Reference 2-minute full command}
 \begin{verbatim}
@@ -783,8 +805,9 @@ This repository provisions a Grafana dashboard focused on Raspberry Pi wireless 
 \end{itemize}
 
 \textbf{Panels include:} Wi-Fi RSSI, BLE advertisement count, Wi-Fi AP count, Wi-Fi connected status,
-BLE scan status, CSI frame count, artifact upload counters, command health, full metric snapshot table,
-and service counters.
+BLE scan status, artifact upload counters, command health, full metric snapshot table, and service counters.
+\textbf{Note:} CSI metrics are excluded from Prometheus/Mimir export in this deployment (\texttt{METRICS\_EXCLUDE\_PREFIXES=csi\_}).
+Use report artifacts/summary and \texttt{scripts/rpi/verify\_real\_run.sh} to validate CSI capture.
 
 \subsection{PromQL examples}
 \begin{verbatim}

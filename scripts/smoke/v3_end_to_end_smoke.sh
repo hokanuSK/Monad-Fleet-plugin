@@ -46,6 +46,32 @@ CSI_OUTPUT_GLOB="${CSI_OUTPUT_GLOB:-}"
 CSI_FRAMES_REGEX="${CSI_FRAMES_REGEX:-}"
 CSI_OUTPUT_MAX_FILES="${CSI_OUTPUT_MAX_FILES:-}"
 CSI_PARSE_MAX_BYTES="${CSI_PARSE_MAX_BYTES:-}"
+REAL_DATA_ENFORCE="${REAL_DATA_ENFORCE:-}"
+REQUIRE_REAL_WIFI="${REQUIRE_REAL_WIFI:-}"
+REQUIRE_REAL_BLE="${REQUIRE_REAL_BLE:-}"
+REQUIRE_REAL_CSI="${REQUIRE_REAL_CSI:-}"
+REQUIRE_CSI_FRAMES_MIN="${REQUIRE_CSI_FRAMES_MIN:-1}"
+
+if [[ -z "${REAL_DATA_ENFORCE}" ]]; then
+  if [[ "${RUN_PI}" == "true" ]]; then
+    REAL_DATA_ENFORCE="true"
+  else
+    REAL_DATA_ENFORCE="false"
+  fi
+fi
+
+if [[ "${REAL_DATA_ENFORCE}" == "true" ]]; then
+  INJECT_HYPOTHETICAL_METRICS="false"
+  REQUIRE_REAL_WIFI="${REQUIRE_REAL_WIFI:-true}"
+  REQUIRE_REAL_BLE="${REQUIRE_REAL_BLE:-true}"
+  REQUIRE_REAL_CSI="${REQUIRE_REAL_CSI:-true}"
+fi
+
+if [[ "${REAL_DATA_ENFORCE}" == "true" && "${REQUIRE_REAL_CSI}" == "true" && -z "${CSI_COLLECTOR_CMD}" ]]; then
+  echo "ERROR: REAL_DATA_ENFORCE=true and REQUIRE_REAL_CSI=true but CSI_COLLECTOR_CMD is empty."
+  echo "Set CSI_COLLECTOR_CMD (and optional CSI_OUTPUT_PATH/CSI_OUTPUT_GLOB/CSI_FRAMES_REGEX) for real CSI runs."
+  exit 1
+fi
 
 echo "[1/8] Restart core services"
 if [[ "${DO_BUILD}" == "true" ]]; then
@@ -151,7 +177,7 @@ if csi_parse_max_bytes:
 commands = [
     {'id': 'wifi-scan', 'type': 'WIFI_SCAN', 'timeout_s': 15, 'retries': 0},
     {'id': 'ble-scan', 'type': 'BLE_SCAN', 'timeout_s': 15, 'retries': 0},
-    {'id': 'csi-capture', 'type': 'CAPTURE_CSI', 'timeout_s': 15, 'retries': 0},
+    {'id': 'csi-capture', 'type': 'CAPTURE_CSI', 'timeout_s': 15, 'retries': 0, **({'env': csi_env} if csi_env else {})},
 ]
 group_name = 'WiFi BLE CSI v3'
 group_id = 'v3-wifi-ble-csi'
@@ -173,7 +199,7 @@ if smoke_profile == 'full' and full_duration_s > 0:
             },
         },
         {'id': 'ble-scan', 'type': 'BLE_SCAN', 'timeout_s': full_ble_timeout_s, 'retries': 0},
-        {'id': 'csi-capture', 'type': 'CAPTURE_CSI', 'timeout_s': full_csi_timeout_s, 'retries': 0},
+        {'id': 'csi-capture', 'type': 'CAPTURE_CSI', 'timeout_s': full_csi_timeout_s, 'retries': 0, **({'env': csi_env} if csi_env else {})},
     ]
     group_name = f'WiFi BLE CSI Full {full_duration_s}s/{full_interval_s}s'
     group_id = 'v3-wifi-ble-csi-full-sampled'
@@ -302,10 +328,10 @@ echo "Created smoke experiment id=${SMOKE_EXPERIMENT_ID}"
 
 if [[ "${RUN_PI}" == "true" ]]; then
   echo "[5/8] Run Raspberry Pi one-cycle report (real Wi-Fi/BLE collection if tools are available)"
-  EXECUTE_POLICY="true" MAX_SYNC_CYCLES="${MAX_SYNC_CYCLES}" ENABLE_ELAB_ARTIFACT_UPLOAD="${ENABLE_ELAB_ARTIFACT_UPLOAD}" ARTIFACT_UPLOAD_MAX_BYTES="${ARTIFACT_UPLOAD_MAX_BYTES}" REPORT_RPC_TIMEOUT_S="${REPORT_RPC_TIMEOUT_S}" CONTROL_RPC_TIMEOUT_S="${CONTROL_RPC_TIMEOUT_S}" ALLOW_WIFI_DISRUPTIVE_CSI="${ALLOW_WIFI_DISRUPTIVE_CSI}" scripts/rpi/smoke_test_agent.sh "${PI_HOST}"
+  EXECUTE_POLICY="true" MAX_SYNC_CYCLES="${MAX_SYNC_CYCLES}" ENABLE_ELAB_ARTIFACT_UPLOAD="${ENABLE_ELAB_ARTIFACT_UPLOAD}" ARTIFACT_UPLOAD_MAX_BYTES="${ARTIFACT_UPLOAD_MAX_BYTES}" REPORT_RPC_TIMEOUT_S="${REPORT_RPC_TIMEOUT_S}" CONTROL_RPC_TIMEOUT_S="${CONTROL_RPC_TIMEOUT_S}" ALLOW_WIFI_DISRUPTIVE_CSI="${ALLOW_WIFI_DISRUPTIVE_CSI}" REQUIRE_REAL_CSI="${REQUIRE_REAL_CSI}" CSI_COLLECTOR_CMD="${CSI_COLLECTOR_CMD}" CSI_OUTPUT_PATH="${CSI_OUTPUT_PATH}" CSI_OUTPUT_GLOB="${CSI_OUTPUT_GLOB}" CSI_FRAMES_REGEX="${CSI_FRAMES_REGEX}" CSI_OUTPUT_MAX_FILES="${CSI_OUTPUT_MAX_FILES}" CSI_PARSE_MAX_BYTES="${CSI_PARSE_MAX_BYTES}" scripts/rpi/smoke_test_agent.sh "${PI_HOST}"
 else
   echo "[5/8] Run local model-device one-cycle report"
-  docker compose exec -T model-device sh -lc "MAX_SYNC_CYCLES='${MAX_SYNC_CYCLES}' EXECUTE_POLICY='false' AGENT_ID='${DEVICE_MODEL}' CONTROL_PLANE_MODE='RF_SHARING' ENABLE_ELAB_ARTIFACT_UPLOAD='${ENABLE_ELAB_ARTIFACT_UPLOAD}' ARTIFACT_UPLOAD_MAX_BYTES='${ARTIFACT_UPLOAD_MAX_BYTES}' REPORT_RPC_TIMEOUT_S='${REPORT_RPC_TIMEOUT_S}' python -u agent_v2_client.py"
+  docker compose exec -T model-device sh -lc "MAX_SYNC_CYCLES='${MAX_SYNC_CYCLES}' EXECUTE_POLICY='false' AGENT_ID='${DEVICE_MODEL}' CONTROL_PLANE_MODE='RF_SHARING' ENABLE_ELAB_ARTIFACT_UPLOAD='${ENABLE_ELAB_ARTIFACT_UPLOAD}' ARTIFACT_UPLOAD_MAX_BYTES='${ARTIFACT_UPLOAD_MAX_BYTES}' REPORT_RPC_TIMEOUT_S='${REPORT_RPC_TIMEOUT_S}' CONTROL_RPC_TIMEOUT_S='${CONTROL_RPC_TIMEOUT_S}' python -u agent_v2_client.py"
 fi
 
 if [[ "${INJECT_HYPOTHETICAL_METRICS}" == "true" ]]; then
@@ -384,7 +410,7 @@ PY
 "
 
 echo "[8b/8] Verify artifact uploads in eLabFTW experiment"
-docker compose exec -T monad-fleet-service sh -lc "EXPERIMENT_ID='${SMOKE_EXPERIMENT_ID}' python - <<'PY'
+docker compose exec -T monad-fleet-service sh -lc "EXPERIMENT_ID='${SMOKE_EXPERIMENT_ID}' REAL_DATA_ENFORCE='${REAL_DATA_ENFORCE}' REQUIRE_REAL_WIFI='${REQUIRE_REAL_WIFI}' REQUIRE_REAL_BLE='${REQUIRE_REAL_BLE}' REQUIRE_REAL_CSI='${REQUIRE_REAL_CSI}' python - <<'PY'
 import os
 import requests
 import urllib3
@@ -393,6 +419,10 @@ urllib3.disable_warnings()
 base = os.environ.get('ELAB_BASE_URL', 'https://web/api/v2').rstrip('/')
 key = os.environ.get('ELAB_API_KEY', '')
 exp_id = int(os.environ.get('EXPERIMENT_ID', '0') or 0)
+real_data_enforce = (os.environ.get('REAL_DATA_ENFORCE') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+require_real_wifi = (os.environ.get('REQUIRE_REAL_WIFI') or '').strip().lower() in {'1', 'true', 'yes', 'on'} if os.environ.get('REQUIRE_REAL_WIFI') else real_data_enforce
+require_real_ble = (os.environ.get('REQUIRE_REAL_BLE') or '').strip().lower() in {'1', 'true', 'yes', 'on'} if os.environ.get('REQUIRE_REAL_BLE') else real_data_enforce
+require_real_csi = (os.environ.get('REQUIRE_REAL_CSI') or '').strip().lower() in {'1', 'true', 'yes', 'on'} if os.environ.get('REQUIRE_REAL_CSI') else real_data_enforce
 
 resp = requests.get(
     f'{base}/experiments/{exp_id}/uploads',
@@ -405,8 +435,39 @@ rows = resp.json() if isinstance(resp.json(), list) else []
 print('elab_uploads_total', len(rows))
 for row in rows[:12]:
     print('upload', row.get('id'), row.get('real_name'), row.get('comment', '')[:80])
+
+name_tokens = [(str(row.get('real_name') or '').lower(), str(row.get('comment') or '').lower()) for row in rows]
+has_wifi = any(('wifi' in name) or ('artifact=wifi' in comment) for name, comment in name_tokens)
+has_ble = any(('ble' in name) or ('artifact=ble' in comment) for name, comment in name_tokens)
+has_csi = any(('csi' in name) or ('artifact=csi' in comment) for name, comment in name_tokens)
+has_summary = any(('run-summary' in name) or ('artifact=run-summary' in comment) for name, comment in name_tokens)
+print('upload_classes', {'wifi': has_wifi, 'ble': has_ble, 'csi': has_csi, 'run_summary': has_summary})
+
+failures = []
+if require_real_wifi and not has_wifi:
+    failures.append('wifi upload artifact missing')
+if require_real_ble and not has_ble:
+    failures.append('ble upload artifact missing')
+if require_real_csi and not has_csi:
+    failures.append('csi upload artifact missing')
+if not has_summary:
+    failures.append('run-summary upload artifact missing')
+
+if failures:
+    raise SystemExit('elab_upload_check_failed: ' + '; '.join(failures))
 PY
 "
+
+if [[ "${RUN_PI}" == "true" ]]; then
+  echo "[8c/8] Verify latest Pi run report for this experiment (real-data gates)"
+  REAL_DATA_ENFORCE="${REAL_DATA_ENFORCE}" \
+  REQUIRE_REAL_WIFI="${REQUIRE_REAL_WIFI}" \
+  REQUIRE_REAL_BLE="${REQUIRE_REAL_BLE}" \
+  REQUIRE_REAL_CSI="${REQUIRE_REAL_CSI}" \
+  REQUIRE_CSI_FRAMES_MIN="${REQUIRE_CSI_FRAMES_MIN}" \
+  SMOKE_EXPERIMENT_ID="${SMOKE_EXPERIMENT_ID}" \
+  scripts/rpi/verify_real_run.sh "${PI_HOST}"
+fi
 
 echo "Smoke test completed."
 echo "eLabFTW smoke experiment id: ${SMOKE_EXPERIMENT_ID}"
