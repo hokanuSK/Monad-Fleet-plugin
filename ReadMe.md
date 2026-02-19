@@ -30,7 +30,6 @@ docker compose exec -T model-device sh -lc \
 ```bash
 scripts/smoke/v3_end_to_end_smoke.sh
 ```
-Detailed runbook: `docs/monad_fleet_smoke_real_data_v3.tex`.
 
 This smoke test:
 - resets Fleet service state + Prometheus/Mimir data (does not touch MySQL/eLabFTW user content),
