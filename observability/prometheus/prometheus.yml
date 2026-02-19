@@ -4,6 +4,8 @@ global:
 
 scrape_configs:
   - job_name: monad-fleet-service
+    scrape_interval: 1s
+    scrape_timeout: 1s
     static_configs:
       - targets:
           - monad-fleet-service:9108

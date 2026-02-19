@@ -90,6 +90,7 @@ services:
       - "BOOK_IS_CANCELLABLE=true"
       - "DATA_DIR=/data"
       - "METRICS_PORT=9108"
+      - "METRICS_EXCLUDE_PREFIXES=csi_"
       - "INGEST_API_TOKEN="
       # TU DOSAĎ SVOJ REST API KEY (celý reťazec z My Profile → API Keys → REST API key)
       - ELAB_API_KEY=apiKey4Test

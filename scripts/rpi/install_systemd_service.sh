@@ -1,15 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
 PI_HOST="${PI_HOST:-${1:-monad-rpi5.local}}"
 PI_USER="${PI_USER:-admin}"
 PI_DIR="${PI_DIR:-/home/${PI_USER}/monad-fleet-agent}"
 SSH_IDENTITY_FILE="${SSH_IDENTITY_FILE:-}"
+USE_DEFAULT_SSH_KEY="${USE_DEFAULT_SSH_KEY:-false}"
+DEFAULT_SSH_KEY="${ROOT_DIR}/scripts/rpi/keys/monad_rpi5_ed25519"
+if [[ -z "${SSH_IDENTITY_FILE}" && "${USE_DEFAULT_SSH_KEY}" == "true" && -f "${DEFAULT_SSH_KEY}" ]]; then
+  SSH_IDENTITY_FILE="${DEFAULT_SSH_KEY}"
+fi
 
 SSH_ARGS=()
 if [[ -n "${SSH_IDENTITY_FILE}" ]]; then
   SSH_ARGS+=(-i "${SSH_IDENTITY_FILE}" -o IdentitiesOnly=yes)
 fi
+
+run_ssh() {
+  if [[ ${#SSH_ARGS[@]} -gt 0 ]]; then
+    ssh "${SSH_ARGS[@]}" "$@"
+  else
+    ssh "$@"
+  fi
+}
+
 FLEET_MANAGER_HOST="${FLEET_MANAGER_HOST:-192.168.0.70}"
 FLEET_MANAGER_PORT="${FLEET_MANAGER_PORT:-50060}"
 CONTROL_PLANE_MODE="${CONTROL_PLANE_MODE:-RF_SHARING}"
@@ -23,13 +39,13 @@ SENT_RETENTION_DAYS="${SENT_RETENTION_DAYS:-14}"
 AGENT_ID="${AGENT_ID:-}"
 
 if [[ -z "${AGENT_ID}" ]]; then
-  AGENT_ID="$(ssh "${SSH_ARGS[@]}" "${PI_USER}@${PI_HOST}" "cat /sys/class/net/${CONTROL_PLANE_IFACE}/address")"
+  AGENT_ID="$(run_ssh "${PI_USER}@${PI_HOST}" "cat /sys/class/net/${CONTROL_PLANE_IFACE}/address")"
 fi
 
 echo "Installing systemd unit on ${PI_USER}@${PI_HOST}"
 echo "Using AGENT_ID=${AGENT_ID}"
 
-ssh "${SSH_ARGS[@]}" "${PI_USER}@${PI_HOST}" "bash -s" <<EOF
+run_ssh "${PI_USER}@${PI_HOST}" "bash -s" <<EOF
 set -euo pipefail
 
 PI_DIR="${PI_DIR}"

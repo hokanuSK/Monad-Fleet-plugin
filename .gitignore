@@ -7,6 +7,7 @@ output/playwright/
 
 # Local scratch / secrets
 tmp/
+scripts/rpi/keys/
 
 # Vendored upstream clones (too large for this repo; keep as separate submodule or external checkout)
 src/

@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 import logging
@@ -65,6 +66,12 @@ INGEST_HTTP_REQUESTS_TOTAL = Counter(
     ["status_code"],
     registry=PROM_REGISTRY,
 )
+ARTIFACT_UPLOADS_TOTAL = Counter(
+    "monad_fleet_artifact_uploads_total",
+    "Total artifact upload ingest attempts by status.",
+    ["status"],
+    registry=PROM_REGISTRY,
+)
 METRIC_VALUE = Gauge(
     "monad_fleet_metric_value",
     "Latest numeric metric value for device+metric.",
@@ -79,7 +86,10 @@ DEVICE_LAST_SEEN_UNIX = Gauge(
 )
 
 INGEST_JOURNAL_PATH: Path | None = None
+ARTIFACT_INGEST_JOURNAL_PATH: Path | None = None
 INGEST_JOURNAL_LOCK = threading.Lock()
+ELAB_CLIENT_FOR_HTTP: Any = None
+METRICS_EXCLUDE_PREFIXES: tuple[str, ...] = ()
 
 
 def utc_now() -> datetime:
@@ -153,8 +163,34 @@ def to_float(value: Any) -> float | None:
         return None
 
 
+def parse_experiment_numeric_id(value: Any) -> int | None:
+    text = normalize_string(value)
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    match = re.search(r"(\d+)$", text)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except Exception:
+        return None
+
+
 def append_ingest_journal(payload: dict[str, Any]) -> None:
     path = INGEST_JOURNAL_PATH
+    if path is None:
+        return
+    line = stable_dumps(payload) + "\n"
+    with INGEST_JOURNAL_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(line)
+
+
+def append_artifact_journal(payload: dict[str, Any]) -> None:
+    path = ARTIFACT_INGEST_JOURNAL_PATH
     if path is None:
         return
     line = stable_dumps(payload) + "\n"
@@ -171,9 +207,23 @@ def mark_device_seen(device_id: str) -> None:
     DEVICE_LAST_SEEN_UNIX.labels(device_id=token).set(time.time())
 
 
+def should_export_metric(metric_name: str) -> bool:
+    token = safe_metric_token(metric_name, "")
+    if not token:
+        return False
+    if not METRICS_EXCLUDE_PREFIXES:
+        return True
+    for prefix in METRICS_EXCLUDE_PREFIXES:
+        if prefix and token.startswith(prefix):
+            return False
+    return True
+
+
 def ingest_numeric_metric(source: str, device_id: str, metric_name: str, value: float) -> None:
     source_token = safe_metric_token(source, "unknown")
     metric_token = safe_metric_token(metric_name, "metric")
+    if not should_export_metric(metric_token):
+        return
     device_token = normalize_device_id(device_id) or "unknown"
     METRIC_UPDATES_TOTAL.labels(source=source_token).inc()
     METRIC_VALUE.labels(device_id=device_token, metric=metric_token).set(float(value))
@@ -607,6 +657,39 @@ class ElabFTWClient:
     def patch_event_metadata(self, event_id: int, metadata: dict[str, Any]) -> dict[str, Any] | None:
         return self.request_json("PATCH", f"/event/{event_id}", json={"metadata": stable_dumps(metadata)})
 
+    def upload_experiment_artifact(
+        self,
+        experiment_id: int,
+        filename: str,
+        content: bytes,
+        *,
+        comment: str = "",
+        mime: str = "application/octet-stream",
+    ) -> dict[str, Any]:
+        files = {
+            "file": (normalize_string(filename) or "artifact.bin", content, normalize_string(mime) or "application/octet-stream")
+        }
+        data = {}
+        if normalize_string(comment):
+            data["comment"] = normalize_string(comment)
+
+        response = self._request("POST", f"/experiments/{int(experiment_id)}/uploads", files=files, data=data)
+        location = normalize_string(response.headers.get("location"))
+        upload_id = None
+        match = re.search(r"/uploads/(\d+)$", location)
+        if match:
+            upload_id = int(match.group(1))
+
+        details: dict[str, Any] = {}
+        if upload_id is not None:
+            fetched = self.request_json("GET", f"/experiments/{int(experiment_id)}/uploads/{upload_id}")
+            if isinstance(fetched, dict):
+                details.update(fetched)
+        details["location"] = location
+        if upload_id is not None:
+            details["upload_id"] = upload_id
+        return details
+
 
 class MetricsIngestHttpHandler(BaseHTTPRequestHandler):
     cfg: dict[str, Any] = {}
@@ -629,42 +712,20 @@ class MetricsIngestHttpHandler(BaseHTTPRequestHandler):
         provided = normalize_string(self.headers.get("x-ingest-token"))
         return provided != expected
 
-    def do_GET(self) -> None:  # noqa: N802
-        path = self.path.split("?", 1)[0]
-        if path == "/healthz":
-            self._write_json(200, {"ok": True, "time": utc_now_iso()})
-            return
-        if path == "/metrics":
-            body = generate_latest(PROM_REGISTRY)
-            self.send_response(200)
-            self.send_header("Content-Type", CONTENT_TYPE_LATEST)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-        self._write_json(404, {"ok": False, "error": "not found"})
-
-    def do_POST(self) -> None:  # noqa: N802
-        path = self.path.split("?", 1)[0]
-        if path != "/ingest/v1/metrics":
-            INGEST_HTTP_REQUESTS_TOTAL.labels(status_code="404").inc()
-            self._write_json(404, {"ok": False, "error": "not found"})
-            return
-
-        if self._auth_failed():
-            INGEST_HTTP_REQUESTS_TOTAL.labels(status_code="401").inc()
-            self._write_json(401, {"ok": False, "error": "unauthorized"})
-            return
-
+    def _read_json_body(self) -> Any:
         raw_len = normalize_string(self.headers.get("Content-Length"))
         content_len = int(raw_len) if raw_len.isdigit() else 0
         if content_len <= 0:
+            raise ValueError("empty body")
+        return json.loads(self.rfile.read(content_len).decode("utf-8"))
+
+    def _handle_metrics_ingest(self) -> None:
+        try:
+            payload = self._read_json_body()
+        except ValueError:
             INGEST_HTTP_REQUESTS_TOTAL.labels(status_code="400").inc()
             self._write_json(400, {"ok": False, "error": "empty body"})
             return
-
-        try:
-            payload = json.loads(self.rfile.read(content_len).decode("utf-8"))
         except Exception:
             INGEST_HTTP_REQUESTS_TOTAL.labels(status_code="400").inc()
             self._write_json(400, {"ok": False, "error": "invalid json"})
@@ -684,6 +745,139 @@ class MetricsIngestHttpHandler(BaseHTTPRequestHandler):
 
         INGEST_HTTP_REQUESTS_TOTAL.labels(status_code="202").inc()
         self._write_json(202, {"ok": True, "accepted_points": accepted})
+
+    def _handle_artifact_ingest(self) -> None:
+        global ELAB_CLIENT_FOR_HTTP
+        if ELAB_CLIENT_FOR_HTTP is None:
+            ARTIFACT_UPLOADS_TOTAL.labels(status="rejected").inc()
+            self._write_json(503, {"ok": False, "error": "elab client unavailable"})
+            return
+
+        try:
+            payload = self._read_json_body()
+        except ValueError:
+            ARTIFACT_UPLOADS_TOTAL.labels(status="rejected").inc()
+            self._write_json(400, {"ok": False, "error": "empty body"})
+            return
+        except Exception:
+            ARTIFACT_UPLOADS_TOTAL.labels(status="rejected").inc()
+            self._write_json(400, {"ok": False, "error": "invalid json"})
+            return
+
+        if not isinstance(payload, dict):
+            ARTIFACT_UPLOADS_TOTAL.labels(status="rejected").inc()
+            self._write_json(400, {"ok": False, "error": "payload must be object"})
+            return
+
+        exp_id = parse_experiment_numeric_id(payload.get("experiment_id"))
+        run_id = normalize_string(payload.get("run_id"))
+        agent_id = normalize_device_id(payload.get("agent_id"))
+        artifact_name = normalize_string(payload.get("artifact_name"))
+        mime = normalize_string(payload.get("mime")) or "application/octet-stream"
+        comment = normalize_string(payload.get("comment"))
+        content_b64 = normalize_string(payload.get("content_b64"))
+        sha256_value = normalize_string(payload.get("sha256"))
+        size_hint = normalize_string(payload.get("size_bytes"))
+
+        if exp_id is None or not artifact_name or not content_b64:
+            ARTIFACT_UPLOADS_TOTAL.labels(status="rejected").inc()
+            self._write_json(400, {"ok": False, "error": "experiment_id, artifact_name, content_b64 are required"})
+            return
+
+        try:
+            raw = base64.b64decode(content_b64.encode("utf-8"), validate=True)
+        except Exception:
+            ARTIFACT_UPLOADS_TOTAL.labels(status="rejected").inc()
+            self._write_json(400, {"ok": False, "error": "invalid base64 content"})
+            return
+
+        max_bytes = max(1024, int(self.cfg.get("artifact_max_bytes", 20 * 1024 * 1024)))
+        if len(raw) > max_bytes:
+            ARTIFACT_UPLOADS_TOTAL.labels(status="rejected").inc()
+            self._write_json(413, {"ok": False, "error": f"artifact too large ({len(raw)} > {max_bytes})"})
+            return
+
+        if not comment:
+            comment = f"fleet-v3 run={run_id} agent={agent_id} artifact={artifact_name} sha256={sha256_value} size={size_hint}"
+
+        try:
+            uploaded = ELAB_CLIENT_FOR_HTTP.upload_experiment_artifact(
+                exp_id,
+                artifact_name,
+                raw,
+                comment=comment,
+                mime=mime,
+            )
+        except Exception as exc:
+            ARTIFACT_UPLOADS_TOTAL.labels(status="error").inc()
+            self._write_json(502, {"ok": False, "error": f"upload failed: {exc}"})
+            return
+
+        location = normalize_string(uploaded.get("location"))
+        upload_id = uploaded.get("upload_id")
+        artifact_uri = ""
+        if isinstance(upload_id, int):
+            artifact_uri = f"elabftw://experiments/{exp_id}/uploads/{upload_id}"
+        elif location:
+            artifact_uri = location
+
+        append_artifact_journal(
+            {
+                "received_at": utc_now_iso(),
+                "experiment_id": exp_id,
+                "run_id": run_id,
+                "agent_id": agent_id,
+                "artifact_name": artifact_name,
+                "sha256": sha256_value,
+                "size_bytes": len(raw),
+                "upload_id": upload_id,
+                "location": location,
+            }
+        )
+        ARTIFACT_UPLOADS_TOTAL.labels(status="uploaded").inc()
+        self._write_json(
+            202,
+            {
+                "ok": True,
+                "experiment_id": exp_id,
+                "upload_id": upload_id,
+                "artifact_uri": artifact_uri,
+                "location": location,
+            },
+        )
+
+    def do_GET(self) -> None:  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        if path == "/healthz":
+            self._write_json(200, {"ok": True, "time": utc_now_iso()})
+            return
+        if path == "/metrics":
+            body = generate_latest(PROM_REGISTRY)
+            self.send_response(200)
+            self.send_header("Content-Type", CONTENT_TYPE_LATEST)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self._write_json(404, {"ok": False, "error": "not found"})
+
+    def do_POST(self) -> None:  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        if path not in {"/ingest/v1/metrics", "/ingest/v1/artifacts"}:
+            INGEST_HTTP_REQUESTS_TOTAL.labels(status_code="404").inc()
+            self._write_json(404, {"ok": False, "error": "not found"})
+            return
+
+        if self._auth_failed():
+            INGEST_HTTP_REQUESTS_TOTAL.labels(status_code="401").inc()
+            self._write_json(401, {"ok": False, "error": "unauthorized"})
+            return
+
+        if path == "/ingest/v1/artifacts":
+            self._handle_artifact_ingest()
+            return
+
+        self._handle_metrics_ingest()
 
 
 def start_http_sidecar(cfg: dict[str, Any]) -> ThreadingHTTPServer:
@@ -1758,16 +1952,29 @@ def serve():
         "allow_live_events": normalize_string(os.environ.get("ALLOW_LIVE_EVENTS", "false")).lower() in {"1", "true", "yes"},
         "metrics_bind": os.environ.get("METRICS_BIND", "0.0.0.0"),
         "metrics_port": int(os.environ.get("METRICS_PORT", "9108")),
+        "metrics_exclude_prefixes": tuple(
+            safe_metric_token(part, "")
+            for part in os.environ.get("METRICS_EXCLUDE_PREFIXES", "").split(",")
+            if safe_metric_token(part, "")
+        ),
         "ingest_api_token": os.environ.get("INGEST_API_TOKEN", ""),
+        "artifact_max_bytes": int(os.environ.get("ARTIFACT_MAX_BYTES", str(20 * 1024 * 1024))),
     }
 
     data_dir = Path(os.environ.get("DATA_DIR", "/data"))
     data_dir.mkdir(parents=True, exist_ok=True)
-    global INGEST_JOURNAL_PATH
+    global INGEST_JOURNAL_PATH, ARTIFACT_INGEST_JOURNAL_PATH
     INGEST_JOURNAL_PATH = data_dir / "ingest-metrics.ndjson"
+    ARTIFACT_INGEST_JOURNAL_PATH = data_dir / "ingest-artifacts.ndjson"
+    global METRICS_EXCLUDE_PREFIXES
+    METRICS_EXCLUDE_PREFIXES = tuple(cfg.get("metrics_exclude_prefixes") or ())
+    if METRICS_EXCLUDE_PREFIXES:
+        log.info("Metrics export filter enabled, excluded prefixes: %s", ",".join(METRICS_EXCLUDE_PREFIXES))
     state = LocalState(data_dir / "state.json", max_event_ids=cfg["max_dedupe_events"])
 
     elab_client = ElabFTWClient(base_url=base_url, api_key=api_key, verify_tls=verify_tls)
+    global ELAB_CLIENT_FOR_HTTP
+    ELAB_CLIENT_FOR_HTTP = elab_client
     v1_servicer = FleetManagerServicer(elab_client, state, cfg)
     v2_servicer = FleetManagerServicerV2(v1_servicer, cfg)
 

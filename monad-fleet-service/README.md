@@ -13,6 +13,7 @@ Python gRPC service that integrates devices with eLabFTW for Wi-Fi sensing autom
 - HTTP sidecar:
   - `GET /metrics` (Prometheus scrape endpoint, default port `9108`)
   - `POST /ingest/v1/metrics` (lightweight JSON ingest for constrained senders)
+  - `POST /ingest/v1/artifacts` (JSON+base64 artifact ingest; uploads to eLabFTW experiment attachments)
 - Device resource discovery/creation in eLabFTW Items/Resources.
 - Device `last_seen_at` and capabilities updates on `Hello`.
 - Policy fetch from fleet-tagged experiments (`fleet` by default), using experiment metadata from JSON editor/custom fields.
@@ -42,6 +43,7 @@ Python gRPC service that integrates devices with eLabFTW for Wi-Fi sensing autom
 - `METRICS_BIND` (`0.0.0.0`)
 - `METRICS_PORT` (`9108`)
 - `INGEST_API_TOKEN` (empty by default; set to require `x-ingest-token` on HTTP ingest)
+- `ARTIFACT_MAX_BYTES` (max accepted artifact bytes for `/ingest/v1/artifacts`, default `20971520`)
 
 ## Build/run
 The protobuf code is generated during Docker build:

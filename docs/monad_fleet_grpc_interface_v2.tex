@@ -9,78 +9,104 @@
 
 \setlist{noitemsep,topsep=4pt}
 
-\title{Monad Fleet gRPC Interface Specification (fleet.v2)\\Implementation Reference for Wi-Fi Devices}
+\title{Monad Fleet Device Protocol Specification\\fleet.v2 Implementation Profile}
 \author{FleetManager Project}
 \date{\today}
 
 \begin{document}
 \maketitle
 
-\section{Purpose and Scope}
-This document specifies the currently implemented gRPC interface for device agents that communicate with Monad Fleet service.
-The goal is interoperability: any device capable of Wi-Fi networking can implement this client contract and participate in fleet experiments.
+\section{Document Purpose}
+This document is a full, implementation-first specification of the currently deployed Monad Fleet device protocol profile.
+It is intended for engineers building new device agents (Raspberry Pi or other Wi-Fi-capable devices) that must join the system and execute experiments safely.
 
-This specification is implementation-based, aligned with the running code and protobuf files in this repository.
-It also documents the current device-side data persistence model (local spool with deferred upload).
-\textbf{Important:} the gRPC contract is backend-agnostic. The current deployment maps runs into eLabFTW (items/resources + scheduler events) and forwards numeric metrics into a Prometheus-compatible pipeline, but agents do not depend on eLabFTW-specific concepts.
+The scope includes:
+\begin{itemize}
+  \item gRPC contract (\texttt{fleet.v2}),
+  \item run lifecycle and idempotency,
+  \item device-side persistence model,
+  \item metrics forwarding pipeline (Prometheus/Mimir/Grafana),
+  \item eLabFTW integration profile used by the running server.
+\end{itemize}
+
+\textbf{Implementation baseline:} February 18, 2026.
+This document describes the behavior currently implemented in this repository, not a hypothetical future API.
+
+\section{Normative Language}
+The words \textbf{MUST}, \textbf{SHOULD}, and \textbf{MAY} are used in the RFC-style sense:
+\begin{itemize}
+  \item \textbf{MUST}: required for interoperability with this profile.
+  \item \textbf{SHOULD}: strongly recommended; valid reasons may exist to deviate.
+  \item \textbf{MAY}: optional.
+\end{itemize}
 
 \section{Source of Truth}
 \begin{itemize}
-  \item Protobuf contract (v2): \texttt{monad-fleet-service/proto/fleet\_gateway\_v2.proto}
-  \item Reference client (v2): \texttt{device-sim/agent\_v2\_client.py}
-  \item Server behavior: \texttt{monad-fleet-service/gateway\_server.py}
-  \item Legacy API (v1, still served): \texttt{monad-fleet-service/proto/fleet\_gateway.proto}
+  \item v2 protobuf: \texttt{monad-fleet-service/proto/fleet\_gateway\_v2.proto}
+  \item server implementation: \texttt{monad-fleet-service/gateway\_server.py}
+  \item reference client: \texttt{device-sim/agent\_v2\_client.py}
+  \item legacy v1 protobuf (still served): \texttt{monad-fleet-service/proto/fleet\_gateway.proto}
 \end{itemize}
 
-\section{System Context}
+\section{System Roles and Boundaries}
+\subsection{Roles}
 \begin{itemize}
-  \item \textbf{Agent}: software running on a measurement device (for example Raspberry Pi).
-  \item \textbf{Monad Fleet service}: gRPC server, policy resolver, and report ingestor.
-  \item \textbf{eLabFTW}: experiment registry and scheduler/event storage backend used by Monad Fleet.
-  \item \textbf{Metrics backend (optional)}: Prometheus scrape + remote\_write into Mimir and visualization in Grafana.
+  \item \textbf{Agent}: software on measurement device; executes policy and reports run results.
+  \item \textbf{Monad Fleet}: orchestration service; resolves assignments, serves policy, ingests reports.
+  \item \textbf{eLabFTW}: experiment registry and scheduler/event storage backend.
+  \item \textbf{Metrics stack (optional)}: Prometheus + Mimir + Grafana.
 \end{itemize}
 
-Communication path:
+\subsection{Boundary contract}
+Agents communicate with Monad Fleet only.
+Agents do \textbf{not} need eLabFTW-specific knowledge.
+Backend routing (eLabFTW, time-series, object storage) is a server deployment concern.
+
+\section{Architecture Overview}
 \begin{verbatim}
-Device Agent <-> gRPC (fleet.v2) <-> Monad Fleet <-> eLabFTW REST API
+Device Agent <-> gRPC fleet.v2 <-> Monad Fleet <-> eLabFTW API
+          \-> optional HTTP ingest (/ingest/v1/metrics, /ingest/v1/artifacts)
+                                           -> /metrics -> Prometheus -> Mimir -> Grafana
 \end{verbatim}
 
-\section{Transport and Endpoint}
+\section{Transport and Endpoints}
 \begin{itemize}
-  \item Protocol: gRPC over HTTP/2.
-  \item Default port: \texttt{50060}.
-  \item Default deployment endpoint in this project: \texttt{<host>:50060}.
-  \item Current reference client uses \texttt{grpc.insecure\_channel()} (no TLS).
-  \item HTTP sidecar for observability and lightweight ingest: \texttt{<host>:9108}.
-  \item HTTP endpoints: \texttt{GET /metrics}, \texttt{POST /ingest/v1/metrics}, \texttt{GET /healthz}.
+  \item gRPC transport: HTTP/2
+  \item gRPC default port: \texttt{50060}
+  \item reference client transport today: \texttt{grpc.insecure\_channel()} (no TLS)
+  \item HTTP sidecar port: \texttt{9108}
+  \item HTTP endpoints:
+    \begin{itemize}
+      \item \texttt{GET /healthz}
+      \item \texttt{GET /metrics}
+      \item \texttt{POST /ingest/v1/metrics}
+      \item \texttt{POST /ingest/v1/artifacts}
+    \end{itemize}
 \end{itemize}
 
-\textbf{Recommendation:} run on trusted LAN/VPN, or add mTLS in a future hardening step.
+\textbf{Security note:} run on trusted LAN/VPN for this profile, or add mTLS in a hardened profile.
 
-\section{Contract Principles}
-\subsection{Backend independence}
-Agents only talk to a Fleet Manager endpoint over gRPC (and optionally HTTP for lightweight metrics ingest).
-How the Fleet Manager persists and routes data (eLabFTW, files, object storage, time-series databases) is a deployment concern and must not leak into the agent contract.
+\section{Protocol Design Principles}
+\subsection{Backend agnostic send operation}
+The agent send operation is \texttt{PublishReport} (plus optional \texttt{PublishEvents}).
+Reports carry:
+\begin{itemize}
+  \item structured events,
+  \item artifact references,
+  \item summary metrics.
+\end{itemize}
+
+This keeps the device contract generic while allowing server-side forwarding to different destinations.
 
 \subsection{Forward compatibility}
 \begin{itemize}
-  \item Agents must ignore unknown fields and enum values.
-  \item Servers must accept requests that omit optional fields.
-  \item String-to-string maps (\texttt{Event.metrics}, \texttt{Report.summary\_metrics}) are treated as open extension points.
+  \item Agents \textbf{MUST} ignore unknown fields and enum values.
+  \item Servers \textbf{MUST} tolerate omitted optional fields.
+  \item \texttt{Event.metrics} and \texttt{Report.summary\_metrics} are open extension maps.
 \end{itemize}
-
-\subsection{Data routing and ``send anywhere''}
-The ``send data'' operation in this protocol is \texttt{PublishReport} (and optionally \texttt{PublishEvents}).
-Reports carry:
-\begin{itemize}
-  \item structured events (typed, timestamped),
-  \item artifact references (URIs/keys, checksums),
-  \item summary metrics (key/value).
-\end{itemize}
-This is intentionally generic: devices always send to Fleet Manager, while Fleet Manager can be configured to forward data to any storage or observability system (e.g., Prometheus remote\_write to Mimir, or a future OpenTelemetry exporter).
 
 \section{Service Definition}
-The served package is \texttt{fleet.v2} with service \texttt{FleetManager}.
+Served package: \texttt{fleet.v2}. Service: \texttt{FleetManager}.
 
 \begin{verbatim}
 rpc Hello(HelloRequest) returns (HelloResponse);
@@ -91,95 +117,111 @@ rpc PublishReport(PublishReportRequest) returns (PublishReportResponse);
 rpc PublishEvents(PublishEventsRequest) returns (PublishEventsResponse); // optional
 \end{verbatim}
 
-\section{Operational Model}
-\subsection{Phases}
+\section{Run Lifecycle}
+\subsection{Operational phases}
 \begin{itemize}
   \item \textbf{PREPARE}: \texttt{Hello}, \texttt{GetAssignment}, \texttt{GetPolicy}, \texttt{AckPrepared}
-  \item \textbf{MEASURE}: local command execution on device
-  \item \textbf{REPORT}: \texttt{PublishReport} (and optional \texttt{PublishEvents})
+  \item \textbf{MEASURE}: local policy command execution on agent
+  \item \textbf{REPORT}: \texttt{PublishReport}; optional \texttt{PublishEvents}
 \end{itemize}
 
-\subsection{Default Polling}
-Server returns \texttt{recommended\_prepare\_poll\_sec} in \texttt{HelloResponse}. Agents should poll using this value.
+\subsection{Recommended loop}
+\begin{verbatim}
+1) Hello(agent descriptor)
+2) repeat:
+   a) GetAssignment(agent_id)
+   b) if NO_WORK: sleep(recommended_prepare_poll_sec)
+   c) GetPolicy(agent_id, experiment_id, last_policy_id)
+   d) if NOT_MODIFIED: sleep(recommended_prepare_poll_sec)
+   e) AckPrepared(...)
+   f) execute command_groups
+   g) PublishReport(run_id, events, artifacts, summary)
+   h) on ACCEPTED or DUPLICATE: cache policy_id and continue
+\end{verbatim}
 
-\section{Control Plane Modes}
+\section{Control Plane Mode Semantics}
+\subsection{Modes}
 \begin{itemize}
   \item \texttt{RF\_SHARING}: expected for Wi-Fi-only devices.
-  \item \texttt{DUAL\_NIC}: allowed only if device advertises Ethernet, and if \texttt{control\_plane\_iface} is provided it must be Ethernet-like (\texttt{eth*}).
+  \item \texttt{DUAL\_NIC}: allowed only when Ethernet path is available and validated.
 \end{itemize}
 
-Implemented server behavior:
+\subsection{Current server behavior}
 \begin{itemize}
-  \item If agent requests \texttt{DUAL\_NIC} without Ethernet interface, server downgrades to \texttt{RF\_SHARING}.
-  \item \texttt{AckPrepared} rejects \texttt{DUAL\_NIC} when \texttt{route\_verified=false} or when \texttt{control\_plane\_iface} is provided and is not Ethernet-like.
+  \item Requesting \texttt{DUAL\_NIC} without Ethernet advertisement is downgraded to \texttt{RF\_SHARING}.
+  \item \texttt{AckPrepared} rejects \texttt{DUAL\_NIC} when:
+    \begin{itemize}
+      \item \texttt{route\_verified=false}, or
+      \item \texttt{control\_plane\_iface} is provided but is not Ethernet-like (\texttt{eth*}).
+    \end{itemize}
 \end{itemize}
 
 \section{RPC Semantics}
 \subsection{\texttt{Hello}}
-\textbf{Required input}: \texttt{agent.agent\_id}.
+\textbf{Required:} \texttt{agent.agent\_id}
 
-\textbf{Purpose}:
+\textbf{Purpose:}
 \begin{itemize}
   \item register/refresh device presence,
-  \item update metadata (hostname, interfaces, capabilities, selected mode),
-  \item negotiate allowed control-plane mode.
+  \item update descriptor metadata,
+  \item negotiate effective control-plane mode.
 \end{itemize}
 
-\textbf{Important response fields}:
+\textbf{Important response fields:}
 \begin{itemize}
-  \item \texttt{server\_version} (informational)
-  \item \texttt{server\_time} (informational)
-  \item \texttt{allowed\_mode}
-  \item \texttt{mode\_reason}
+  \item \texttt{allowed\_mode}, \texttt{mode\_reason}
   \item \texttt{recommended\_prepare\_poll\_sec}
-  \item \texttt{max\_batch\_size} (informational; reserved for future batching)
+  \item \texttt{server\_version}, \texttt{server\_time}, \texttt{max\_batch\_size}
 \end{itemize}
 
 \subsection{\texttt{GetAssignment}}
-\textbf{Required input}: \texttt{agent\_id}.
+\textbf{Required:} \texttt{agent\_id}
 
-Response:
+\textbf{Responses:}
 \begin{itemize}
   \item \texttt{ASSIGNED}: returns \texttt{experiment\_id}, \texttt{policy\_id}, measurement window.
-  \item \texttt{NO\_WORK}: no matching policy currently available.
+  \item \texttt{NO\_WORK}: no currently selected policy for this agent.
 \end{itemize}
 
 \subsection{\texttt{GetPolicy}}
-\textbf{Required input}: \texttt{agent\_id}. Optional: \texttt{experiment\_id}, \texttt{last\_policy\_id}.
+\textbf{Required:} \texttt{agent\_id}. Optional: \texttt{experiment\_id}, \texttt{last\_policy\_id}.
 
-Response:
+\textbf{Responses:}
 \begin{itemize}
   \item \texttt{OK}: full \texttt{Policy}.
-  \item \texttt{NOT\_MODIFIED}: same revision as \texttt{last\_policy\_id}.
-  \item \texttt{NO\_POLICY}: no policy for this device or experiment mismatch.
+  \item \texttt{NOT\_MODIFIED}: \texttt{last\_policy\_id} still current.
+  \item \texttt{NO\_POLICY}: no policy found or mismatch.
 \end{itemize}
 
 \subsection{\texttt{AckPrepared}}
-\textbf{Required input}: \texttt{agent\_id}, \texttt{preparation\_id}, \texttt{policy\_id}.
+\textbf{Required:} \texttt{agent\_id}, \texttt{preparation\_id}, \texttt{policy\_id}
 
-Validation behavior:
+\textbf{Validation:}
 \begin{itemize}
-  \item rejects if no policy currently assigned to device,
-  \item rejects on policy revision mismatch,
-  \item for \texttt{DUAL\_NIC}, rejects if route/interface requirements fail.
+  \item reject if no assigned policy,
+  \item reject on policy revision mismatch,
+  \item reject invalid \texttt{DUAL\_NIC} checks.
 \end{itemize}
 
-Idempotency:
-\begin{itemize}
-  \item duplicate \texttt{preparation\_id} is accepted and treated as already acknowledged.
-\end{itemize}
+\textbf{Idempotency:}
+duplicate \texttt{preparation\_id} is accepted and treated as already acknowledged.
 
 \subsection{\texttt{PublishReport}}
-\textbf{Required input}: \texttt{agent\_id} (or \texttt{report.agent\_id}) and \texttt{report.run\_id}.
-
-Behavior:
+\textbf{Required:}
 \begin{itemize}
-  \item converts v2 report/events to internal v1 event model,
-  \item appends/updates eLabFTW scheduler event metadata,
-  \item stores artifact references as \texttt{ARTIFACT\_UPLOADED} events.
+  \item \texttt{report.run\_id}
+  \item agent identity from \texttt{agent\_id} or \texttt{report.agent\_id}
 \end{itemize}
 
-Status:
+\textbf{Current server behavior:}
+\begin{itemize}
+  \item map v2 report/events into internal event model,
+  \item write run state to eLabFTW scheduler event metadata,
+  \item process artifact references as \texttt{ARTIFACT\_UPLOADED} events,
+  \item export numeric summary/event metrics to \texttt{monad\_fleet\_metric\_value}.
+\end{itemize}
+
+\textbf{Status values:}
 \begin{itemize}
   \item \texttt{ACCEPTED}
   \item \texttt{DUPLICATE} (same \texttt{run\_id|agent\_id|policy\_id})
@@ -187,439 +229,163 @@ Status:
 \end{itemize}
 
 \subsection{\texttt{PublishEvents}}
-\textbf{Default in this deployment}: disabled (\texttt{ALLOW\_LIVE\_EVENTS=false}).
-
-When disabled, every ack is \texttt{REJECTED} with reason \texttt{live events disabled}.
-
-\section{Data Model Reference}
-\subsection{Common conventions}
-\begin{itemize}
-  \item All timestamps are UTC (\texttt{google.protobuf.Timestamp} on the wire; ISO-8601 with \texttt{Z} in JSON policy).
-  \item All IDs are opaque strings. Recommended formats:
-    \begin{itemize}
-      \item \texttt{agent\_id}: stable MAC (lower-case) or UUID.
-      \item \texttt{run\_id}: UUIDv4.
-      \item \texttt{event\_id}: UUIDv4 or deterministic hash; should be unique for de-duplication (server can synthesize if omitted).
-      \item \texttt{policy\_id}: immutable revision identifier (server computes \texttt{sha256:<digest>}).
-    \end{itemize}
-  \item Numeric metrics are transported as strings in maps; servers parse float. Non-numeric values are ignored for time-series export.
-  \item \texttt{Report.summary\_metrics} and \texttt{Event.metrics} are open extension points: devices may add keys without breaking compatibility.
-\end{itemize}
-
-\subsection{\texttt{AgentDescriptor}}
-\begin{longtable}{p{4.2cm}p{1.6cm}p{9.2cm}}
-\textbf{Field} & \textbf{Req} & \textbf{Semantics} \\
-\hline
-\endhead
-\texttt{agent\_id} & yes & Stable unique identifier of the device/agent. Recommended: lower-case MAC address (\texttt{aa:bb:cc:dd:ee:ff}) or UUID. \\
-\texttt{hostname} & no & Human-friendly identifier for debugging and inventory. \\
-\texttt{agent\_version} & no & Agent software version string (semantic version recommended). \\
-\texttt{interfaces} & no & List of known network interfaces; used for control-plane mode negotiation and auditing. \\
-\texttt{requested\_mode} & no & Requested control-plane isolation mode (\texttt{RF\_SHARING} vs \texttt{DUAL\_NIC}). \\
-\texttt{control\_plane\_iface} & no & Interface name to be used for control-plane traffic (\texttt{wlan0}, \texttt{eth0}). \\
-\texttt{fleet\_manager\_target} & no & Fleet Manager host:port that agent uses for route verification (informational). \\
-\texttt{capabilities} & no & Free-form capability tokens (e.g., \texttt{csi}, \texttt{ble}, \texttt{wifi}). \\
-\hline
-\end{longtable}
-
-\subsection{\texttt{Policy}}
-\begin{longtable}{p{4.2cm}p{1.6cm}p{9.2cm}}
-\textbf{Field} & \textbf{Req} & \textbf{Semantics} \\
-\hline
-\endhead
-\texttt{experiment\_id} & yes & Global experiment identifier (in current eLabFTW profile: \texttt{elabftw:<id>}). \\
-\texttt{policy\_id} & yes & Immutable revision identifier of the plan. Agents must treat it as opaque and use it for caching and idempotency keys. \\
-\texttt{issued\_at} & no & Time when Fleet Manager issued the policy response. \\
-\texttt{measurement\_from/to} & no & Overall time window (agent may refuse to execute outside the window). \\
-\texttt{command\_groups} & yes & Ordered groups; each group contains ordered commands. \\
-\texttt{allowed\_mode} & no & Effective allowed mode after server authorization. \\
-\texttt{control\_plane\_iface} & no & Effective control-plane interface when \texttt{allowed\_mode=DUAL\_NIC}. \\
-\hline
-\end{longtable}
-
-\subsection{\texttt{CommandGroup} and \texttt{Command}}
-\begin{longtable}{p{4.2cm}p{1.6cm}p{9.2cm}}
-\textbf{Field} & \textbf{Req} & \textbf{Semantics} \\
-\hline
-\endhead
-\texttt{CommandGroup.id} & yes & Stable identifier within the policy (used for correlation in events). \\
-\texttt{CommandGroup.name} & no & Human-friendly name. \\
-\texttt{CommandGroup.from/to} & no & Optional per-group time window; groups outside the window may be skipped. \\
-\texttt{CommandGroup.failure\_mode} & no & \texttt{FAIL\_FAST} stops the group after first error; \texttt{CONTINUE\_ON\_ERROR} continues. \\
-\texttt{CommandGroup.commands} & yes & Ordered commands to execute within this group. \\
-\texttt{Command.id} & yes & Stable identifier within the group (used for correlation in events). \\
-\texttt{Command.type} & yes & One of \texttt{SHELL}, \texttt{WIFI\_SCAN}, \texttt{BLE\_SCAN}, \texttt{CAPTURE\_CSI}. \\
-\texttt{Command.cmdline} & no & Shell command line for \texttt{SHELL}. For typed commands, this is optional and may be omitted; agents may treat it as an override/hint. \\
-\texttt{Command.argv} & no & Optional argv array; future-proof alternative to \texttt{cmdline}. \\
-\texttt{Command.env} & no & Environment variables for execution. \\
-\texttt{Command.timeout\_ms} & no & Per-command timeout in milliseconds. \\
-\texttt{Command.retry} & no & Retry policy (\texttt{max\_attempts}, \texttt{backoff\_ms}). \\
-\texttt{Command.expected\_artifacts} & no & Optional artifact expectations (naming rules, globs, mime). \\
-\hline
-\end{longtable}
-
-\subsection{\texttt{RetryPolicy}}
-\begin{longtable}{p{4.2cm}p{1.6cm}p{9.2cm}}
-\textbf{Field} & \textbf{Req} & \textbf{Semantics} \\
-\hline
-\endhead
-\texttt{max\_attempts} & no & Total attempts including the first attempt (must be $\ge$ 1 to retry). \\
-\texttt{backoff\_ms} & no & Milliseconds to wait between attempts (simple fixed backoff). \\
-\hline
-\end{longtable}
-
-\subsection{\texttt{ArtifactSpec}}
-\begin{longtable}{p{4.2cm}p{1.6cm}p{9.2cm}}
-\textbf{Field} & \textbf{Req} & \textbf{Semantics} \\
-\hline
-\endhead
-\texttt{name} & yes & Artifact label (used for correlation and naming conventions). \\
-\texttt{path\_or\_glob} & no & Expected path or glob pattern on device (implementation-specific). \\
-\texttt{mime} & no & MIME type hint (informational). \\
-\hline
-\end{longtable}
-
-\subsection{\texttt{Report} and \texttt{Event}}
-\begin{longtable}{p{4.2cm}p{1.6cm}p{9.2cm}}
-\textbf{Field} & \textbf{Req} & \textbf{Semantics} \\
-\hline
-\endhead
-\texttt{Report.run\_id} & yes & Unique identifier of one run of one policy on one agent. Used for de-duplication. \\
-\texttt{Report.experiment\_id} & yes & Experiment identifier for this run. Used for storage/mapping and debugging. \\
-\texttt{Report.policy\_id} & yes & Policy revision identifier for this run. Used for idempotency and mapping. \\
-\texttt{Report.agent\_id} & no & Agent identifier (may be provided via request \texttt{agent\_id} field instead). \\
-\texttt{Report.started\_at} & no & Run start time (informational). \\
-\texttt{Report.finished\_at} & no & Run finish time (informational; used for summary synthesis if \texttt{events} is empty). \\
-\texttt{Report.status} & yes & Human-readable final status (\texttt{OK}/\texttt{FAILED} in current reference agent). \\
-\texttt{Report.events} & no & Structured event list. If empty, server may synthesize a summary event. \\
-\texttt{Report.artifacts} & no & Artifact references only; blobs are not transported over gRPC. \\
-\texttt{Report.summary\_metrics} & no & Free-form summary metrics (strings). Numeric keys are exported to time-series backend. \\
-\texttt{Event.event\_id} & no & Unique event id for de-duplication. Recommended to set; server will synthesize if missing. \\
-\texttt{Event.run\_id} & no & Run identifier (server uses report/run fallbacks if missing). \\
-\texttt{Event.experiment\_id} & no & Experiment identifier (server uses report fallbacks if missing). \\
-\texttt{Event.policy\_id} & no & Policy revision identifier (server uses report fallbacks if missing). \\
-\texttt{Event.agent\_id} & no & Agent identifier (server uses request/report fallbacks if missing). \\
-\texttt{Event.timestamp} & no & Event time (used for ordering and synthetic ids). \\
-\texttt{Event.type} & yes & Structured event type (run start/finish, command start/finish, artifact upload, error). \\
-\texttt{Event.group\_id} & no & Command group correlation id. \\
-\texttt{Event.command\_id} & no & Command correlation id. \\
-\texttt{Event.exit\_code} & no & Exit code for command events (0 for success). \\
-\texttt{Event.duration\_ms} & no & Duration for command events. \\
-\texttt{Event.message} & no & Short message (used as stdout tail in v1 mapping). \\
-\texttt{Event.metrics} & no & Free-form metrics for this event. Numeric values may be exported to time-series backend. \\
-\hline
-\end{longtable}
-
-\subsection{\texttt{ArtifactRef}}
-\begin{longtable}{p{4.2cm}p{1.6cm}p{9.2cm}}
-\textbf{Field} & \textbf{Req} & \textbf{Semantics} \\
-\hline
-\endhead
-\texttt{name} & yes & Human-friendly artifact name (also used as command id in the eLabFTW mapping). \\
-\texttt{uri} & yes & Reference to the artifact location (e.g., \texttt{spool://...}, \texttt{s3://...}, \texttt{https://...}). \\
-\texttt{size\_bytes} & no & Size for auditing. \\
-\texttt{sha256} & no & SHA-256 checksum for integrity checking. \\
-\hline
-\end{longtable}
+In this deployment profile, live events are disabled (\texttt{ALLOW\_LIVE\_EVENTS=false}).
+When disabled, each ack is \texttt{REJECTED} with reason \texttt{live events disabled}.
 
 \section{Idempotency and De-duplication}
 \begin{itemize}
-  \item Event dedupe key: \texttt{event\_id}
-  \item Prepare dedupe key: \texttt{preparation\_id}
-  \item Report dedupe key: \texttt{run\_id|agent\_id|policy\_id}
+  \item prepare dedupe key: \texttt{preparation\_id}
+  \item event dedupe key: \texttt{event\_id}
+  \item report dedupe key: \texttt{run\_id|agent\_id|policy\_id}
 \end{itemize}
 
-Server state is persisted in:
+Server runtime state is persisted at:
 \begin{itemize}
   \item \texttt{/data/state.json} (container path)
 \end{itemize}
 
-\section{Device Data Storage Architecture}
-\subsection{Design goal}
-Measurement output is first persisted on the device and uploaded after the run ends.
-This avoids data loss during temporary network outages and supports delayed reporting.
-
-\subsection{Local spool layout}
-Agent persists run data under \texttt{DATA\_ROOT} (default \texttt{./data} in agent working directory):
-\begin{verbatim}
-DATA_ROOT/
-  pending/<run_id>/
-    context.json
-    events.ndjson
-    report.json
-    artifacts/
-      <command-id>-<timestamp>.log
-      run-summary.json
-  sent/<run_id>/
-    ...same structure after successful upload...
-\end{verbatim}
-
-\subsection{Upload semantics}
+\section{Data Model Reference}
+\subsection{Common conventions}
 \begin{itemize}
-  \item After command execution, agent builds \texttt{Report}, writes it to \texttt{pending/<run\_id>/report.json}, then tries upload.
-  \item Agent replays pending reports through \texttt{PublishReport}.
-  \item On \texttt{ACCEPTED} or \texttt{DUPLICATE}, run is moved to \texttt{sent/<run\_id>/}.
-  \item Sent runs are pruned by \texttt{SENT\_RETENTION\_DAYS} (default 14).
-\end{itemize}
-
-\subsection{Artifact references}
-Current implementation stores artifact metadata in gRPC report and eLabFTW event metadata:
-\begin{itemize}
-  \item per-command log artifacts,
-  \item \texttt{run-summary.json},
-  \item URI format currently \texttt{spool://<run-id>/artifacts/<artifact-name>}.
-\end{itemize}
-
-This is a deferred-report architecture; binary upload to central object storage can be added later without changing core run lifecycle.
-
-\section{Metrics Storage Pipeline (v3)}
-\subsection{Goal}
-Store Wi-Fi/BLE/CSI metrics in a time-series backend (Mimir) and visualize in Grafana without requiring Prometheus on devices.
-
-\subsection{Pipeline}
-\begin{verbatim}
-Device Agent / Embedded Sender -> Monad Fleet HTTP ingest (/ingest/v1/metrics)
-                                  + gRPC PublishReport summary metrics
-                               -> Monad Fleet /metrics
-                               -> Prometheus scrape + remote_write
-                               -> Mimir
-                               -> Grafana
-\end{verbatim}
-
-\subsection{Low-resource sender contract}
-Hypothetical low-level boards (no OS, low storage) can send compact JSON payloads to Monad Fleet:
-\begin{verbatim}
-POST /ingest/v1/metrics
-{
-  "source": "embedded-hypothetical",
-  "device_id": "lowlevel-board-01",
-  "metrics": [
-    {"name": "wifi_rssi_dbm", "value": -58.2},
-    {"name": "ble_adv_count", "value": 81},
-    {"name": "csi_frames_count", "value": 420}
-  ]
-}
-\end{verbatim}
-
-This allows telemetry forwarding to Mimir even when the sender cannot run Prometheus.
-
-\subsection{CSI/BLE/Wi-Fi: metrics vs. raw artifacts}
-Grafana Mimir is a time-series database for \textbf{numeric} samples, not for raw binary captures.
-Therefore:
-\begin{itemize}
-  \item store raw CSI / BLE traces / PCAPs as \textbf{artifacts} on the device (or in object storage) and report only \textbf{references} via \texttt{ArtifactRef.uri},
-  \item compute derived numeric metrics (counts, RSSI/SNR summaries, percentiles, error rates) and send them via \texttt{Event.metrics} and/or \texttt{Report.summary\_metrics}.
-\end{itemize}
-
-\subsection{Smoke test (v3) for end-to-end validation}
-The repository includes a repeatable smoke test that resets only Fleet/metrics state, creates a dedicated smoke experiment in eLabFTW, runs one device cycle, and verifies metrics in Prometheus and Mimir:
-\begin{verbatim}
-scripts/smoke/v3_end_to_end_smoke.sh
-\end{verbatim}
-
-For manual resets (without running the smoke test), use:
-\begin{verbatim}
-scripts/reset/dev_reset.sh
-\end{verbatim}
-
-Behavior:
-\begin{itemize}
-  \item Does \textbf{not} modify existing experiments; it creates a new one tagged with \texttt{fleet}.
-  \item Does \textbf{not} delete MySQL/eLabFTW user data; it only resets:
+  \item Time on wire: \texttt{google.protobuf.Timestamp} in UTC.
+  \item Policy JSON timestamps: ISO-8601 UTC (\texttt{Z} suffix).
+  \item IDs are opaque strings; recommended:
     \begin{itemize}
-      \item \texttt{./data/fleet/state.json} and \texttt{./data/fleet/ingest-metrics.ndjson},
-      \item Prometheus and Mimir local storage volumes.
+      \item \texttt{agent\_id}: stable MAC or UUID
+      \item \texttt{run\_id}: UUIDv4
+      \item \texttt{event\_id}: UUIDv4 or deterministic hash
+      \item \texttt{policy\_id}: server-generated immutable revision (\texttt{sha256:<digest>})
     \end{itemize}
-  \item Leaves the created smoke experiment in eLabFTW for inspection (unless cleanup is enabled).
+  \item Numeric samples in maps are encoded as strings and parsed to float server-side.
 \end{itemize}
 
-Environment variables:
-\begin{verbatim}
-DEVICE_MODEL=02:42:ac:14:00:04     # model-device MAC
-DEVICE_PI=2c:cf:67:80:f5:d9        # Raspberry Pi MAC (optional target)
-RESET_STATE=true|false
-RESET_METRICS=true|false
-RESET_GRAFANA=true|false
-RUN_PI=true|false
-PI_HOST=monad-rpi5.local
-DO_BUILD=true|false
-CLEANUP=true|false
-\end{verbatim}
+\subsection{\texttt{AgentDescriptor}}
+\begin{longtable}{p{4.1cm}p{1.6cm}p{9.3cm}}
+\textbf{Field} & \textbf{Req} & \textbf{Meaning} \\
+\hline
+\endhead
+\texttt{agent\_id} & yes & Stable unique device identifier. \\
+\texttt{hostname} & no & Human-readable host name. \\
+\texttt{agent\_version} & no & Agent software version. \\
+\texttt{interfaces} & no & Advertised interfaces for audit/mode checks. \\
+\texttt{requested\_mode} & no & Requested control-plane mode. \\
+\texttt{control\_plane\_iface} & no & Interface intended for control plane. \\
+\texttt{fleet\_manager\_target} & no & Host:port used for route verification context. \\
+\texttt{capabilities} & no & Free-form capability tags (\texttt{wifi}, \texttt{ble}, \texttt{csi}, ...). \\
+\hline
+\end{longtable}
 
-Web endpoints after running compose:
-\begin{itemize}
-  \item eLabFTW: \texttt{https://localhost:8443}
-  \item Grafana: \texttt{http://localhost:3000} (default \texttt{admin/admin})
-  \item Prometheus: \texttt{http://localhost:9090}
-\end{itemize}
+\subsection{\texttt{Policy}}
+\begin{longtable}{p{4.1cm}p{1.6cm}p{9.3cm}}
+\textbf{Field} & \textbf{Req} & \textbf{Meaning} \\
+\hline
+\endhead
+\texttt{experiment\_id} & yes & Experiment identity (\texttt{elabftw:<id>} in current deployment). \\
+\texttt{policy\_id} & yes & Immutable revision id for caching/idempotency. \\
+\texttt{issued\_at} & no & Issuance time. \\
+\texttt{measurement\_from/to} & no & Intended run window. \\
+\texttt{command\_groups} & yes & Ordered groups of commands. \\
+\texttt{allowed\_mode} & no & Effective authorized mode. \\
+\texttt{control\_plane\_iface} & no & Effective iface for \texttt{DUAL\_NIC}. \\
+\hline
+\end{longtable}
 
-\textbf{Note:} the reference agent can collect real Wi-Fi/BLE metrics on Linux when \texttt{EXECUTE\_POLICY=true} (using \texttt{iw} and \texttt{bluetoothctl} with fallbacks). In simulation mode and inside containers without radio access, these counters may be 0; the pipeline is still validated by the HTTP ingest example.
+\subsection{\texttt{CommandGroup} and \texttt{Command}}
+\begin{longtable}{p{4.1cm}p{1.6cm}p{9.3cm}}
+\textbf{Field} & \textbf{Req} & \textbf{Meaning} \\
+\hline
+\endhead
+\texttt{CommandGroup.id} & yes & Group correlation id. \\
+\texttt{CommandGroup.name} & no & Display name. \\
+\texttt{CommandGroup.from/to} & no & Optional per-group window. \\
+\texttt{CommandGroup.failure\_mode} & no & \texttt{FAIL\_FAST} or \texttt{CONTINUE\_ON\_ERROR}. \\
+\texttt{CommandGroup.commands} & yes & Ordered command list. \\
+\texttt{Command.id} & yes & Command correlation id. \\
+\texttt{Command.type} & yes & \texttt{SHELL}, \texttt{WIFI\_SCAN}, \texttt{BLE\_SCAN}, \texttt{CAPTURE\_CSI}. \\
+\texttt{Command.cmdline} & no & Command line (primarily for \texttt{SHELL}). \\
+\texttt{Command.argv} & no & Optional argv form. \\
+\texttt{Command.env} & no & Environment key-values. \\
+\texttt{Command.timeout\_ms} & no & Command timeout in ms. \\
+\texttt{Command.retry} & no & Retry policy. \\
+\texttt{Command.expected\_artifacts} & no & Expected outputs. \\
+\hline
+\end{longtable}
 
-\subsection{PromQL examples}
-Example PromQL queries (usable in Prometheus UI and Grafana when Mimir datasource is selected):
-\begin{verbatim}
-# Latest totals (per device):
-monad_fleet_metric_value{device_id="02:42:ac:14:00:04",metric="wifi_ap_total"}
-monad_fleet_metric_value{device_id="02:42:ac:14:00:04",metric="ble_adv_total"}
-monad_fleet_metric_value{device_id="02:42:ac:14:00:04",metric="csi_frames_total"}
+\subsection{\texttt{RetryPolicy}}
+\begin{longtable}{p{4.1cm}p{1.6cm}p{9.3cm}}
+\textbf{Field} & \textbf{Req} & \textbf{Meaning} \\
+\hline
+\endhead
+\texttt{max\_attempts} & no & Total attempts including first attempt. \\
+\texttt{backoff\_ms} & no & Fixed wait between attempts. \\
+\hline
+\end{longtable}
 
-# Wi-Fi link quality / RSSI (real devices, Linux):
-monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="wifi_avg_rssi_dbm"}
-monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="wifi_link_quality"}
-monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="wifi_connected"}
+\subsection{\texttt{Report} and \texttt{Event}}
+\begin{longtable}{p{4.1cm}p{1.6cm}p{9.3cm}}
+\textbf{Field} & \textbf{Req} & \textbf{Meaning} \\
+\hline
+\endhead
+\texttt{Report.run\_id} & yes & Unique run identifier. \\
+\texttt{Report.experiment\_id} & yes & Experiment id of this run. \\
+\texttt{Report.policy\_id} & yes & Policy revision id of this run. \\
+\texttt{Report.agent\_id} & no & Optional when request-level \texttt{agent\_id} is provided. \\
+\texttt{Report.started\_at/finished\_at} & no & Informational run timing. \\
+\texttt{Report.status} & yes & Human-readable final status (\texttt{OK}/\texttt{FAILED}/...). \\
+\texttt{Report.events} & no & Structured event list. \\
+\texttt{Report.artifacts} & no & Artifact references only. \\
+\texttt{Report.summary\_metrics} & no & Free map; numeric values exported to metrics backend. \\
+\texttt{Event.event\_id} & no & Event unique id (server can synthesize). \\
+\texttt{Event.type} & yes & Run/command/artifact/error type enum. \\
+\texttt{Event.timestamp} & no & Event timestamp. \\
+\texttt{Event.group\_id/command\_id} & no & Correlation fields. \\
+\texttt{Event.exit\_code} & no & Exit code for command events. \\
+\texttt{Event.duration\_ms} & no & Duration for command events. \\
+\texttt{Event.message} & no & Short text payload. \\
+\texttt{Event.metrics} & no & Free map; numeric values exported to metrics backend. \\
+\hline
+\end{longtable}
 
-# BLE scan status (1 = scan command executed, even if 0 devices observed):
-monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="ble_scan_ok"}
+\subsection{\texttt{ArtifactRef}}
+\begin{longtable}{p{4.1cm}p{1.6cm}p{9.3cm}}
+\textbf{Field} & \textbf{Req} & \textbf{Meaning} \\
+\hline
+\endhead
+\texttt{name} & yes & Artifact label. \\
+\texttt{uri} & yes & Artifact location reference (\texttt{spool://}, \texttt{s3://}, \texttt{https://}...). \\
+\texttt{size\_bytes} & no & Artifact size for audit. \\
+\texttt{sha256} & no & Artifact checksum. \\
+\hline
+\end{longtable}
 
-# Low-level sender example:
-monad_fleet_metric_value{device_id="lowlevel-board-01"}
+\section{Policy Profile Used in This Deployment}
+\subsection{Policy source}
+Fleet policies are loaded from eLabFTW experiments tagged \texttt{fleet}.
+Categories are not used by the fleet selector.
 
-# Service counters:
-monad_fleet_reports_total
-monad_fleet_events_total
-\end{verbatim}
+\textbf{Required authoring mode:}
+store policy in experiment metadata JSON editor (not as attachment).
 
-\section{Policy Source and Selection}
-\subsection{Where policy is read from}
-Fleet policies are read from eLabFTW experiments tagged by \texttt{FLEET\_EXPERIMENT\_TAG} (default \texttt{fleet}).
-\textbf{Categories are not used} for fleet logic; tagging and metadata are the only required eLabFTW features.
-
-Policy should be stored in the experiment \textbf{metadata JSON editor} (not as file attachments), so the policy can be read and revised via API and remains easily auditable.
-
-Default metadata keys checked in order:
+\textbf{Metadata keys searched in order:}
 \begin{verbatim}
 fleet.policy, policy, fleet_policy, policy_json
 \end{verbatim}
 
-\textbf{Tag format note:} ensure \texttt{fleet} is a distinct tag. When creating experiments via the eLabFTW REST API, prefer passing \texttt{tags} as an array of strings (so the API can filter by \texttt{tags[]=fleet} reliably).
-
 \subsection{Selection logic}
 \begin{itemize}
-  \item candidate experiments are filtered by fleet tag,
-  \item optional tag matching by prefix (\texttt{RESOURCE\_TAG\_PREFIX}, default \texttt{device:}),
-  \item optional \texttt{target\_selector} filtering on \texttt{device\_ids}, \texttt{device\_types}, \texttt{locations},
-  \item newest modified matching experiment with a parseable policy wins.
+  \item candidate set: experiments with \texttt{fleet} tag
+  \item optional tag matching by \texttt{RESOURCE\_TAG\_PREFIX} (default \texttt{device:})
+  \item optional \texttt{target\_selector} on \texttt{device\_ids/device\_types/locations}
+  \item newest modified valid policy wins
 \end{itemize}
 
-\subsection{Policy revision}
+\subsection{Policy revision id}
 Server canonicalizes policy JSON and computes:
 \begin{verbatim}
 policy_id = sha256:<digest>
 \end{verbatim}
 
-\section{eLabFTW Mapping}
-\subsection{Creating fleet experiments (manual workflow)}
-\begin{enumerate}
-  \item Create a new experiment in eLabFTW.
-  \item Add the tag \texttt{fleet}. (This is the only required classifier; categories are ignored by Monad Fleet.)
-  \item Open the \textbf{Metadata} JSON editor and store policy JSON under \texttt{fleet.policy}.
-  \item (Optional) Add \texttt{device:<tag>} tags to the experiment and to the device resource item to enable tag-based matching (\texttt{RESOURCE\_TAG\_PREFIX}).
-  \item Save. The newest modified matching experiment is selected for devices.
-\end{enumerate}
-
-Recommended policy placement in metadata:
-\begin{verbatim}
-{
-  "fleet": {
-    "policy": { ... }
-  }
-}
-\end{verbatim}
-
-\subsection{Device resource items}
-On first contact, server creates a resource item named \texttt{Device <agent\_id>} and updates its metadata on each heartbeat.
-
-Current implementation enforces bookable defaults for device resources:
-\begin{itemize}
-  \item \texttt{is\_bookable=1}
-  \item \texttt{book\_max\_minutes=180} (configurable)
-  \item \texttt{book\_can\_overlap=1} (configurable)
-  \item \texttt{book\_is\_cancellable=1} (configurable)
-\end{itemize}
-
-\subsection{Scheduler events}
-Run data is stored in eLabFTW scheduler events linked to device resource items.
-
-Run aggregation key:
-\begin{verbatim}
-experiment_id | policy_revision | device_id
-\end{verbatim}
-
-Event metadata includes:
-\begin{itemize}
-  \item current status (\texttt{RUNNING}, \texttt{COMPLETED}, etc.),
-  \item event history,
-  \item summary metrics (\texttt{events\_total}, \texttt{commands\_failed}, artifacts count),
-  \item last event payload.
-\end{itemize}
-
-Status semantics:
-\begin{itemize}
-  \item status is treated as monotonic for a run: terminal states (\texttt{COMPLETED}, \texttt{PARTIAL}, \texttt{FAILED}) must not be downgraded by later artifact uploads.
-\end{itemize}
-
-\section{Wi-Fi Device Interoperability Guide}
-\subsection{Minimal requirements}
-\begin{itemize}
-  \item Wi-Fi connectivity to Monad Fleet service host and port.
-  \item Generated client stubs from \texttt{fleet\_gateway\_v2.proto}.
-  \item Stable \texttt{agent\_id} (recommended: lower-case MAC or UUID).
-\end{itemize}
-
-\subsection{Wi-Fi-only mode recommendation}
-For Wi-Fi-only devices, use:
-\begin{itemize}
-  \item \texttt{requested\_mode = RF\_SHARING}
-  \item \texttt{control\_plane\_iface = wlan0} (or actual Wi-Fi iface)
-\end{itemize}
-
-\subsection{Reference environment variables}
-\begin{verbatim}
-FLEET_MANAGER_HOST=<server_host>
-FLEET_MANAGER_PORT=50060
-AGENT_ID=<stable_device_id>
-CONTROL_PLANE_MODE=RF_SHARING
-CONTROL_PLANE_IFACE=wlan0
-WIFI_SCAN_IFACE=wlan0   # optional; defaults to CONTROL_PLANE_IFACE
-MAX_SYNC_CYCLES=0
-EXECUTE_POLICY=false    # set true on real devices to execute typed commands and collect metrics
-CAPABILITIES=csi,ble,wifi
-DATA_ROOT=./data
-SENT_RETENTION_DAYS=14
-\end{verbatim}
-
-\subsection{Raspberry Pi reference setup (Wi-Fi only)}
-This repository includes helper scripts to deploy the reference v2 agent to a Raspberry Pi and run it as a service:
-\begin{verbatim}
-scripts/rpi/deploy_agent.sh
-scripts/rpi/install_systemd_service.sh
-scripts/rpi/smoke_test_agent.sh
-\end{verbatim}
-
-Recommended settings for a Wi-Fi-only Pi:
-\begin{itemize}
-  \item \texttt{CONTROL\_PLANE\_MODE=RF\_SHARING}
-  \item \texttt{CONTROL\_PLANE\_IFACE=wlan0} (or the actual Wi-Fi iface)
-  \item set \texttt{EXECUTE\_POLICY=true} to collect real Wi-Fi/BLE metrics (uses \texttt{iw} and \texttt{bluetoothctl} if available)
-  \item \texttt{AGENT\_ID} derived from the Wi-Fi MAC (stable across reboots)
-\end{itemize}
-
-\section{Recommended Client Loop}
-\begin{verbatim}
-1) Hello(agent descriptor)
-2) loop:
-   a) GetAssignment(agent_id)
-   b) if NO_WORK -> sleep(poll)
-   c) GetPolicy(agent_id, experiment_id, last_policy_id)
-   d) if NOT_MODIFIED -> sleep(poll)
-   e) AckPrepared(...)
-   f) execute command_groups/commands in order
-   g) PublishReport(run_id, events, artifacts, summary)
-   h) set last_policy_id on ACCEPTED or DUPLICATE
-   i) sleep(poll)
-\end{verbatim}
-
-\section{Policy JSON Example (stored in eLabFTW metadata)}
+\subsection{Reference policy example}
 \begin{verbatim}
 {
   "fleet": {
@@ -637,20 +403,38 @@ Recommended settings for a Wi-Fi-only Pi:
           "name": "WiFi BLE CSI v3",
           "failure_mode": "FAIL_FAST",
           "commands": [
+            {"id": "wifi-scan",  "type": "WIFI_SCAN",   "timeout_s": 15},
+            {"id": "ble-scan",   "type": "BLE_SCAN",    "timeout_s": 15},
+            {"id": "csi-capture","type": "CAPTURE_CSI", "timeout_s": 15}
+          ]
+        }
+      ]
+    }
+  }
+}
+\end{verbatim}
+
+\subsection{RSSI sampling policy example (30s, 1s interval)}
+\begin{verbatim}
+{
+  "fleet": {
+    "policy": {
+      "target_selector": {"device_ids": ["2c:cf:67:80:f5:d9"]},
+      "command_groups": [
+        {
+          "id": "wifi-rssi-series",
+          "name": "WiFi RSSI Sampling 30s/1s",
+          "failure_mode": "FAIL_FAST",
+          "commands": [
             {
-              "id": "wifi-scan",
+              "id": "wifi-rssi-series",
               "type": "WIFI_SCAN",
-              "timeout_s": 15
-            },
-            {
-              "id": "ble-scan",
-              "type": "BLE_SCAN",
-              "timeout_s": 15
-            },
-            {
-              "id": "csi-capture",
-              "type": "CAPTURE_CSI",
-              "timeout_s": 15
+              "timeout_s": 35,
+              "env": {
+                "WIFI_SAMPLE_DURATION_S": "30",
+                "WIFI_SAMPLE_INTERVAL_S": "1",
+                "WIFI_SAMPLE_EMIT_HTTP": "1"
+              }
             }
           ]
         }
@@ -660,37 +444,457 @@ Recommended settings for a Wi-Fi-only Pi:
 }
 \end{verbatim}
 
-\section{Implementation Notes}
+This profile lets experiment authors define sampling cadence in the policy itself.
+Device-side constraints may clamp requested values (minimum interval, maximum duration, maximum points).
+
+\section{Device Persistence and Deferred Upload}
+\subsection{Goal}
+Preserve run outputs during network outages and retry upload later without data loss.
+
+\subsection{Local spool layout}
+\begin{verbatim}
+DATA_ROOT/
+  pending/<run_id>/
+    context.json
+    events.ndjson
+    report.json
+    artifacts/
+      <command-id>-<timestamp>.log
+      run-summary.json
+  sent/<run_id>/
+    ...same structure...
+\end{verbatim}
+
+\subsection{Upload semantics}
 \begin{itemize}
-  \item \texttt{PublishEvents} is optional and disabled by default in RF-sharing deployments.
-  \item If \texttt{Report.events} is empty, server synthesizes one \texttt{RUN\_FINISHED} event from report summary.
-  \item If \texttt{Event.event\_id} is empty, server synthesizes a stable-ish id from (\texttt{run\_id}, \texttt{command\_id}, \texttt{type}, \texttt{timestamp}).
-  \item \texttt{RetryPolicy.max\_attempts} in v2 Policy is derived from JSON retries and may be transformed by server normalization.
-  \item v3 smoke flow emits summary metrics (\texttt{wifi\_ap\_total}, \texttt{ble\_adv\_total}, \texttt{csi\_frames\_total}) for time-series ingestion.
-  \item To forward metrics to a different system, change Prometheus \texttt{remote\_write} configuration (e.g., \texttt{observability/prometheus/prometheus.yml}); the agent gRPC contract remains unchanged.
+  \item agent writes completed run bundle under \texttt{pending/<run\_id>/}
+  \item agent retries \texttt{PublishReport} for pending runs
+  \item on \texttt{ACCEPTED} or \texttt{DUPLICATE}, run is moved to \texttt{sent/<run\_id>/}
+  \item sent history is pruned by \texttt{SENT\_RETENTION\_DAYS} (default 14)
 \end{itemize}
 
-\section{Versioning and Compatibility}
+\section{Artifact Handling Profile}
+Artifacts are persisted locally first, then published through two layers:
 \begin{itemize}
-  \item Preferred interface for new device implementations: \texttt{fleet.v2}.
-  \item Legacy \texttt{fleet.v1} remains available for backward compatibility.
-  \item New clients should treat unknown fields and enum values as forward-compatible additions.
+  \item \texttt{PublishReport} carries \texttt{ArtifactRef} metadata,
+  \item optional HTTP upload (\texttt{POST /ingest/v1/artifacts}) sends local files to eLabFTW experiment uploads.
 \end{itemize}
 
-\section{Appendix: Current Deployment Defaults}
-From current compose/runtime configuration:
+When HTTP artifact upload succeeds, agent rewrites artifact URI from local spool form to:
+\begin{verbatim}
+elabftw://experiments/<id>/uploads/<upload_id>
+\end{verbatim}
+
+If upload fails or is disabled, URI remains \texttt{spool://...} and run reporting still succeeds.
+
+Relevant artifact classes for experiment analysis:
+\begin{itemize}
+  \item Wi-Fi: scan/link snapshots, command logs
+  \item BLE: scan output snapshots, command logs
+  \item CSI: capture logs, collector outputs, or reference notes
+  \item run-level summary (\texttt{run-summary.json})
+\end{itemize}
+
+Current size guardrail:
+\begin{itemize}
+  \item server-side endpoint limit: \texttt{ARTIFACT\_MAX\_BYTES} (default 20 MiB)
+  \item agent-side upload limit: \texttt{ARTIFACT\_UPLOAD\_MAX\_BYTES} (default 20 MiB)
+\end{itemize}
+
+\section{Metrics Pipeline Profile (v3)}
+\subsection{Objective}
+Store numeric Wi-Fi/BLE/CSI-derived metrics in time-series backend (Mimir) and visualize in Grafana.
+
+\subsection{Path}
+\begin{verbatim}
+Agent summary/event metrics -> PublishReport -> Fleet /metrics -> Prometheus
+                                                               -> remote_write -> Mimir -> Grafana
+Low-resource sender JSON   -> /ingest/v1/metrics -> Fleet /metrics -> ...
+\end{verbatim}
+
+\subsection{Low-resource sender payload}
+\begin{verbatim}
+POST /ingest/v1/metrics
+{
+  "source": "embedded-board",
+  "device_id": "lowlevel-board-01",
+  "metrics": [
+    {"name": "wifi_rssi_dbm", "value": -58.2},
+    {"name": "ble_adv_count", "value": 81},
+    {"name": "csi_frames_count", "value": 420}
+  ]
+}
+\end{verbatim}
+\textbf{Note:} this payload is optional for development/demo paths. Real-only smoke runs can disable synthetic injection entirely.
+
+\subsection{Metrics vs raw captures}
+Mimir stores numeric samples, not binary capture blobs.
+Therefore:
+\begin{itemize}
+  \item raw CSI/BLE/PCAP data should be persisted as artifacts (local/object storage and optionally mirrored to eLabFTW uploads)
+  \item derived numeric metrics should be sent via event/summary maps
+\end{itemize}
+\textbf{Current deployment profile:} CSI numeric keys (\texttt{csi\_*}) are excluded from time-series export to Prometheus/Mimir/Grafana.
+CSI remains artifact-first (run artifacts and optional eLabFTW uploads).
+
+\section{eLabFTW Mapping Profile}
+\subsection{Experiment authoring}
+\begin{enumerate}
+  \item create experiment
+  \item add tag \texttt{fleet}
+  \item store policy in metadata JSON (\texttt{fleet.policy})
+  \item optionally use \texttt{device:<tag>} matching tags
+\end{enumerate}
+
+\subsection{Device resources}
+On first \texttt{Hello}, server ensures resource item exists for \texttt{Device <agent\_id>} and updates metadata.
+Bookable defaults are enforced in current deployment:
+\begin{itemize}
+  \item \texttt{is\_bookable=1}
+  \item \texttt{book\_max\_minutes=180}
+  \item \texttt{book\_can\_overlap=1}
+  \item \texttt{book\_is\_cancellable=1}
+\end{itemize}
+
+\subsection{Scheduler run mapping}
+Run aggregation key:
+\begin{verbatim}
+experiment_id | policy_revision | device_id
+\end{verbatim}
+
+Stored metadata includes status, event history, summary metrics, and last event payload.
+Terminal status is treated as monotonic and should not be downgraded by later artifact events.
+
+\section{Raspberry Pi Reference Profile}
+\subsection{Validated hardware reference}
+Current validated setup used in smoke runs:
+\begin{itemize}
+  \item \texttt{Raspberry Pi 5 Model B Rev 1.0}
+  \item SoC family: \texttt{Broadcom BCM2712}
+  \item PCIe M.2 Wi-Fi card: \texttt{Intel Wi-Fi 6E AX210/AX1675 2x2} (\texttt{8086:2725})
+\end{itemize}
+
+\subsection{Reference scripts}
+\begin{verbatim}
+scripts/rpi/setup_ssh_key.sh
+scripts/rpi/deploy_agent.sh
+scripts/rpi/install_systemd_service.sh
+scripts/rpi/smoke_test_agent.sh
+\end{verbatim}
+
+\subsection{Recommended environment}
+\begin{verbatim}
+FLEET_MANAGER_HOST=<server_host>
+FLEET_MANAGER_PORT=50060
+AGENT_ID=<stable_mac_or_uuid>
+CONTROL_PLANE_MODE=RF_SHARING
+CONTROL_PLANE_IFACE=wlan0
+WIFI_SCAN_IFACE=wlan0
+EXECUTE_POLICY=true
+CAPABILITIES=csi,ble,wifi
+DATA_ROOT=./data
+SENT_RETENTION_DAYS=14
+
+# Optional device-side sampling constraints (applied to WIFI_SCAN sampling mode)
+WIFI_SAMPLE_MIN_INTERVAL_S=1
+WIFI_SAMPLE_MAX_DURATION_S=300
+WIFI_SAMPLE_MAX_POINTS=600
+ENABLE_HTTP_SAMPLE_INGEST=true
+
+# Extended real-device observability
+ENABLE_WIFI_EXTENDED_METRICS=true
+ENABLE_DEVICE_STATUS_METRICS=true
+
+# Optional CSI collector hook (recommended for real CSI)
+CSI_COLLECTOR_CMD="<collector command line>"
+CSI_OUTPUT_PATH="<single output file path>"
+CSI_OUTPUT_GLOB="<glob(s) for collector outputs>"
+CSI_FRAMES_REGEX="<regex with one numeric capture>"
+CSI_OUTPUT_MAX_FILES=5
+CSI_PARSE_MAX_BYTES=1048576
+DISABLE_CSI_CAPTURE=false
+\end{verbatim}
+
+\textbf{Note:} real Wi-Fi/BLE metrics depend on local tools (\texttt{iw}, \texttt{bluetoothctl}) and radio access.
+\textbf{CSI note:} this interface now supports an external CSI collector hook. Without configured collector command/output, CSI metrics will remain at zero and report explicit collector-status metrics.
+\textbf{Control-plane safety note:} when the current route to Fleet Manager is over Wi-Fi, active CSI collection can disrupt connectivity. The smoke tooling defaults to \texttt{DISABLE\_CSI\_CAPTURE=true} in this case unless explicitly overridden.
+
+\subsection{CSI collector profile}
+For \texttt{CAPTURE\_CSI}, the agent now supports two modes:
+\begin{itemize}
+  \item direct command from policy (\texttt{cmdline}/\texttt{argv})
+  \item environment-driven collector hook (\texttt{CSI\_COLLECTOR\_CMD}, optional output file/glob settings)
+\end{itemize}
+
+Returned CSI status metrics include:
+\begin{itemize}
+  \item \texttt{csi\_collector\_configured}
+  \item \texttt{csi\_collector\_exit\_code}
+  \item \texttt{csi\_capture\_ok}
+  \item \texttt{csi\_capture\_disabled}
+  \item \texttt{csi\_frames\_count}
+  \item \texttt{csi\_output\_files\_count}
+  \item \texttt{csi\_output\_bytes\_total}
+\end{itemize}
+
+Collector output files can be mirrored as run artifacts and uploaded to eLabFTW (subject to size limits).
+\textbf{Hardware caveat:} Intel AX210 with stock Linux drivers does not expose CSI frames by default. Real CSI requires a compatible collector/driver stack; until configured, \texttt{csi\_collector\_configured=0} and \texttt{csi\_frames\_total=0}.
+
+\section{Smoke Test From Clean Fleet/Metrics State}
+\subsection{Automated script}
+\begin{verbatim}
+scripts/smoke/v3_end_to_end_smoke.sh
+\end{verbatim}
+
+\subsection{Manual reset helper}
+\begin{verbatim}
+scripts/reset/dev_reset.sh
+\end{verbatim}
+
+\subsection{Reset behavior}
+The smoke flow is designed to preserve existing user data in eLabFTW/MySQL.
+It resets fleet runtime and metrics storage state only.
+
+\textbf{Does reset:}
+\begin{itemize}
+  \item \texttt{./data/fleet/state.json}
+  \item \texttt{./data/fleet/ingest-metrics.ndjson}
+  \item \texttt{./data/fleet/ingest-artifacts.ndjson}
+  \item Prometheus local TSDB volume
+  \item Mimir local TSDB volume
+\end{itemize}
+
+\textbf{Does not reset:}
+\begin{itemize}
+  \item eLabFTW user accounts
+  \item existing MySQL experiment history
+\end{itemize}
+
+\subsection{Smoke parameters}
+\begin{verbatim}
+DEVICE_MODEL=02:42:ac:14:00:04
+DEVICE_PI=2c:cf:67:80:f5:d9
+RESET_STATE=true|false
+RESET_METRICS=true|false
+RESET_GRAFANA=true|false
+RUN_PI=true|false
+PI_HOST=monad-rpi5.local
+DO_BUILD=true|false
+CLEANUP=true|false
+
+# Optional smoke profile
+SMOKE_PROFILE=full|rssi|wireless_spec
+RSSI_DURATION_S=30
+RSSI_INTERVAL_S=1
+RSSI_INTERVAL_S_PI=5
+RSSI_ARTIFACT_STRIDE=0
+
+# Optional 2-minute full profile (Wi-Fi sampling + BLE + CSI artifacts)
+FULL_DURATION_S=120
+FULL_INTERVAL_S=2
+FULL_INTERVAL_S_PI=5
+FULL_ARTIFACT_STRIDE=0
+FULL_BLE_TIMEOUT_S=10
+FULL_CSI_TIMEOUT_S=10
+REPORT_RPC_TIMEOUT_S=120
+CONTROL_RPC_TIMEOUT_S=30
+HELLO_RPC_TIMEOUT_S=<optional; defaults to CONTROL_RPC_TIMEOUT_S>
+ASSIGNMENT_RPC_TIMEOUT_S=<optional; defaults to CONTROL_RPC_TIMEOUT_S>
+POLICY_RPC_TIMEOUT_S=<optional; defaults to CONTROL_RPC_TIMEOUT_S>
+ACK_PREPARED_RPC_TIMEOUT_S=<optional; defaults to CONTROL_RPC_TIMEOUT_S>
+
+# Wireless sensing spec profile (short, realistic Pi run)
+WIRELESS_SPEC_DURATION_S=30
+WIRELESS_SPEC_INTERVAL_S=2
+WIRELESS_SPEC_INTERVAL_S_PI=3
+WIRELESS_SPEC_ARTIFACT_STRIDE=0
+WIRELESS_SPEC_BLE_TIMEOUT_S=12
+WIRELESS_SPEC_CSI_TIMEOUT_S=15
+WIRELESS_SPEC_ENV_SNAPSHOT=true
+
+# Optional CSI collector pass-through (for real AX210 CSI if configured)
+CSI_COLLECTOR_CMD="<collector command>"
+CSI_OUTPUT_PATH="<single output file>"
+CSI_OUTPUT_GLOB="<glob for output files>"
+CSI_FRAMES_REGEX="<regex with one numeric capture group>"
+CSI_OUTPUT_MAX_FILES=5
+CSI_PARSE_MAX_BYTES=1048576
+ALLOW_WIFI_DISRUPTIVE_CSI=true|false
+DISABLE_CSI_CAPTURE=true|false
+
+# Optional artifact upload controls
+ENABLE_ELAB_ARTIFACT_UPLOAD=true|false
+ARTIFACT_UPLOAD_MAX_BYTES=20971520
+
+# Optional demo-only synthetic metric injection
+INJECT_HYPOTHETICAL_METRICS=true|false
+\end{verbatim}
+
+For Raspberry Pi runs, a higher interval is recommended (for example 5s or 10s), depending on radio/tooling overhead.
+\textbf{Real-only recommendation:} run with \texttt{RUN\_PI=true} and \texttt{INJECT\_HYPOTHETICAL\_METRICS=false}.
+\textbf{Upload stability note:} sampled Wi-Fi commands persist first+last sample artifacts by default (\texttt{*\_ARTIFACT\_STRIDE=0}) to keep report size bounded; use stride \texttt{1} if full per-sample artifacts are explicitly needed.
+\textbf{Automation note:} Pi smoke scripts use SSH and are designed for key-based login (password-only SSH can block unattended runs).
+\textbf{SSH bootstrap note:} run \texttt{scripts/rpi/setup\_ssh\_key.sh} to create a dedicated keypair under \texttt{scripts/rpi/keys/}. Pi helper scripts automatically use \texttt{scripts/rpi/keys/monad\_rpi5\_ed25519} when present (unless \texttt{SSH\_IDENTITY\_FILE} is explicitly set).
+
+\subsection{Reference real-device smoke command}
+\begin{verbatim}
+SMOKE_PROFILE=rssi RSSI_DURATION_S=30 RSSI_INTERVAL_S_PI=2 \
+RUN_PI=true INJECT_HYPOTHETICAL_METRICS=false DO_BUILD=false \
+scripts/smoke/v3_end_to_end_smoke.sh
+\end{verbatim}
+
+\subsection{Reference wireless-spec command (recommended short real run)}
+\begin{verbatim}
+SMOKE_PROFILE=wireless_spec WIRELESS_SPEC_DURATION_S=30 \
+WIRELESS_SPEC_INTERVAL_S_PI=3 WIRELESS_SPEC_BLE_TIMEOUT_S=12 \
+WIRELESS_SPEC_CSI_TIMEOUT_S=15 WIRELESS_SPEC_ARTIFACT_STRIDE=0 \
+RUN_PI=true INJECT_HYPOTHETICAL_METRICS=false DO_BUILD=false \
+scripts/smoke/v3_end_to_end_smoke.sh
+\end{verbatim}
+
+If a real CSI collector is available on Pi, append collector variables:
+\begin{verbatim}
+CSI_COLLECTOR_CMD='sudo feitcsi --frequency 5180 --channel-width 80 --format HESU \
+  --output-file /tmp/csi.dat -v' CSI_OUTPUT_PATH=/tmp/csi.dat
+\end{verbatim}
+\textbf{Important:} for Wi-Fi-only Pi control-plane, set \texttt{ALLOW\_WIFI\_DISRUPTIVE\_CSI=false} (default) unless you accept SSH drops during capture.
+
+\subsection{Reference 2-minute full command}
+\begin{verbatim}
+SMOKE_PROFILE=full FULL_DURATION_S=120 FULL_INTERVAL_S_PI=2 \
+FULL_ARTIFACT_STRIDE=0 REPORT_RPC_TIMEOUT_S=120 \
+CONTROL_RPC_TIMEOUT_S=30 \
+FULL_BLE_TIMEOUT_S=10 FULL_CSI_TIMEOUT_S=10 \
+RUN_PI=true INJECT_HYPOTHETICAL_METRICS=false DO_BUILD=false \
+scripts/smoke/v3_end_to_end_smoke.sh
+\end{verbatim}
+
+\section{Observability Queries}
+\subsection{Grafana dashboard (provisioned)}
+This repository provisions a Grafana dashboard focused on Raspberry Pi wireless smoke runs:
+\begin{itemize}
+  \item dashboard UID: \texttt{monad-fleet-wireless-v3}
+  \item dashboard URL path: \texttt{/d/monad-fleet-wireless-v3/monad-fleet-wireless-sensing-pi-smoke-v3}
+  \item provisioning files:
+  \begin{itemize}
+    \item \texttt{observability/grafana/provisioning/dashboards/monad-fleet.yml}
+    \item \texttt{observability/grafana/provisioning/dashboards/monad-fleet-wireless-sensing-v3.json}
+  \end{itemize}
+\end{itemize}
+
+\textbf{Panels include:} Wi-Fi RSSI, BLE advertisement count, Wi-Fi AP count, Wi-Fi connected status,
+BLE scan status, CSI frame count, artifact upload counters, command health, full metric snapshot table,
+and service counters.
+
+\subsection{PromQL examples}
+\begin{verbatim}
+# Per-device totals
+monad_fleet_metric_value{device_id="02:42:ac:14:00:04",metric="wifi_ap_total"}
+monad_fleet_metric_value{device_id="02:42:ac:14:00:04",metric="ble_adv_total"}
+monad_fleet_metric_value{device_id="02:42:ac:14:00:04",metric="csi_frames_total"}
+
+# Real-device Wi-Fi indicators
+monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="wifi_avg_rssi_dbm"}
+monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="wifi_link_quality"}
+monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="wifi_connected"}
+monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="wifi_rssi_sample_index"}
+monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="wifi_tx_bitrate_mbps"}
+monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="wifi_rx_bitrate_mbps"}
+monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="wifi_channel"}
+monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="wifi_freq_mhz"}
+monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="wifi_tx_retries"}
+monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="wifi_if_rx_bytes"}
+monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="wifi_if_tx_bytes"}
+
+# Device status
+monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="device_cpu_temp_c"}
+monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="device_load1"}
+monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="device_uptime_s"}
+monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="device_mem_available_bytes"}
+
+# Verify RSSI changed over interval window
+changes(monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="wifi_avg_rssi_dbm"}[10m])
+
+# BLE execution signal
+monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="ble_scan_ok"}
+
+# CSI collector status
+monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="csi_collector_configured"}
+monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="csi_capture_ok"}
+monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="csi_capture_disabled"}
+monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="csi_frames_total"}
+monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="csi_output_files_count"}
+monad_fleet_metric_value{device_id="2c:cf:67:80:f5:d9",metric="csi_output_bytes_total"}
+
+# Low-resource sender sample
+monad_fleet_metric_value{device_id="lowlevel-board-01"}
+
+# Service counters
+monad_fleet_reports_total
+monad_fleet_events_total
+monad_fleet_artifact_uploads_total
+\end{verbatim}
+
+\subsection{Interpretation notes}
+\begin{itemize}
+  \item \texttt{ble\_scan\_ok=1} means BLE scan command executed successfully; device discovery count may still be zero.
+  \item \texttt{wifi\_avg\_rssi\_dbm} and \texttt{wifi\_link\_quality} are best-effort metrics based on available system tools.
+  \item \texttt{wifi\_tx/rx\_bitrate\_mbps}, \texttt{wifi\_channel}, and interface counters provide richer Wi-Fi sensing context for RF/environment interpretation.
+  \item \texttt{device\_*} metrics provide system-state context (thermal/load/memory/uptime) for cross-checking measurement stability.
+  \item \texttt{wifi\_rssi\_sample\_index} tracks the latest sample ordinal within the configured sampling run.
+  \item \texttt{csi\_frames\_total} may be zero if CSI collector is not configured or does not expose frame counts; check \texttt{csi\_collector\_configured} and \texttt{csi\_capture\_ok}.
+  \item \texttt{csi\_capture\_disabled=1} indicates CSI execution was intentionally disabled by configuration (safety mode), not a collector failure.
+\end{itemize}
+
+\section{Compatibility and Versioning}
+\begin{itemize}
+  \item preferred interface for new devices: \texttt{fleet.v2}
+  \item \texttt{fleet.v1} remains served for backward compatibility
+  \item unknown fields/enums should be treated as forward-compatible additions
+\end{itemize}
+
+\section{Implementation Profile Decisions}
+\begin{itemize}
+  \item \texttt{PublishEvents} is optional and disabled by default in this deployment.
+  \item if report events are empty, server may synthesize summary run event.
+  \item if \texttt{Event.event\_id} is missing, server may synthesize an id.
+  \item metric forwarding target can change at Prometheus \texttt{remote\_write} without changing the device gRPC contract.
+  \item this deployment sets \texttt{METRICS\_EXCLUDE\_PREFIXES=csi\_} on Fleet service, so CSI metrics are not exported to Grafana.
+  \item artifact upload to eLabFTW is implemented through \texttt{/ingest/v1/artifacts}; upload can be disabled per-agent if needed.
+  \item sampled Wi-Fi runs throttle artifact fan-out by default (first+last sample artifact retention) to prevent oversized report processing on long sampling windows.
+  \item agent-side report replay timeout is configurable via \texttt{REPORT\_RPC\_TIMEOUT\_S} and defaults to a higher value for Pi smoke runs.
+  \item control-plane RPC timeouts can be tuned globally via \texttt{CONTROL\_RPC\_TIMEOUT\_S} or per method via \texttt{HELLO\_RPC\_TIMEOUT\_S}, \texttt{ASSIGNMENT\_RPC\_TIMEOUT\_S}, \texttt{POLICY\_RPC\_TIMEOUT\_S}, and \texttt{ACK\_PREPARED\_RPC\_TIMEOUT\_S}.
+  \item CSI acquisition uses an external collector hook in this profile; collector integration is device/driver specific.
+  \item Pi smoke runner applies a safety gate for Wi-Fi-only control-plane and can force \texttt{DISABLE\_CSI\_CAPTURE=true} unless \texttt{ALLOW\_WIFI\_DISRUPTIVE\_CSI=true}.
+  \item very large CSI binaries should use object storage references when they exceed configured artifact limits.
+\end{itemize}
+
+\section{Deployment Defaults (Current)}
 \begin{itemize}
   \item gRPC listen: \texttt{0.0.0.0:50060}
-  \item HTTP sidecar listen: \texttt{0.0.0.0:9108}
+  \item HTTP listen: \texttt{0.0.0.0:9108}
   \item eLabFTW API base: \texttt{https://web/api/v2}
-  \item Fleet experiment tag: \texttt{fleet}
-  \item Policy keys: \texttt{fleet.policy,policy,fleet\_policy,policy\_json}
-  \item Live events: disabled
-  \item Device spool root default: \texttt{./data}
-  \item Sent-run retention default: \texttt{14 days}
+  \item fleet tag: \texttt{fleet}
+  \item policy keys: \texttt{fleet.policy,policy,fleet\_policy,policy\_json}
+  \item live events: disabled
+  \item artifact upload endpoint max bytes: \texttt{ARTIFACT\_MAX\_BYTES=20971520}
+  \item default spool root: \texttt{./data}
+  \item sent retention: 14 days
   \item Prometheus: \texttt{http://localhost:9090}
   \item Mimir: \texttt{http://localhost:9009}
-  \item Grafana: \texttt{http://localhost:3000} (default \texttt{admin/admin})
+  \item Grafana: \texttt{http://localhost:3000} (\texttt{admin/admin} unless changed)
 \end{itemize}
+
+\section{Integrator Checklist}
+Before declaring a new device implementation production-ready, confirm:
+\begin{enumerate}
+  \item agent sends stable \texttt{agent\_id} and \texttt{Hello} metadata
+  \item agent follows prepare/measure/report lifecycle with retries
+  \item idempotency keys are implemented (\texttt{preparation\_id}, \texttt{run\_id}, \texttt{event\_id})
+  \item policy typed commands (\texttt{WIFI\_SCAN}/\texttt{BLE\_SCAN}/\texttt{CAPTURE\_CSI}) are handled or safely reported as unsupported
+  \item run artifacts are persisted locally and published as \texttt{ArtifactRef.uri}, and optionally uploaded to eLabFTW via \texttt{/ingest/v1/artifacts}
+  \item numeric metrics are exported via \texttt{summary\_metrics} and/or \texttt{event.metrics}
+  \item smoke test validates report acceptance, metrics visibility, and eLabFTW artifact uploads
+\end{enumerate}
 
 \end{document}
