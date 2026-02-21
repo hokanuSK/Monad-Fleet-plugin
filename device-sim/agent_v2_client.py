@@ -6,9 +6,11 @@ import json
 import logging
 import mimetypes
 import os
+import random
 import re
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import time
@@ -31,6 +33,9 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 log = logging.getLogger("agent-v2")
+
+# Opportunistic in-run artifact upload backoff state.
+_ARTIFACT_UPLOAD_NEXT_TRY_AT = 0.0
 
 # "Placeholder" cmdlines used in early smoke policies. For typed commands, we treat these as hints,
 # not mandatory implementations.
@@ -193,12 +198,116 @@ def _is_trivial_cmdline(cmdline: str) -> bool:
     return bool(_TRIVIAL_CMD_RE.match(cmdline or ""))
 
 
+def _sudo_is_noninteractive(args: list[str]) -> bool:
+    for arg in args[1:]:
+        if arg == "--":
+            break
+        if arg == "--non-interactive":
+            return True
+        if arg.startswith("-") and "n" in arg[1:]:
+            return True
+    return False
+
+
+def _with_noninteractive_sudo_argv(args: list[str]) -> list[str]:
+    if not args:
+        return args
+    first = Path(args[0]).name
+    if first != "sudo":
+        return args
+    if _sudo_is_noninteractive(args):
+        return args
+    return [args[0], "-n", *args[1:]]
+
+
+def _with_noninteractive_sudo_cmdline(cmdline: str) -> str:
+    text = normalize(cmdline)
+    if not text:
+        return text
+    try:
+        parsed = shlex.split(text)
+    except Exception:
+        if re.match(r"^\s*sudo\b", text) and not re.search(r"\bsudo\s+-[A-Za-z]*n", text):
+            return re.sub(r"^\s*sudo\b", "sudo -n", text, count=1)
+        return text
+    updated = _with_noninteractive_sudo_argv(parsed)
+    if updated == parsed:
+        return text
+    return " ".join(shlex.quote(part) for part in updated)
+
+
+def _terminate_process_tree(proc: subprocess.Popen[str], grace_s: float = 2.0) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            proc.terminate()
+        else:
+            os.killpg(proc.pid, signal.SIGTERM)
+    except Exception:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    until = time.time() + max(0.1, float(grace_s))
+    while proc.poll() is None and time.time() < until:
+        time.sleep(0.05)
+    if proc.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            proc.kill()
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def _extract_output_paths_from_command(cmdline: str, argv: list[str]) -> list[str]:
+    args = [normalize(a) for a in (argv or []) if normalize(a)]
+    if not args:
+        try:
+            args = [normalize(a) for a in shlex.split(normalize(cmdline)) if normalize(a)]
+        except Exception:
+            args = []
+    if not args:
+        return []
+    result: list[str] = []
+    i = 0
+    while i < len(args):
+        token = args[i]
+        if token in {"--output-file", "-o", "--output"}:
+            if i + 1 < len(args):
+                result.append(args[i + 1])
+                i += 2
+                continue
+        if token.startswith("--output-file="):
+            result.append(token.split("=", 1)[1])
+        elif token.startswith("--output="):
+            result.append(token.split("=", 1)[1])
+        i += 1
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for path in result:
+        key = normalize(path)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(key)
+    return deduped
+
+
 def run_command_capture(
     cmdline: str,
     argv: list[str],
     env: dict[str, str],
     timeout_ms: int,
     execute_policy: bool,
+    *,
+    force_noninteractive_sudo: bool = False,
 ) -> tuple[int, int, str, str]:
     if not execute_policy:
         time.sleep(min(1.0, max(0.1, timeout_ms / 1000.0)))
@@ -211,35 +320,57 @@ def run_command_capture(
         child_env = dict(os.environ)
         child_env.update({normalize(k): normalize(v) for k, v in (env or {}).items() if normalize(k)})
 
-        if argv:
-            proc = subprocess.run(  # noqa: S603
-                [normalize(a) for a in argv if normalize(a)],
-                shell=False,
-                capture_output=True,
-                text=True,
-                timeout=timeout_s,
-                env=child_env,
-                check=False,
-            )
-        else:
-            proc = subprocess.run(  # noqa: S602
-                cmdline,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=timeout_s,
-                env=child_env,
-                check=False,
-            )
+        safe_argv = [normalize(a) for a in argv if normalize(a)]
+        safe_cmdline = normalize(cmdline)
+        if force_noninteractive_sudo:
+            if safe_argv:
+                safe_argv = _with_noninteractive_sudo_argv(safe_argv)
+            else:
+                safe_cmdline = _with_noninteractive_sudo_cmdline(safe_cmdline)
+        try:
+            if safe_argv:
+                proc = subprocess.Popen(  # noqa: S603
+                    safe_argv,
+                    shell=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=child_env,
+                    start_new_session=True,
+                )
+            else:
+                proc = subprocess.Popen(  # noqa: S602
+                    safe_cmdline,
+                    shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=child_env,
+                    start_new_session=True,
+                )
+        except FileNotFoundError:
+            duration_ms = int((time.time() - started) * 1000)
+            missing = safe_argv[0] if safe_argv else safe_cmdline.split(" ", 1)[0]
+            return 127, duration_ms, f"missing command: {missing}", f"missing command: {missing}"
+
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout_s)
+            duration_ms = int((time.time() - started) * 1000)
+            full = _combined_output(stdout, stderr)
+            return int(proc.returncode), duration_ms, _short_message(full), full
+        except subprocess.TimeoutExpired:
+            _terminate_process_tree(proc)
+            try:
+                stdout, stderr = proc.communicate(timeout=1)
+            except Exception:
+                stdout, stderr = "", ""
+            duration_ms = int((time.time() - started) * 1000)
+            full = _combined_output(stdout, stderr) or "command timed out"
+            return 124, duration_ms, "command timed out", full
+    except Exception as exc:
         duration_ms = int((time.time() - started) * 1000)
-        full = _combined_output(proc.stdout, proc.stderr)
-        return int(proc.returncode), duration_ms, _short_message(full), full
-    except subprocess.TimeoutExpired as exc:
-        duration_ms = int((time.time() - started) * 1000)
-        # Best-effort: keep partial output if available.
-        # TimeoutExpired may contain stdout/stderr when capture_output is used.
-        full = _combined_output(getattr(exc, "stdout", None), getattr(exc, "stderr", None)) or "command timed out"
-        return 124, duration_ms, "command timed out", full
+        message = f"command failed: {exc}"
+        return 1, duration_ms, _short_message(message), message
 
 
 def _run_capture_args(args: list[str], timeout_ms: int) -> tuple[int, int, str]:
@@ -827,6 +958,19 @@ class RunStore:
             return path
         return None
 
+    def run_artifacts_size_bytes(self, run_id: str, *, sent: bool = False) -> int:
+        root = self._run_dir(run_id, sent=sent) / "artifacts"
+        if not root.exists():
+            return 0
+        total = 0
+        for child in root.rglob("*"):
+            if child.is_file():
+                try:
+                    total += max(0, int(child.stat().st_size))
+                except Exception:
+                    continue
+        return total
+
     def persist_report(self, report: fleet_gateway_v2_pb2.Report) -> None:
         run_dir = self._run_dir(report.run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -1130,85 +1274,182 @@ def _post_json(url: str, payload: dict[str, Any], *, timeout: int = 15) -> dict[
         return data if isinstance(data, dict) else {}
 
 
+def _artifact_upload_target(value: str) -> str:
+    target = normalize(value).lower()
+    if not target:
+        return "elabftw"
+    if target in {"none", "disabled", "off"}:
+        return "none"
+    return target
+
+
+def _artifact_upload_endpoint_and_limit() -> tuple[str, int] | None:
+    if not parse_bool(os.environ.get("ENABLE_ELAB_ARTIFACT_UPLOAD"), True):
+        return None
+    host = normalize(os.environ.get("FLEET_MANAGER_HOST"))
+    if not host:
+        return None
+    port = parse_int(os.environ.get("METRICS_PORT"), 9108)
+    endpoint = normalize(os.environ.get("FLEET_ARTIFACT_INGEST_URL")) or f"http://{host}:{max(1, port)}/ingest/v1/artifacts"
+    max_bytes = max(1024, parse_int(os.environ.get("ARTIFACT_UPLOAD_MAX_BYTES"), 20 * 1024 * 1024))
+    return endpoint, max_bytes
+
+
+def _upload_spool_artifact_to_elab(
+    artifact: fleet_gateway_v2_pb2.ArtifactRef,
+    store: RunStore,
+    *,
+    run_id: str,
+    experiment_numeric_id: int,
+    agent_id: str,
+    endpoint: str,
+    max_bytes: int,
+    timeout_s: int,
+) -> str:
+    if not normalize(artifact.uri).startswith("spool://"):
+        return "skipped"
+
+    path = store.artifact_path(run_id, artifact.name)
+    if path is None:
+        log.warning("artifact upload skipped: local file missing run_id=%s name=%s", run_id, artifact.name)
+        return "failed"
+
+    try:
+        size_bytes = int(path.stat().st_size)
+        if size_bytes > max_bytes:
+            log.warning(
+                "artifact upload skipped: too large run_id=%s name=%s size=%d max=%d",
+                run_id,
+                artifact.name,
+                size_bytes,
+                max_bytes,
+            )
+            return "failed"
+        raw = path.read_bytes()
+        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        payload = {
+            "experiment_id": str(experiment_numeric_id),
+            "run_id": normalize(run_id),
+            "agent_id": normalize(agent_id),
+            "artifact_name": normalize(artifact.name) or path.name,
+            "mime": mime,
+            "size_bytes": size_bytes,
+            "sha256": normalize(artifact.sha256),
+            "comment": f"fleet-v3 run={run_id} agent={agent_id} artifact={normalize(artifact.name)}",
+            "content_b64": base64.b64encode(raw).decode("ascii"),
+        }
+        response = _post_json(endpoint, payload, timeout=max(2, int(timeout_s)))
+        if not response.get("ok"):
+            log.warning("artifact upload rejected run_id=%s name=%s response=%s", run_id, artifact.name, response)
+            return "failed"
+
+        new_uri = normalize(response.get("artifact_uri") or response.get("location"))
+        if new_uri:
+            artifact.uri = new_uri
+        if parse_bool(os.environ.get("ARTIFACT_EVICT_AFTER_UPLOAD"), False):
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        return "uploaded"
+    except Exception as exc:
+        log.warning("artifact upload failed run_id=%s name=%s err=%s", run_id, artifact.name, exc)
+        return "failed"
+
+
+def opportunistic_upload_artifacts_to_elab(
+    run_id: str,
+    experiment_id: str,
+    agent_id: str,
+    artifacts: list[fleet_gateway_v2_pb2.ArtifactRef],
+    store: RunStore,
+    *,
+    enabled: bool,
+    target: str,
+) -> tuple[int, int]:
+    global _ARTIFACT_UPLOAD_NEXT_TRY_AT
+
+    if not enabled or not artifacts:
+        return (0, 0)
+    if _artifact_upload_target(target) != "elabftw":
+        return (0, 0)
+    experiment_numeric_id = parse_experiment_numeric_id(experiment_id)
+    if experiment_numeric_id is None:
+        return (0, 0)
+
+    config = _artifact_upload_endpoint_and_limit()
+    if config is None:
+        return (0, 0)
+
+    now_s = time.time()
+    if now_s < _ARTIFACT_UPLOAD_NEXT_TRY_AT:
+        return (0, 0)
+
+    endpoint, max_bytes = config
+    timeout_s = max(2, parse_int(os.environ.get("ARTIFACT_UPLOAD_DURING_MEASURE_TIMEOUT_S"), 3))
+    uploaded = 0
+    failed = 0
+
+    for artifact in artifacts:
+        status = _upload_spool_artifact_to_elab(
+            artifact,
+            store,
+            run_id=run_id,
+            experiment_numeric_id=experiment_numeric_id,
+            agent_id=agent_id,
+            endpoint=endpoint,
+            max_bytes=max_bytes,
+            timeout_s=timeout_s,
+        )
+        if status == "uploaded":
+            uploaded += 1
+        elif status == "failed":
+            failed += 1
+
+    if failed > 0 and uploaded == 0:
+        backoff_s = max(3, parse_int(os.environ.get("ARTIFACT_UPLOAD_BACKOFF_S"), 15))
+        _ARTIFACT_UPLOAD_NEXT_TRY_AT = now_s + float(backoff_s)
+    else:
+        _ARTIFACT_UPLOAD_NEXT_TRY_AT = now_s
+
+    return (uploaded, failed)
+
+
 def upload_report_artifacts_to_elab(
     report: fleet_gateway_v2_pb2.Report,
     store: RunStore,
     *,
     fallback_agent_id: str,
 ) -> tuple[int, int]:
-    if not parse_bool(os.environ.get("ENABLE_ELAB_ARTIFACT_UPLOAD"), True):
-        return (0, 0)
-
     experiment_numeric_id = parse_experiment_numeric_id(report.experiment_id)
     if experiment_numeric_id is None:
         return (0, 0)
 
-    host = normalize(os.environ.get("FLEET_MANAGER_HOST"))
-    if not host:
+    config = _artifact_upload_endpoint_and_limit()
+    if config is None:
         return (0, 0)
-    port = parse_int(os.environ.get("METRICS_PORT"), 9108)
-    endpoint = normalize(os.environ.get("FLEET_ARTIFACT_INGEST_URL")) or f"http://{host}:{max(1, port)}/ingest/v1/artifacts"
-    max_bytes = max(1024, parse_int(os.environ.get("ARTIFACT_UPLOAD_MAX_BYTES"), 20 * 1024 * 1024))
+    endpoint, max_bytes = config
 
     uploaded = 0
     failed = 0
     agent_id = normalize(report.agent_id) or normalize(fallback_agent_id)
+    timeout_s = max(10, min(60, parse_int(os.environ.get("ARTIFACT_UPLOAD_TIMEOUT_S"), 30)))
 
     for artifact in report.artifacts:
-        if not normalize(artifact.uri).startswith("spool://"):
-            continue
-        path = store.artifact_path(report.run_id, artifact.name)
-        if path is None:
-            failed += 1
-            log.warning("artifact upload skipped: local file missing run_id=%s name=%s", report.run_id, artifact.name)
-            continue
-        try:
-            size_bytes = int(path.stat().st_size)
-            if size_bytes > max_bytes:
-                failed += 1
-                log.warning(
-                    "artifact upload skipped: too large run_id=%s name=%s size=%d max=%d",
-                    report.run_id,
-                    artifact.name,
-                    size_bytes,
-                    max_bytes,
-                )
-                continue
-            raw = path.read_bytes()
-            mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-            payload = {
-                "experiment_id": str(experiment_numeric_id),
-                "run_id": normalize(report.run_id),
-                "agent_id": agent_id,
-                "artifact_name": normalize(artifact.name) or path.name,
-                "mime": mime,
-                "size_bytes": size_bytes,
-                "sha256": normalize(artifact.sha256),
-                "comment": f"fleet-v3 run={report.run_id} agent={agent_id} artifact={normalize(artifact.name)}",
-                "content_b64": base64.b64encode(raw).decode("ascii"),
-            }
-            response = _post_json(endpoint, payload, timeout=max(10, min(60, int(size_bytes / (128 * 1024)) + 10)))
-            if not response.get("ok"):
-                failed += 1
-                log.warning(
-                    "artifact upload rejected run_id=%s name=%s response=%s",
-                    report.run_id,
-                    artifact.name,
-                    response,
-                )
-                continue
-            new_uri = normalize(response.get("artifact_uri") or response.get("location"))
-            if new_uri:
-                artifact.uri = new_uri
+        status = _upload_spool_artifact_to_elab(
+            artifact,
+            store,
+            run_id=report.run_id,
+            experiment_numeric_id=experiment_numeric_id,
+            agent_id=agent_id,
+            endpoint=endpoint,
+            max_bytes=max_bytes,
+            timeout_s=timeout_s,
+        )
+        if status == "uploaded":
             uploaded += 1
-        except Exception as exc:
+        elif status == "failed":
             failed += 1
-            log.warning(
-                "artifact upload failed run_id=%s name=%s err=%s",
-                report.run_id,
-                artifact.name,
-                exc,
-            )
 
     return (uploaded, failed)
 
@@ -1225,10 +1466,15 @@ def collect_wifi_scan_series(
     sample_duration_s: int,
     device_id: str,
     emit_live_samples: bool,
+    experiment_id: str = "",
+    agent_id: str = "",
+    upload_during_measure: bool = False,
+    artifact_upload_target: str = "elabftw",
     override_cmdline: str = "",
     override_argv: list[str] | None = None,
     override_env: dict[str, str] | None = None,
 ) -> tuple[int, int, str, dict[str, str], list[fleet_gateway_v2_pb2.ArtifactRef]]:
+    cfg_env = override_env or {}
     min_interval_s = max(1, parse_int(os.environ.get("WIFI_SAMPLE_MIN_INTERVAL_S"), 1))
     max_duration_s = max(1, parse_int(os.environ.get("WIFI_SAMPLE_MAX_DURATION_S"), 300))
     max_points = max(1, parse_int(os.environ.get("WIFI_SAMPLE_MAX_POINTS"), 600))
@@ -1238,10 +1484,38 @@ def collect_wifi_scan_series(
     effective_interval_s = max(min_interval_s, requested_interval_s)
     effective_duration_s = min(requested_duration_s, max_duration_s)
     effective_duration_s = min(effective_duration_s, max(1, int(timeout_ms / 1000)))
-    effective_points = max(1, min(max_points, int(effective_duration_s / max(1, effective_interval_s))))
+    requested_start_delay_s = max(
+        0,
+        parse_int(cfg_env.get("WIFI_SAMPLE_START_DELAY_S") or os.environ.get("WIFI_SAMPLE_START_DELAY_S"), 0),
+    )
+    requested_start_jitter_s = max(
+        0,
+        parse_int(cfg_env.get("WIFI_SAMPLE_START_JITTER_S") or os.environ.get("WIFI_SAMPLE_START_JITTER_S"), 0),
+    )
+    requested_start_at_epoch_s = max(
+        0,
+        parse_int(cfg_env.get("WIFI_SAMPLE_START_AT_EPOCH_S") or os.environ.get("WIFI_SAMPLE_START_AT_EPOCH_S"), 0),
+    )
+    start_jitter_draw_s = random.randint(0, requested_start_jitter_s) if requested_start_jitter_s > 0 else 0
+    start_wait_epoch_needed_s = 0
+    if requested_start_at_epoch_s > 0:
+        now_epoch_s = int(time.time())
+        if requested_start_at_epoch_s > now_epoch_s:
+            start_wait_epoch_needed_s = requested_start_at_epoch_s - now_epoch_s
+
+    # Keep preface wait bounded so a misconfigured start time does not stall a run indefinitely.
+    max_preface_sleep_s = max(0, int(timeout_ms / 1000) - 1)
+    start_wait_epoch_applied_s = min(start_wait_epoch_needed_s, max_preface_sleep_s)
+    remaining_preface_s = max_preface_sleep_s - start_wait_epoch_applied_s
+    start_delay_applied_s = min(requested_start_delay_s, remaining_preface_s)
+    remaining_preface_s -= start_delay_applied_s
+    start_jitter_applied_s = min(start_jitter_draw_s, remaining_preface_s)
+    preface_sleep_applied_s = start_wait_epoch_applied_s + start_delay_applied_s + start_jitter_applied_s
+
+    effective_duration_budget_s = max(1, effective_duration_s - preface_sleep_applied_s)
+    effective_points = max(1, min(max_points, int(effective_duration_budget_s / max(1, effective_interval_s))))
     requested_artifact_stride = parse_int(
-        (override_env or {}).get("WIFI_SAMPLE_ARTIFACT_STRIDE")
-        or os.environ.get("WIFI_SAMPLE_ARTIFACT_STRIDE"),
+        cfg_env.get("WIFI_SAMPLE_ARTIFACT_STRIDE") or os.environ.get("WIFI_SAMPLE_ARTIFACT_STRIDE"),
         0,
     )
     artifact_stride = max(0, requested_artifact_stride)
@@ -1253,9 +1527,14 @@ def collect_wifi_scan_series(
     connected_samples = 0
     scan_ok_samples = 0
     artifact_samples = 0
+    artifacts_uploaded_during_measure = 0
+    artifacts_upload_failed_during_measure = 0
     total_duration_ms = 0
     last_metrics: dict[str, str] = {}
     start_monotonic = time.monotonic()
+
+    if preface_sleep_applied_s > 0:
+        time.sleep(preface_sleep_applied_s)
 
     for idx in range(1, effective_points + 1):
         sample_start = time.monotonic()
@@ -1282,6 +1561,18 @@ def collect_wifi_scan_series(
         all_artifacts.extend(artifacts)
         if keep_sample_artifacts:
             artifact_samples += 1
+        if upload_during_measure and artifacts:
+            uploaded_now, failed_now = opportunistic_upload_artifacts_to_elab(
+                run_id,
+                experiment_id,
+                agent_id,
+                artifacts,
+                store,
+                enabled=True,
+                target=artifact_upload_target,
+            )
+            artifacts_uploaded_during_measure += uploaded_now
+            artifacts_upload_failed_during_measure += failed_now
         last_metrics = metrics or {}
 
         ap_count = parse_int(last_metrics.get("wifi_ap_count"), 0)
@@ -1346,10 +1637,19 @@ def collect_wifi_scan_series(
         "wifi_sampling_interval_s_requested": str(requested_interval_s),
         "wifi_sampling_duration_s_requested": str(requested_duration_s),
         "wifi_sampling_interval_s_applied": str(effective_interval_s),
-        "wifi_sampling_duration_s_applied": str(effective_duration_s),
+        "wifi_sampling_duration_s_applied": str(effective_duration_budget_s),
         "wifi_sampling_points_applied": str(effective_points),
         "wifi_sampling_artifact_stride_applied": str(artifact_stride),
         "wifi_sampling_artifact_samples": str(artifact_samples),
+        "artifacts_uploaded_during_measure": str(artifacts_uploaded_during_measure),
+        "artifacts_upload_failed_during_measure": str(artifacts_upload_failed_during_measure),
+        "wifi_sampling_start_delay_s_requested": str(requested_start_delay_s),
+        "wifi_sampling_start_delay_s_applied": str(start_delay_applied_s),
+        "wifi_sampling_start_jitter_s_requested": str(requested_start_jitter_s),
+        "wifi_sampling_start_jitter_s_applied": str(start_jitter_applied_s),
+        "wifi_sampling_start_wait_epoch_s_requested": str(start_wait_epoch_needed_s),
+        "wifi_sampling_start_wait_epoch_s_applied": str(start_wait_epoch_applied_s),
+        "wifi_sampling_preface_sleep_s_applied": str(preface_sleep_applied_s),
     }
     if rssi_samples:
         aggregate["wifi_avg_rssi_dbm"] = f"{(sum(rssi_samples) / len(rssi_samples)):.2f}"
@@ -1360,8 +1660,8 @@ def collect_wifi_scan_series(
 
     wall_ms = int((time.monotonic() - start_monotonic) * 1000.0)
     message = (
-        f"wifi sampled {effective_points}x in {effective_duration_s}s "
-        f"(interval={effective_interval_s}s, rssi_samples={len(rssi_samples)})"
+        f"wifi sampled {effective_points}x in {effective_duration_budget_s}s "
+        f"(interval={effective_interval_s}s, preface={preface_sleep_applied_s}s, rssi_samples={len(rssi_samples)})"
     )
     return 0, max(total_duration_ms, wall_ms), message, aggregate, all_artifacts
 
@@ -1454,6 +1754,10 @@ def collect_csi_capture(
         "csi_collector_configured": "0",
         "csi_capture_ok": "0",
         "csi_capture_disabled": "0",
+        "csi_capture_timeout": "0",
+        "csi_capture_evidence_ok": "0",
+        "csi_collector_sudo_noninteractive": "0",
+        "csi_collector_sudo_prompt": "0",
     }
     artifacts: list[fleet_gateway_v2_pb2.ArtifactRef] = []
     cfg = {normalize(k): normalize(v) for k, v in (env or {}).items() if normalize(k)}
@@ -1481,6 +1785,7 @@ def collect_csi_capture(
         metrics["csi_frames_count"] = str(frames)
         metrics["csi_collector_configured"] = "1"
         metrics["csi_capture_ok"] = "1"
+        metrics["csi_capture_evidence_ok"] = "1"
         metrics.update(_collect_device_status_metrics())
         return 0, duration_ms, "simulated csi capture", metrics, []
 
@@ -1505,10 +1810,21 @@ def collect_csi_capture(
         if not raw:
             continue
         output_patterns.extend([normalize(row) for row in raw.split(",") if normalize(row)])
+    output_patterns.extend(_extract_output_paths_from_command(collector_cmdline, collector_argv))
 
     frame_pattern = normalize(cfg.get("CSI_FRAMES_REGEX") or os.environ.get("CSI_FRAMES_REGEX"))
     if not frame_pattern:
         frame_pattern = r"\b(?:frames|csi_frames|csi_frames_count)\s*[=:]\s*(\d+)\b"
+    min_frames_required = max(0, parse_int(cfg.get("CSI_MIN_FRAMES") or os.environ.get("CSI_MIN_FRAMES"), 0))
+    min_output_files_required = max(
+        0,
+        parse_int(cfg.get("CSI_MIN_OUTPUT_FILES") or os.environ.get("CSI_MIN_OUTPUT_FILES"), 0),
+    )
+    require_evidence = parse_bool(cfg.get("CSI_REQUIRE_EVIDENCE") or os.environ.get("CSI_REQUIRE_EVIDENCE"), False)
+    force_noninteractive_sudo = parse_bool(
+        cfg.get("CSI_SUDO_NONINTERACTIVE") or os.environ.get("CSI_SUDO_NONINTERACTIVE"),
+        True,
+    )
 
     def parse_frames_from_text(payload: str) -> int | None:
         if not payload:
@@ -1535,6 +1851,44 @@ def collect_csi_capture(
                     candidates.append(parsed)
         return max(candidates) if candidates else None
 
+    def parse_frames_from_feitcsi_binary(path: Path) -> int | None:
+        # FeitCSI .dat stream is a sequence of [272-byte header][csiDataSize bytes].
+        header_len = 272
+        try:
+            file_size = max(0, int(path.stat().st_size))
+        except Exception:
+            return None
+        if file_size < (header_len + 4):
+            return None
+
+        frames = 0
+        consumed = 0
+        try:
+            with path.open("rb") as handle:
+                while consumed + 4 <= file_size:
+                    raw_size = handle.read(4)
+                    if len(raw_size) < 4:
+                        break
+                    consumed += 4
+
+                    csi_data_size = int.from_bytes(raw_size, byteorder="little", signed=False)
+                    record_size = header_len + csi_data_size
+                    if csi_data_size <= 0 or record_size <= header_len:
+                        break
+
+                    remaining = file_size - consumed
+                    skip = record_size - 4
+                    if skip > remaining:
+                        break
+
+                    handle.seek(skip, os.SEEK_CUR)
+                    consumed += skip
+                    frames += 1
+        except Exception:
+            return None
+
+        return frames if frames > 0 else None
+
     def expand_output_paths(patterns: list[str]) -> list[Path]:
         results: list[Path] = []
         seen: set[str] = set()
@@ -1558,16 +1912,22 @@ def collect_csi_capture(
 
     if collector_cmdline or collector_argv:
         metrics["csi_collector_configured"] = "1"
+        if force_noninteractive_sudo:
+            metrics["csi_collector_sudo_noninteractive"] = "1"
         exit_code, duration_ms, short, full = run_command_capture(
             collector_cmdline,
             collector_argv,
             cfg,
             timeout_ms,
             True,
+            force_noninteractive_sudo=force_noninteractive_sudo,
         )
         metrics["csi_collector_exit_code"] = str(int(exit_code))
         metrics["csi_capture_ok"] = "1" if int(exit_code) == 0 else "0"
+        metrics["csi_capture_timeout"] = "1" if int(exit_code) == 124 else "0"
         metrics["csi_supported"] = "1" if int(exit_code) != 127 else "0"
+        if re.search(r"(a terminal is required|password is required|sudo: .*password)", full or "", flags=re.IGNORECASE):
+            metrics["csi_collector_sudo_prompt"] = "1"
 
         frames_found = parse_frames_from_text(full)
         imported_files = 0
@@ -1598,7 +1958,11 @@ def collect_csi_capture(
                     parsed = parse_frames_from_text(preview)
                     if parsed is not None:
                         frames_found = parsed
-                    elif output_file.suffix.lower() in {".csv", ".txt", ".log", ".ndjson", ".jsonl"}:
+                    else:
+                        parsed = parse_frames_from_feitcsi_binary(output_file)
+                        if parsed is not None:
+                            frames_found = parsed
+                    if frames_found is None and output_file.suffix.lower() in {".csv", ".txt", ".log", ".ndjson", ".jsonl"}:
                         line_count = 0
                         with output_file.open("rb") as handle:
                             for line in handle:
@@ -1623,6 +1987,24 @@ def collect_csi_capture(
         if frames_found is not None:
             metrics["csi_frames_count"] = str(max(0, int(frames_found)))
 
+        frames_value = max(0, int(metrics.get("csi_frames_count", "0") or 0))
+        evidence_ok = False
+        if min_frames_required > 0 or min_output_files_required > 0:
+            evidence_ok = (frames_value >= min_frames_required) and (imported_files >= min_output_files_required)
+        else:
+            evidence_ok = frames_value > 0 or imported_files > 0
+        metrics["csi_capture_evidence_ok"] = "1" if evidence_ok else "0"
+
+        if int(exit_code) == 124 and evidence_ok:
+            # Timeout is expected for long-running collectors; keep timeout marker
+            # but accept capture when artifacts/frames prove data was produced.
+            exit_code = 0
+            metrics["csi_capture_ok"] = "1"
+
+        if require_evidence and not evidence_ok and int(exit_code) == 0:
+            exit_code = 65
+            metrics["csi_capture_ok"] = "0"
+
         if int(metrics.get("csi_capture_ok", "0")) == 1 and (frames_found or imported_files > 0):
             metrics["csi_supported"] = "1"
 
@@ -1631,7 +2013,13 @@ def collect_csi_capture(
         except Exception:
             log.exception("Failed to persist csi output artifact")
         metrics.update(_collect_device_status_metrics())
-        return int(exit_code), duration_ms, short or "csi capture done", metrics, artifacts
+        msg = short or "csi capture done"
+        if require_evidence and not evidence_ok:
+            msg = (
+                f"csi evidence missing (frames={frames_value}, files={imported_files}, "
+                f"min_frames={min_frames_required}, min_files={min_output_files_required})"
+            )
+        return int(exit_code), duration_ms, msg, metrics, artifacts
 
     # No capture tool configured.
     try:
@@ -1669,6 +2057,9 @@ def main() -> None:
     ack_prepared_rpc_timeout_s = parse_timeout_seconds("ACK_PREPARED_RPC_TIMEOUT_S", control_rpc_timeout_s)
     data_root = Path(os.environ.get("DATA_ROOT", "./data"))
     sent_retention_days = int(os.environ.get("SENT_RETENTION_DAYS", "14"))
+    global_upload_during_measure = parse_bool(os.environ.get("ARTIFACT_UPLOAD_DURING_MEASURE"), False)
+    global_artifact_upload_target = _artifact_upload_target(os.environ.get("ARTIFACT_UPLOAD_TARGET"))
+    run_artifact_soft_limit_bytes = max(0, parse_int(os.environ.get("RUN_ARTIFACT_SOFT_LIMIT_BYTES"), 0))
 
     fm_target_for_route = os.environ.get("FLEET_MANAGER_ROUTE_TARGET", fleet_host)
 
@@ -1810,6 +2201,9 @@ def main() -> None:
         wifi_ap_total = 0
         ble_adv_total = 0
         csi_frames_total = 0
+        artifacts_uploaded_during_measure = 0
+        artifacts_upload_failed_during_measure = 0
+        run_storage_pressure_hits = 0
         latest_observed_metrics: dict[str, str] = {}
         for group in policy.command_groups:
             group_from = getattr(group, "from")
@@ -1823,6 +2217,13 @@ def main() -> None:
                 cmd_type_name = command_type_name(int(cmd.type))
                 cmd_argv = [normalize(a) for a in getattr(cmd, "argv", []) if normalize(a)]
                 cmd_env = {normalize(k): normalize(v) for k, v in getattr(cmd, "env", {}).items() if normalize(k)}
+                upload_during_measure = parse_bool(
+                    cmd_env.get("ARTIFACT_UPLOAD_DURING_MEASURE"),
+                    global_upload_during_measure,
+                )
+                artifact_upload_target = _artifact_upload_target(
+                    cmd_env.get("ARTIFACT_UPLOAD_TARGET") or global_artifact_upload_target
+                )
 
                 record(
                     fleet_gateway_v2_pb2.Event(
@@ -1856,6 +2257,14 @@ def main() -> None:
                         cmd_env.get("WIFI_SAMPLE_EMIT_HTTP") or cmd_env.get("SAMPLE_EMIT_HTTP"),
                         True,
                     )
+                    # In single-Wi-Fi control-plane mode, avoid extra live HTTP traffic during sampling.
+                    # Samples are still persisted locally and uploaded after run completion/replay.
+                    allow_wifi_live_ingest = parse_bool(
+                        cmd_env.get("ALLOW_WIFI_LIVE_INGEST") or os.environ.get("ALLOW_WIFI_LIVE_INGEST"),
+                        False,
+                    )
+                    if emit_live_samples and route_iface and route_iface.startswith("wl") and not allow_wifi_live_ingest:
+                        emit_live_samples = False
                     if requested_interval_s > 0 and requested_duration_s > 0:
                         exit_code, duration_ms, message, parsed, extra_artifacts = collect_wifi_scan_series(
                             wifi_iface,
@@ -1868,6 +2277,10 @@ def main() -> None:
                             sample_duration_s=requested_duration_s,
                             device_id=agent_id,
                             emit_live_samples=emit_live_samples,
+                            experiment_id=policy.experiment_id,
+                            agent_id=agent_id,
+                            upload_during_measure=upload_during_measure,
+                            artifact_upload_target=artifact_upload_target,
                             override_cmdline=cmdline,
                             override_argv=cmd_argv,
                             override_env=cmd_env,
@@ -1932,6 +2345,15 @@ def main() -> None:
                         except Exception:
                             log.exception("Failed to persist command output artifact for cmd_id=%s", cmd_id)
 
+                artifacts_uploaded_during_measure += max(
+                    0,
+                    parse_int((event_metrics or {}).get("artifacts_uploaded_during_measure"), 0),
+                )
+                artifacts_upload_failed_during_measure += max(
+                    0,
+                    parse_int((event_metrics or {}).get("artifacts_upload_failed_during_measure"), 0),
+                )
+
                 if exit_code != 0:
                     commands_failed += 1
 
@@ -1965,21 +2387,46 @@ def main() -> None:
                     )
                 )
 
+                command_artifacts: list[fleet_gateway_v2_pb2.ArtifactRef] = []
                 try:
-                    artifacts.append(
-                        store.write_command_log(
-                            run_id=run_id,
-                            cmd_id=cmd_id,
-                            cmdline=cmdline or (" ".join(cmd_argv) if cmd_argv else cmd_type_name),
-                            exit_code=exit_code,
-                            duration_ms=max(0, int(duration_ms)),
-                            message=message,
-                        )
+                    cmd_artifact = store.write_command_log(
+                        run_id=run_id,
+                        cmd_id=cmd_id,
+                        cmdline=cmdline or (" ".join(cmd_argv) if cmd_argv else cmd_type_name),
+                        exit_code=exit_code,
+                        duration_ms=max(0, int(duration_ms)),
+                        message=message,
                     )
+                    command_artifacts.append(cmd_artifact)
+                    artifacts.append(cmd_artifact)
                 except Exception:
                     log.exception("Failed to persist command artifact for run_id=%s command_id=%s", run_id, cmd_id)
 
-                artifacts.extend(extra_artifacts)
+                for artifact in extra_artifacts:
+                    command_artifacts.append(artifact)
+                    artifacts.append(artifact)
+
+                if run_artifact_soft_limit_bytes > 0:
+                    run_artifacts_bytes = store.run_artifacts_size_bytes(run_id)
+                    if run_artifacts_bytes >= run_artifact_soft_limit_bytes:
+                        run_storage_pressure_hits += 1
+                        latest_observed_metrics["run_artifacts_bytes_local"] = str(run_artifacts_bytes)
+                        latest_observed_metrics["run_artifacts_soft_limit_bytes"] = str(run_artifact_soft_limit_bytes)
+                        # Force opportunistic upload under storage pressure.
+                        upload_during_measure = True
+
+                if upload_during_measure and command_artifacts:
+                    uploaded_now, failed_now = opportunistic_upload_artifacts_to_elab(
+                        run_id,
+                        policy.experiment_id,
+                        agent_id,
+                        command_artifacts,
+                        store,
+                        enabled=True,
+                        target=artifact_upload_target,
+                    )
+                    artifacts_uploaded_during_measure += uploaded_now
+                    artifacts_upload_failed_during_measure += failed_now
 
                 if exit_code != 0 and group.failure_mode == fleet_gateway_v2_pb2.FAIL_FAST:
                     break
@@ -2007,29 +2454,50 @@ def main() -> None:
         )
 
         try:
-            artifacts.append(
-                store.write_summary_artifact(
-                    run_id,
-                    {
-                        "run_id": run_id,
-                        "status": status,
-                        "commands_total": commands_total,
-                        "commands_failed": commands_failed,
-                        "wifi_ap_total": wifi_ap_total,
-                        "ble_adv_total": ble_adv_total,
-                        "csi_frames_total": csi_frames_total,
-                        "latest_metrics": latest_observed_metrics,
-                        "generated_at": now_utc().isoformat().replace("+00:00", "Z"),
-                    },
-                )
+            summary_artifact = store.write_summary_artifact(
+                run_id,
+                {
+                    "run_id": run_id,
+                    "status": status,
+                    "commands_total": commands_total,
+                    "commands_failed": commands_failed,
+                    "wifi_ap_total": wifi_ap_total,
+                    "ble_adv_total": ble_adv_total,
+                    "csi_frames_total": csi_frames_total,
+                    "artifacts_uploaded_during_measure": artifacts_uploaded_during_measure,
+                    "artifacts_upload_failed_during_measure": artifacts_upload_failed_during_measure,
+                    "run_storage_pressure_hits": run_storage_pressure_hits,
+                    "latest_metrics": latest_observed_metrics,
+                    "generated_at": now_utc().isoformat().replace("+00:00", "Z"),
+                },
             )
+            artifacts.append(summary_artifact)
+            if global_upload_during_measure:
+                uploaded_now, failed_now = opportunistic_upload_artifacts_to_elab(
+                    run_id,
+                    policy.experiment_id,
+                    agent_id,
+                    [summary_artifact],
+                    store,
+                    enabled=True,
+                    target=global_artifact_upload_target,
+                )
+                artifacts_uploaded_during_measure += uploaded_now
+                artifacts_upload_failed_during_measure += failed_now
         except Exception:
             log.exception("Failed to persist summary artifact for run_id=%s", run_id)
+
+        latest_observed_metrics["run_artifacts_bytes_local"] = str(store.run_artifacts_size_bytes(run_id))
+        if run_artifact_soft_limit_bytes > 0:
+            latest_observed_metrics["run_artifacts_soft_limit_bytes"] = str(run_artifact_soft_limit_bytes)
 
         summary_metrics = {
             "commands_total": str(commands_total),
             "commands_failed": str(commands_failed),
             "artifacts_total": str(len(artifacts)),
+            "artifacts_uploaded_during_measure": str(artifacts_uploaded_during_measure),
+            "artifacts_upload_failed_during_measure": str(artifacts_upload_failed_during_measure),
+            "run_storage_pressure_hits": str(run_storage_pressure_hits),
             "wifi_ap_total": str(wifi_ap_total),
             "ble_adv_total": str(ble_adv_total),
             "csi_frames_total": str(csi_frames_total),
@@ -2055,6 +2523,8 @@ def main() -> None:
             "csi_capture_disabled",
             "csi_output_files_count",
             "csi_output_bytes_total",
+            "run_artifacts_bytes_local",
+            "run_artifacts_soft_limit_bytes",
             "device_cpu_temp_c",
             "device_load1",
             "device_uptime_s",
