@@ -241,3 +241,4 @@ python -m grpc_tools.protoc -I device-sim/proto --python_out=device-sim --grpc_p
   device-sim/proto/fleet_gateway.proto device-sim/proto/fleet_gateway_v2.proto
 FLEET_MANAGER_HOST=127.0.0.1 FLEET_MANAGER_PORT=50060 MAX_SYNC_CYCLES=1 EXECUTE_POLICY=false python -u device-sim/agent_v2_client.py
 ```
+

@@ -32,3 +32,4 @@ __pycache__/
 *.out
 *.synctex.gz
 *.toc
+.aider*

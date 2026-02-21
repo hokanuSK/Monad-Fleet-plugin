@@ -488,6 +488,29 @@ elabftw://experiments/<id>/uploads/<upload_id>
 
 If upload fails or is disabled, URI remains \texttt{spool://...} and run reporting still succeeds.
 
+\subsection{Artifact bundling profile (current default)}
+To reduce artifact fan-out per run, the agent bundles text artifacts before final report upload:
+\begin{itemize}
+  \item merge target: \texttt{.txt}, \texttt{.log}, \texttt{.json} (except \texttt{run-summary.json})
+  \item bundle artifact name: \texttt{wifi-ble-csi-artifacts-bundle-<timestamp>.tar.gz}
+  \item bundle contents:
+    \begin{itemize}
+      \item \texttt{entries/<original-files>}
+      \item \texttt{manifest.json} (metadata only: name/checksum/size)
+    \end{itemize}
+  \item binary/raw capture outputs (for example CSI \texttt{.dat}) remain separate artifacts
+  \item by default, merged source text files are deleted locally after bundle creation
+\end{itemize}
+
+Bundle controls:
+\begin{itemize}
+  \item \texttt{MERGE\_TEXT\_ARTIFACTS=true|false} (default \texttt{true})
+  \item \texttt{MERGE\_TEXT\_ARTIFACTS\_DELETE\_SOURCES=true|false} (default \texttt{true})
+\end{itemize}
+
+With this profile enabled, a typical real Pi run publishes three primary artifacts:
+\texttt{wifi-ble-csi-artifacts-bundle-*.tar.gz}, CSI binary output, and \texttt{run-summary.json}.
+
 Relevant artifact classes for experiment analysis:
 \begin{itemize}
   \item Wi-Fi: scan/link snapshots, command logs
@@ -624,6 +647,8 @@ ARTIFACT_UPLOAD_DURING_MEASURE=false
 ARTIFACT_UPLOAD_TARGET=elabftw
 ARTIFACT_EVICT_AFTER_UPLOAD=false
 RUN_ARTIFACT_SOFT_LIMIT_BYTES=0
+MERGE_TEXT_ARTIFACTS=true
+MERGE_TEXT_ARTIFACTS_DELETE_SOURCES=true
 
 # Extended real-device observability
 ENABLE_WIFI_EXTENDED_METRICS=true
@@ -643,6 +668,7 @@ CSI_ALLOW_THROTTLED=false
 \textbf{Note:} real Wi-Fi/BLE metrics depend on local tools (\texttt{iw}, \texttt{bluetoothctl}) and radio access.
 \textbf{Live ingest safety note:} when Fleet route is over Wi-Fi (\texttt{wl*}), sampled Wi-Fi live HTTP ingest is auto-disabled by default; data is still persisted locally and uploaded after run/report replay. Set \texttt{ALLOW\_WIFI\_LIVE\_INGEST=true} (or command env \texttt{ALLOW\_WIFI\_LIVE\_INGEST}) to override.
 \textbf{Long-run storage note:} enable \texttt{ARTIFACT\_UPLOAD\_DURING\_MEASURE=true} to mirror artifacts while measurement is still running. With \texttt{ARTIFACT\_EVICT\_AFTER\_UPLOAD=true}, local files are deleted after successful upload to reduce on-device storage pressure.
+\textbf{Artifact bundling note:} \texttt{MERGE\_TEXT\_ARTIFACTS=true} (default) consolidates text artifacts into one \texttt{.tar.gz} bundle; set \texttt{MERGE\_TEXT\_ARTIFACTS\_DELETE\_SOURCES=false} if local per-command text files must remain on the device.
 \textbf{CSI note:} this interface now supports an external CSI collector hook. Without configured collector command/output, CSI metrics will remain at zero and report explicit collector-status metrics.
 \textbf{Control-plane safety note:} when the current route to Fleet Manager is over Wi-Fi, active CSI collection can disrupt connectivity. The smoke tooling defaults to \texttt{DISABLE\_CSI\_CAPTURE=true} in this case unless explicitly overridden.
 \textbf{Strict CSI gate note:} if \texttt{REQUIRE\_REAL\_CSI=true} and route to Fleet Manager is over Wi-Fi, \texttt{scripts/rpi/smoke\_test\_agent.sh} now fails fast unless \texttt{ALLOW\_WIFI\_DISRUPTIVE\_CSI=true}.
@@ -804,6 +830,8 @@ ARTIFACT_EVICT_AFTER_UPLOAD=true|false
 ARTIFACT_UPLOAD_DURING_MEASURE_TIMEOUT_S=3
 ARTIFACT_UPLOAD_BACKOFF_S=15
 RUN_ARTIFACT_SOFT_LIMIT_BYTES=0
+MERGE_TEXT_ARTIFACTS=true|false
+MERGE_TEXT_ARTIFACTS_DELETE_SOURCES=true|false
 
 # Optional demo-only synthetic metric injection
 INJECT_HYPOTHETICAL_METRICS=true|false
@@ -1003,6 +1031,8 @@ monad_fleet_artifact_uploads_total
   \item metric forwarding target can change at Prometheus \texttt{remote\_write} without changing the device gRPC contract.
   \item this deployment sets \texttt{METRICS\_EXCLUDE\_PREFIXES=csi\_} on Fleet service, so CSI metrics are not exported to Grafana.
   \item artifact upload to eLabFTW is implemented through \texttt{/ingest/v1/artifacts}; upload can be disabled per-agent if needed.
+  \item default Pi profile bundles text artifacts into \texttt{wifi-ble-csi-artifacts-bundle-*.tar.gz} and uploads CSI binary + run summary as separate artifacts.
+  \item bundle manifest stores metadata only (no inlined artifact text payload fields); merged source text files are removed locally by default.
   \item sampled Wi-Fi runs throttle artifact fan-out by default (first+last sample artifact retention) to prevent oversized report processing on long sampling windows.
   \item agent-side report replay timeout is configurable via \texttt{REPORT\_RPC\_TIMEOUT\_S} and defaults to a higher value for Pi smoke runs.
   \item control-plane RPC timeouts can be tuned globally via \texttt{CONTROL\_RPC\_TIMEOUT\_S} or per method via \texttt{HELLO\_RPC\_TIMEOUT\_S}, \texttt{ASSIGNMENT\_RPC\_TIMEOUT\_S}, \texttt{POLICY\_RPC\_TIMEOUT\_S}, and \texttt{ACK\_PREPARED\_RPC\_TIMEOUT\_S}.

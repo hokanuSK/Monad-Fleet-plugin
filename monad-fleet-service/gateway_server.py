@@ -200,6 +200,101 @@ def append_artifact_journal(payload: dict[str, Any]) -> None:
             fh.write(line)
 
 
+def find_artifact_upload_in_journal(
+    *,
+    experiment_id: int,
+    run_id: str,
+    agent_id: str,
+    artifact_name: str,
+    sha256_value: str,
+    size_bytes: int,
+) -> dict[str, Any] | None:
+    path = ARTIFACT_INGEST_JOURNAL_PATH
+    if path is None or not path.exists():
+        return None
+
+    target_run = normalize_string(run_id)
+    target_agent = normalize_device_id(agent_id)
+    target_name = normalize_string(artifact_name)
+    target_sha = normalize_string(sha256_value)
+    target_size = max(0, int(size_bytes))
+
+    with INGEST_JOURNAL_LOCK:
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception:
+            return None
+
+    for raw in reversed(lines):
+        if not normalize_string(raw):
+            continue
+        try:
+            entry = json.loads(raw)
+        except Exception:
+            continue
+        if not isinstance(entry, dict):
+            continue
+
+        if int(entry.get("experiment_id", -1)) != int(experiment_id):
+            continue
+        if normalize_string(entry.get("run_id")) != target_run:
+            continue
+        if normalize_device_id(entry.get("agent_id")) != target_agent:
+            continue
+        if normalize_string(entry.get("artifact_name")) != target_name:
+            continue
+
+        entry_sha = normalize_string(entry.get("sha256"))
+        entry_size = int(entry.get("size_bytes", 0) or 0)
+        if target_sha:
+            if entry_sha != target_sha:
+                continue
+        else:
+            if max(0, entry_size) != target_size:
+                continue
+
+        location = normalize_string(entry.get("location"))
+        upload_id = entry.get("upload_id")
+        if not location and not isinstance(upload_id, int):
+            continue
+        return entry
+
+    return None
+
+
+def build_uploaded_artifact_name(
+    *,
+    artifact_name: str,
+    run_id: str,
+    agent_id: str,
+    upload_phase: str,
+    sha256_value: str,
+    size_bytes: int,
+) -> str:
+    original = normalize_string(artifact_name) or "artifact.bin"
+    phase_token = safe_metric_token(upload_phase, "report").replace("_", "-")
+
+    run_raw = re.sub(r"[^a-zA-Z0-9]", "", normalize_string(run_id))
+    run_short = (run_raw[:8] if run_raw else "run")
+
+    agent_raw = re.sub(r"[^a-zA-Z0-9]", "", normalize_device_id(agent_id))
+    agent_short = (agent_raw[-6:] if agent_raw else "agent")
+
+    p = Path(original)
+    ext = p.suffix if p.suffix and len(p.suffix) <= 12 else ""
+    stem = p.name[: -len(ext)] if ext else p.name
+    stem_safe = re.sub(r"[^a-zA-Z0-9._-]+", "-", stem).strip("-_.") or "artifact"
+
+    sha_token = normalize_string(sha256_value).lower()
+    content_tag = sha_token[:8] if sha_token else f"sz{max(0, int(size_bytes))}"
+
+    base = f"run-{run_short}__{phase_token}__ag-{agent_short}__{stem_safe}__{content_tag}"
+    max_base_len = 180 - len(ext)
+    if len(base) > max_base_len:
+        base = base[:max_base_len].rstrip("-_.")
+    return (base or "artifact") + ext
+
+
 def mark_device_seen(device_id: str) -> None:
     token = normalize_device_id(device_id)
     if not token:
@@ -773,6 +868,7 @@ class MetricsIngestHttpHandler(BaseHTTPRequestHandler):
         run_id = normalize_string(payload.get("run_id"))
         agent_id = normalize_device_id(payload.get("agent_id"))
         artifact_name = normalize_string(payload.get("artifact_name"))
+        upload_phase = normalize_string(payload.get("upload_phase")) or "report_replay"
         mime = normalize_string(payload.get("mime")) or "application/octet-stream"
         comment = normalize_string(payload.get("comment"))
         content_b64 = normalize_string(payload.get("content_b64"))
@@ -800,10 +896,53 @@ class MetricsIngestHttpHandler(BaseHTTPRequestHandler):
         if not comment:
             comment = f"fleet-v3 run={run_id} agent={agent_id} artifact={artifact_name} sha256={sha256_value} size={size_hint}"
 
+        existing = find_artifact_upload_in_journal(
+            experiment_id=exp_id,
+            run_id=run_id,
+            agent_id=agent_id,
+            artifact_name=artifact_name,
+            sha256_value=sha256_value,
+            size_bytes=len(raw),
+        )
+        if existing is not None:
+            existing_location = normalize_string(existing.get("location"))
+            existing_upload_id = existing.get("upload_id")
+            existing_artifact_uri = ""
+            if isinstance(existing_upload_id, int):
+                existing_artifact_uri = f"elabftw://experiments/{exp_id}/uploads/{existing_upload_id}"
+            elif existing_location:
+                existing_artifact_uri = existing_location
+            existing_stored_name = normalize_string(existing.get("stored_artifact_name")) or normalize_string(
+                existing.get("artifact_name")
+            )
+            ARTIFACT_UPLOADS_TOTAL.labels(status="deduplicated").inc()
+            self._write_json(
+                202,
+                {
+                    "ok": True,
+                    "deduplicated": True,
+                    "experiment_id": exp_id,
+                    "upload_id": existing_upload_id,
+                    "artifact_uri": existing_artifact_uri,
+                    "location": existing_location,
+                    "stored_artifact_name": existing_stored_name,
+                },
+            )
+            return
+
+        upload_filename = build_uploaded_artifact_name(
+            artifact_name=artifact_name,
+            run_id=run_id,
+            agent_id=agent_id,
+            upload_phase=upload_phase,
+            sha256_value=sha256_value,
+            size_bytes=len(raw),
+        )
+
         try:
             uploaded = ELAB_CLIENT_FOR_HTTP.upload_experiment_artifact(
                 exp_id,
-                artifact_name,
+                upload_filename,
                 raw,
                 comment=comment,
                 mime=mime,
@@ -828,6 +967,8 @@ class MetricsIngestHttpHandler(BaseHTTPRequestHandler):
                 "run_id": run_id,
                 "agent_id": agent_id,
                 "artifact_name": artifact_name,
+                "stored_artifact_name": upload_filename,
+                "upload_phase": upload_phase,
                 "sha256": sha256_value,
                 "size_bytes": len(raw),
                 "upload_id": upload_id,
@@ -843,6 +984,7 @@ class MetricsIngestHttpHandler(BaseHTTPRequestHandler):
                 "upload_id": upload_id,
                 "artifact_uri": artifact_uri,
                 "location": location,
+                "stored_artifact_name": upload_filename,
             },
         )
 

@@ -155,10 +155,15 @@ def has_command_event(prefix: str) -> bool:
     prefix = prefix.lower().strip()
     for event in events:
         command_id = str(event.get("command_id") or "").lower().strip()
-        event_type = str(event.get("type") or "").upper().strip()
+        event_type_raw = event.get("type")
+        event_type = str(event_type_raw or "").upper().strip()
+        event_type_num = to_int(event_type_raw, -1)
         if not command_id.startswith(prefix):
             continue
-        if event_type in {"COMMAND_FINISHED", "ERROR", "ARTIFACT_UPLOADED"}:
+        # v2 reports may store enum values either as names or numeric ids.
+        if event_type_num in {3, 4, 5, 6}:
+            return True
+        if event_type in {"COMMAND_STARTED", "COMMAND_FINISHED", "COMMAND_FAILED", "ERROR", "ARTIFACT_UPLOADED"}:
             return True
     return False
 

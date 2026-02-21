@@ -507,23 +507,25 @@
       {
         "current": {
           "selected": false,
-          "text": "2c:cf:67:80:f5:d9",
-          "value": "2c:cf:67:80:f5:d9"
+          "text": "02:42:ac:14:00:04",
+          "value": "02:42:ac:14:00:04"
         },
+        "definition": "label_values(monad_fleet_metric_value, device_id)",
         "hide": 0,
         "includeAll": false,
         "label": "Device",
+        "multi": false,
         "name": "device_id",
-        "options": [
-          {
-            "selected": true,
-            "text": "2c:cf:67:80:f5:d9",
-            "value": "2c:cf:67:80:f5:d9"
-          }
-        ],
-        "query": "2c:cf:67:80:f5:d9",
+        "options": [],
+        "query": {
+          "query": "label_values(monad_fleet_metric_value, device_id)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
         "skipUrlSync": false,
-        "type": "constant"
+        "sort": 1,
+        "type": "query"
       }
     ]
   },
@@ -535,6 +537,6 @@
   "timezone": "",
   "title": "Monad Fleet Wireless Sensing (Pi Smoke v3)",
   "uid": "monad-fleet-wireless-v3",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

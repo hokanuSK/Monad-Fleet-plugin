@@ -2,6 +2,7 @@
 import base64
 import glob
 import hashlib
+import io
 import json
 import logging
 import mimetypes
@@ -13,6 +14,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import tarfile
 import time
 import uuid
 import urllib.error
@@ -140,6 +142,195 @@ def route_interface_for_target(target_host: str) -> str:
         return ""
     match = re.search(r"\bdev\s+(\S+)", out)
     return match.group(1) if match else ""
+
+
+def _iface_exists(iface: str) -> bool:
+    name = normalize(iface)
+    return bool(name and Path(f"/sys/class/net/{name}").exists())
+
+
+def _list_iw_dev_interfaces(iw_bin: str | None) -> list[tuple[str, str]]:
+    if not iw_bin:
+        return []
+    rc, _, out = _run_capture_args([iw_bin, "dev"], 3000)
+    if rc != 0:
+        return []
+
+    interfaces: list[tuple[str, str]] = []
+    current_name = ""
+    current_type = ""
+    for raw in (out or "").splitlines():
+        line = raw.strip()
+        if line.startswith("Interface "):
+            if current_name:
+                interfaces.append((current_name, current_type))
+            current_name = normalize(line.split("Interface ", 1)[1])
+            current_type = ""
+            continue
+        if line.startswith("type ") and current_name:
+            current_type = normalize(line.split("type ", 1)[1]).lower()
+
+    if current_name:
+        interfaces.append((current_name, current_type))
+    return interfaces
+
+
+def _resolve_wifi_scan_iface(requested_iface: str, iw_bin: str | None) -> tuple[str, dict[str, str], str]:
+    requested = normalize(requested_iface)
+    metrics: dict[str, str] = {
+        "wifi_scan_iface_requested": requested,
+    }
+    if _iface_exists(requested):
+        metrics["wifi_scan_iface_used"] = requested
+        return requested, metrics, ""
+
+    candidates_managed: list[str] = []
+    candidates_other: list[str] = []
+    for name, iface_type in _list_iw_dev_interfaces(iw_bin):
+        if not _iface_exists(name):
+            continue
+        iface_type_norm = normalize(iface_type).lower()
+        if iface_type_norm in {"managed", "station"}:
+            candidates_managed.append(name)
+        elif iface_type_norm and iface_type_norm != "monitor":
+            candidates_other.append(name)
+        elif name.startswith("wl") and "mon" not in name.lower():
+            candidates_other.append(name)
+
+    if not candidates_managed and not candidates_other:
+        try:
+            for p in sorted(Path("/sys/class/net").iterdir()):
+                name = normalize(p.name)
+                if not name or not name.startswith("wl"):
+                    continue
+                if "mon" in name.lower():
+                    continue
+                candidates_other.append(name)
+        except Exception:
+            pass
+
+    fallback = (candidates_managed + candidates_other)[0] if (candidates_managed or candidates_other) else ""
+    if fallback:
+        metrics["wifi_scan_iface_used"] = fallback
+        metrics["wifi_scan_iface_fallback"] = "1"
+        note = f"configured wifi iface '{requested or '<unset>'}' missing; using '{fallback}'"
+        return fallback, metrics, note
+
+    metrics["wifi_scan_iface_used"] = ""
+    metrics["wifi_scan_iface_missing"] = "1"
+    note = f"wifi scan failed: interface '{requested or '<unset>'}' missing and no fallback interface found"
+    return "", metrics, note
+
+
+def _find_alternate_wifi_iface(current_iface: str, iw_bin: str | None) -> str:
+    current = normalize(current_iface)
+    managed: list[str] = []
+    other: list[str] = []
+    for name, iface_type in _list_iw_dev_interfaces(iw_bin):
+        if not _iface_exists(name) or name == current:
+            continue
+        iface_type_norm = normalize(iface_type).lower()
+        if iface_type_norm in {"managed", "station"}:
+            managed.append(name)
+        elif iface_type_norm and iface_type_norm != "monitor":
+            other.append(name)
+        elif name.startswith("wl") and "mon" not in name.lower():
+            other.append(name)
+
+    if not managed and not other:
+        try:
+            for p in sorted(Path("/sys/class/net").iterdir()):
+                name = normalize(p.name)
+                if not name or name == current or not name.startswith("wl"):
+                    continue
+                if "mon" in name.lower():
+                    continue
+                other.append(name)
+        except Exception:
+            pass
+
+    return (managed + other)[0] if (managed or other) else ""
+
+
+def _run_local_cmd(cmd: list[str], *, timeout_s: int = 20) -> tuple[int, str]:
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=max(1, int(timeout_s)),
+            check=False,
+        )
+        return int(proc.returncode), _combined_output(proc.stdout, proc.stderr)
+    except Exception as exc:
+        return 127, str(exc)
+
+
+def restart_control_plane_before_report(
+    iface: str,
+    target_host: str,
+    *,
+    down_s: int,
+    wait_s: int,
+    custom_cmd: str,
+    allow_wifi_restart: bool,
+) -> bool:
+    iface = normalize(iface)
+    if not iface and not custom_cmd:
+        log.warning("Pre-report reconnect skipped: no interface configured")
+        return False
+
+    if custom_cmd:
+        log.info("Pre-report reconnect: running custom command")
+        rc, out = _run_local_cmd(["bash", "-lc", custom_cmd], timeout_s=max(10, wait_s + down_s + 10))
+        if rc != 0:
+            log.warning("Pre-report reconnect custom command failed rc=%s out=%s", rc, _short_message(out, 500))
+            return False
+    else:
+        if iface.startswith("wl") and not allow_wifi_restart:
+            log.warning(
+                "Pre-report reconnect skipped on Wi-Fi iface=%s (set ALLOW_WIFI_CONTROL_PLANE_RESTART=true to force)",
+                iface,
+            )
+            return False
+        down_ok = False
+        for down_cmd in (["sudo", "-n", "ip", "link", "set", iface, "down"], ["ip", "link", "set", iface, "down"]):
+            rc, out = _run_local_cmd(down_cmd, timeout_s=10)
+            if rc == 0:
+                down_ok = True
+                break
+            log.debug("Pre-report reconnect down failed cmd=%s rc=%s out=%s", down_cmd, rc, _short_message(out, 300))
+        if not down_ok:
+            log.warning("Pre-report reconnect failed: unable to set %s down", iface)
+            return False
+
+        if down_s > 0:
+            time.sleep(max(0, down_s))
+
+        up_ok = False
+        for up_cmd in (["sudo", "-n", "ip", "link", "set", iface, "up"], ["ip", "link", "set", iface, "up"]):
+            rc, out = _run_local_cmd(up_cmd, timeout_s=10)
+            if rc == 0:
+                up_ok = True
+                break
+            log.debug("Pre-report reconnect up failed cmd=%s rc=%s out=%s", up_cmd, rc, _short_message(out, 300))
+        if not up_ok:
+            log.warning("Pre-report reconnect failed: unable to set %s up", iface)
+            return False
+
+    if not target_host:
+        return True
+
+    deadline = time.time() + max(0, wait_s)
+    while time.time() <= deadline:
+        route_iface = route_interface_for_target(target_host)
+        if route_iface:
+            log.info("Pre-report reconnect route restored via %s", route_iface)
+            return True
+        time.sleep(1)
+
+    log.warning("Pre-report reconnect did not restore route to %s within %ss", target_host, wait_s)
+    return False
 
 
 def detect_interfaces() -> list[fleet_gateway_v2_pb2.NetworkInterface]:
@@ -1146,24 +1337,69 @@ def collect_wifi_scan(
         metrics["wifi_ap_count"] = str(wifi_ap_count)
         metrics["wifi_avg_rssi_dbm"] = "-55.0"
         metrics["wifi_connected"] = "1"
+        metrics["wifi_scan_ok"] = "1"
+        metrics["wifi_scan_iface_requested"] = iface
+        metrics["wifi_scan_iface_used"] = iface
         metrics.update(_collect_device_status_metrics())
         return 0, duration_ms, f"simulated wifi scan on {iface}", metrics, []
 
     iw_bin = resolve_executable("iw", ["/usr/sbin/iw", "/sbin/iw"])
+    resolved_iface, iface_meta, iface_note = _resolve_wifi_scan_iface(iface, iw_bin)
+    metrics.update(iface_meta)
+    if not resolved_iface:
+        metrics.setdefault("wifi_scan_ok", "0")
+        metrics.setdefault("wifi_connected", "0")
+        metrics.setdefault("wifi_ap_count", "0")
+        metrics.update(_collect_device_status_metrics())
+        return 65, 0, iface_note, metrics, artifacts
+    iface = resolved_iface
 
     # Primary: active scan (may require CAP_NET_ADMIN); fall back to link status (should work unprivileged).
     if iw_bin:
         exit_code, duration_ms, out = _run_capture_args([iw_bin, "dev", iface, "scan"], timeout_ms)
     else:
         exit_code, duration_ms, out = 127, 0, "iw not found"
+    if exit_code != 0 and "No such device" in (out or ""):
+        retry_iface = _find_alternate_wifi_iface(iface, iw_bin)
+        if retry_iface and retry_iface != iface:
+            original_iface = iface
+            iface = retry_iface
+            metrics["wifi_scan_iface_used"] = iface
+            metrics["wifi_scan_iface_fallback"] = "1"
+            retry_note = f"scan iface '{original_iface}' reported no such device; retried on '{iface}'"
+            if iface_note:
+                iface_note = f"{iface_note}; {retry_note}"
+            else:
+                iface_note = retry_note
+            if iw_bin:
+                exit_code, duration_ms, out = _run_capture_args([iw_bin, "dev", iface, "scan"], timeout_ms)
+        else:
+            up_ok = False
+            for up_cmd in (["sudo", "-n", "ip", "link", "set", iface, "up"], ["ip", "link", "set", iface, "up"]):
+                rc, _ = _run_local_cmd(up_cmd, timeout_s=8)
+                if rc == 0:
+                    up_ok = True
+                    break
+            if up_ok and iw_bin:
+                exit_code, duration_ms, out = _run_capture_args([iw_bin, "dev", iface, "scan"], timeout_ms)
+                if exit_code == 0:
+                    recover_note = f"scan iface '{iface}' was brought up and recovered after no such device"
+                    if iface_note:
+                        iface_note = f"{iface_note}; {recover_note}"
+                    else:
+                        iface_note = recover_note
+
     if exit_code == 0:
         ap_count, avg_rssi = _parse_iw_scan(out)
         metrics["wifi_ap_count"] = str(max(0, int(ap_count)))
         if avg_rssi is not None:
             metrics["wifi_avg_rssi_dbm"] = f"{avg_rssi:.2f}"
         metrics["wifi_connected"] = "1"
+        metrics["wifi_scan_ok"] = "1"
         metrics.update(_collect_wifi_observability_metrics(iface, timeout_ms, iw_bin))
         msg = f"iw scan ok: ap_count={ap_count}"
+        if iface_note:
+            msg = f"{msg}; {iface_note}"
         if persist_artifacts:
             try:
                 artifacts.append(store.write_text_artifact(run_id, f"wifi-{cmd_id}-scan", out))
@@ -1184,6 +1420,8 @@ def collect_wifi_scan(
     metrics.update(_parse_iw_link_extended(out2))
     metrics.update(_collect_wifi_observability_metrics(iface, timeout_ms, iw_bin))
     msg = "iw scan unavailable; used iw link"
+    if iface_note:
+        msg = f"{msg}; {iface_note}"
     if persist_artifacts:
         try:
             artifacts.append(store.write_text_artifact(run_id, f"wifi-{cmd_id}-link", out2))
@@ -1192,6 +1430,7 @@ def collect_wifi_scan(
 
     if metrics.get("wifi_avg_rssi_dbm") is not None or metrics.get("wifi_connected") == "1":
         # Treat inability to scan as non-fatal for smoke testing on restricted environments.
+        metrics["wifi_scan_ok"] = "1"
         return 0, duration_ms2, msg, metrics, artifacts
 
     # Final fallback: parse /proc/net/wireless (common on lightweight images).
@@ -1207,16 +1446,39 @@ def collect_wifi_scan(
         metrics.update(_collect_iface_counters(iface))
         metrics.update(_collect_device_status_metrics())
         msg = "iw unavailable; used /proc/net/wireless"
+        if iface_note:
+            msg = f"{msg}; {iface_note}"
         if persist_artifacts:
             try:
                 artifacts.append(store.write_text_artifact(run_id, f"wifi-{cmd_id}-proc-wireless", proc_text))
             except Exception:
                 log.exception("Failed to persist proc wireless artifact")
-        return 0, duration_ms2, msg, metrics, artifacts
+        if metrics.get("wifi_connected") == "1" or metrics.get("wifi_avg_rssi_dbm") is not None:
+            metrics["wifi_scan_ok"] = "1"
+            return 0, duration_ms2, msg, metrics, artifacts
     except Exception:
         pass
 
-    return 0, duration_ms2, msg, metrics, artifacts
+    metrics["wifi_scan_ok"] = "0"
+    metrics.setdefault("wifi_connected", "0")
+    metrics.setdefault("wifi_ap_count", "0")
+    metrics.update(_collect_device_status_metrics())
+    failure_msg = (
+        "wifi sensing failed: no usable scan/link evidence "
+        "(scan unavailable and interface not connected)"
+    )
+    if iface_note:
+        failure_msg = f"{failure_msg}; {iface_note}"
+    if persist_artifacts:
+        try:
+            debug_payload = (
+                f"iw_scan_output:\n{out or '<empty>'}\n\n"
+                f"iw_link_output:\n{out2 if 'out2' in locals() else '<empty>'}\n"
+            )
+            artifacts.append(store.write_text_artifact(run_id, f"wifi-{cmd_id}-debug", debug_payload))
+        except Exception:
+            log.exception("Failed to persist wifi debug artifact")
+    return 65, duration_ms2 if "duration_ms2" in locals() else duration_ms, failure_msg, metrics, artifacts
 
 
 def _ingest_metrics_http(
@@ -1302,6 +1564,7 @@ def _upload_spool_artifact_to_elab(
     run_id: str,
     experiment_numeric_id: int,
     agent_id: str,
+    upload_phase: str,
     endpoint: str,
     max_bytes: int,
     timeout_s: int,
@@ -1332,6 +1595,7 @@ def _upload_spool_artifact_to_elab(
             "run_id": normalize(run_id),
             "agent_id": normalize(agent_id),
             "artifact_name": normalize(artifact.name) or path.name,
+            "upload_phase": normalize(upload_phase) or "report_replay",
             "mime": mime,
             "size_bytes": size_bytes,
             "sha256": normalize(artifact.sha256),
@@ -1397,6 +1661,7 @@ def opportunistic_upload_artifacts_to_elab(
             run_id=run_id,
             experiment_numeric_id=experiment_numeric_id,
             agent_id=agent_id,
+            upload_phase="measure_live",
             endpoint=endpoint,
             max_bytes=max_bytes,
             timeout_s=timeout_s,
@@ -1442,6 +1707,7 @@ def upload_report_artifacts_to_elab(
             run_id=report.run_id,
             experiment_numeric_id=experiment_numeric_id,
             agent_id=agent_id,
+            upload_phase="report_replay",
             endpoint=endpoint,
             max_bytes=max_bytes,
             timeout_s=timeout_s,
@@ -1452,6 +1718,101 @@ def upload_report_artifacts_to_elab(
             failed += 1
 
     return (uploaded, failed)
+
+
+def _merge_text_artifacts_enabled() -> bool:
+    return parse_bool(os.environ.get("MERGE_TEXT_ARTIFACTS"), True)
+
+
+def _merge_text_artifacts_delete_sources() -> bool:
+    return parse_bool(os.environ.get("MERGE_TEXT_ARTIFACTS_DELETE_SOURCES"), True)
+
+
+def merge_text_artifacts_for_run(
+    run_id: str,
+    artifacts: list[fleet_gateway_v2_pb2.ArtifactRef],
+    store: RunStore,
+) -> tuple[list[fleet_gateway_v2_pb2.ArtifactRef], int]:
+    if not artifacts:
+        return artifacts, 0
+
+    mergeable_suffixes = {".txt", ".log", ".json"}
+    keep_names = {"run-summary.json"}
+    kept: list[fleet_gateway_v2_pb2.ArtifactRef] = []
+    merge_candidates: list[tuple[fleet_gateway_v2_pb2.ArtifactRef, Path]] = []
+
+    for artifact in artifacts:
+        name = normalize(artifact.name)
+        if not name:
+            kept.append(artifact)
+            continue
+        if normalize(artifact.uri) and not normalize(artifact.uri).startswith("spool://"):
+            kept.append(artifact)
+            continue
+        suffix = Path(name).suffix.lower()
+        if name in keep_names or suffix not in mergeable_suffixes:
+            kept.append(artifact)
+            continue
+
+        path = store.artifact_path(run_id, name)
+        if path is None:
+            kept.append(artifact)
+            continue
+
+        merge_candidates.append((artifact, path))
+
+    if not merge_candidates:
+        return artifacts, 0
+
+    bundle_entries = [
+        {
+            "name": normalize(artifact.name),
+            "sha256": normalize(artifact.sha256),
+            "size_bytes": int(artifact.size_bytes or 0),
+        }
+        for artifact, _ in merge_candidates
+    ]
+    bundle_manifest = {
+        "schema": "fleet.v2.artifact_bundle.v2",
+        "run_id": normalize(run_id),
+        "created_at": now_utc().isoformat().replace("+00:00", "Z"),
+        "format": "tar.gz",
+        "entries_dir": "entries/",
+        "entries": bundle_entries,
+    }
+
+    artifacts_dir = merge_candidates[0][1].parent
+    stamp = int(time.time() * 1000)
+    bundle_name = f"wifi-ble-csi-artifacts-bundle-{stamp}.tar.gz"
+    bundle_path = artifacts_dir / bundle_name
+
+    try:
+        with tarfile.open(bundle_path, mode="w:gz") as archive:
+            for _, path in merge_candidates:
+                archive.add(path, arcname=f"entries/{path.name}", recursive=False)
+            manifest_bytes = json.dumps(bundle_manifest, indent=2, sort_keys=True).encode("utf-8")
+            info = tarfile.TarInfo(name="manifest.json")
+            info.size = len(manifest_bytes)
+            info.mtime = int(time.time())
+            archive.addfile(info, io.BytesIO(manifest_bytes))
+    except Exception:
+        log.exception("Failed to create merged artifact bundle for run_id=%s", run_id)
+        try:
+            if bundle_path.exists():
+                bundle_path.unlink()
+        except Exception:
+            pass
+        return artifacts, 0
+
+    if _merge_text_artifacts_delete_sources():
+        for _, path in merge_candidates:
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                log.debug("Failed to remove merged source artifact path=%s", path)
+
+    kept.append(artifact_from_path(bundle_name, bundle_path, run_id))
+    return kept, len(bundle_entries)
 
 
 def collect_wifi_scan_series(
@@ -2008,17 +2369,33 @@ def collect_csi_capture(
         if int(metrics.get("csi_capture_ok", "0")) == 1 and (frames_found or imported_files > 0):
             metrics["csi_supported"] = "1"
 
-        try:
-            artifacts.append(store.write_text_artifact(run_id, f"csi-{cmd_id}-output", full))
-        except Exception:
-            log.exception("Failed to persist csi output artifact")
         metrics.update(_collect_device_status_metrics())
         msg = short or "csi capture done"
+        if metrics.get("csi_capture_timeout") == "1" and metrics.get("csi_capture_ok") == "1":
+            msg = (
+                f"csi collector timed out but capture evidence ok "
+                f"(frames={frames_value}, files={imported_files})"
+            )
         if require_evidence and not evidence_ok:
             msg = (
                 f"csi evidence missing (frames={frames_value}, files={imported_files}, "
                 f"min_frames={min_frames_required}, min_files={min_output_files_required})"
             )
+        artifact_payload = full
+        if metrics.get("csi_capture_timeout") == "1" and metrics.get("csi_capture_ok") == "1":
+            summary = (
+                "collector timeout tolerated because capture evidence was present "
+                f"(frames={frames_value}, files={imported_files})."
+            )
+            body = (artifact_payload or "").strip()
+            if not body or body == "command timed out":
+                artifact_payload = summary + "\ncollector_output: command timed out\n"
+            else:
+                artifact_payload = summary + "\n\n" + body + "\n"
+        try:
+            artifacts.append(store.write_text_artifact(run_id, f"csi-{cmd_id}-output", artifact_payload))
+        except Exception:
+            log.exception("Failed to persist csi output artifact")
         return int(exit_code), duration_ms, msg, metrics, artifacts
 
     # No capture tool configured.
@@ -2060,6 +2437,16 @@ def main() -> None:
     global_upload_during_measure = parse_bool(os.environ.get("ARTIFACT_UPLOAD_DURING_MEASURE"), False)
     global_artifact_upload_target = _artifact_upload_target(os.environ.get("ARTIFACT_UPLOAD_TARGET"))
     run_artifact_soft_limit_bytes = max(0, parse_int(os.environ.get("RUN_ARTIFACT_SOFT_LIMIT_BYTES"), 0))
+    separate_measure_and_report = parse_bool(os.environ.get("SEPARATE_MEASURE_AND_REPORT"), False)
+    restart_control_plane_before_send = parse_bool(
+        os.environ.get("RESTART_CONTROL_PLANE_BEFORE_REPORT"),
+        separate_measure_and_report,
+    )
+    restart_control_plane_iface = normalize(os.environ.get("CONTROL_PLANE_RESTART_IFACE") or control_plane_iface)
+    restart_control_plane_down_s = max(0, parse_int(os.environ.get("CONTROL_PLANE_RESTART_DOWN_S"), 2))
+    restart_control_plane_wait_s = max(0, parse_int(os.environ.get("CONTROL_PLANE_RESTART_WAIT_S"), 45))
+    restart_control_plane_cmd = normalize(os.environ.get("CONTROL_PLANE_RESTART_CMD"))
+    allow_wifi_control_plane_restart = parse_bool(os.environ.get("ALLOW_WIFI_CONTROL_PLANE_RESTART"), False)
 
     fm_target_for_route = os.environ.get("FLEET_MANAGER_ROUTE_TARGET", fleet_host)
 
@@ -2453,6 +2840,10 @@ def main() -> None:
             )
         )
 
+        merged_artifacts_count = 0
+        if _merge_text_artifacts_enabled():
+            artifacts, merged_artifacts_count = merge_text_artifacts_for_run(run_id, artifacts, store)
+
         try:
             summary_artifact = store.write_summary_artifact(
                 run_id,
@@ -2466,6 +2857,7 @@ def main() -> None:
                     "csi_frames_total": csi_frames_total,
                     "artifacts_uploaded_during_measure": artifacts_uploaded_during_measure,
                     "artifacts_upload_failed_during_measure": artifacts_upload_failed_during_measure,
+                    "merged_artifacts_count": merged_artifacts_count,
                     "run_storage_pressure_hits": run_storage_pressure_hits,
                     "latest_metrics": latest_observed_metrics,
                     "generated_at": now_utc().isoformat().replace("+00:00", "Z"),
@@ -2497,11 +2889,14 @@ def main() -> None:
             "artifacts_total": str(len(artifacts)),
             "artifacts_uploaded_during_measure": str(artifacts_uploaded_during_measure),
             "artifacts_upload_failed_during_measure": str(artifacts_upload_failed_during_measure),
+            "merged_artifacts_count": str(merged_artifacts_count),
             "run_storage_pressure_hits": str(run_storage_pressure_hits),
             "wifi_ap_total": str(wifi_ap_total),
             "ble_adv_total": str(ble_adv_total),
             "csi_frames_total": str(csi_frames_total),
             "spool_state": "pending_upload",
+            "measure_report_separated": "1" if separate_measure_and_report else "0",
+            "reconnect_before_report": "1" if restart_control_plane_before_send else "0",
             "fleet_interface_version": "v3",
         }
         for key in (
@@ -2549,6 +2944,23 @@ def main() -> None:
 
         store.persist_report(report)
         last_policy_id = policy.policy_id
+
+        if restart_control_plane_before_send:
+            reconnect_ok = restart_control_plane_before_report(
+                restart_control_plane_iface,
+                fm_target_for_route,
+                down_s=restart_control_plane_down_s,
+                wait_s=restart_control_plane_wait_s,
+                custom_cmd=restart_control_plane_cmd,
+                allow_wifi_restart=allow_wifi_control_plane_restart,
+            )
+            if reconnect_ok:
+                try:
+                    channel.close()
+                except Exception:
+                    pass
+                channel = grpc.insecure_channel(target)
+                stub = fleet_gateway_v2_pb2_grpc.FleetManagerStub(channel)
 
         sent_ids = flush_pending_reports(stub, agent_id, store)
         if run_id in sent_ids:

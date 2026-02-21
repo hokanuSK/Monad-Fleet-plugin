@@ -1,9 +1,16 @@
 # Monad Fleet as eLabFTW plugin service
-This repository has 3 parts and can be run with `docker-compose`:
+This repository has 4 parts and can be run with `docker-compose`:
 1. eLabFTW platform (`web` + `mysql`)
 2. Monad Fleet service (`monad-fleet-service` folder)
 3. Device simulator (`device-sim` folder)
 4. Observability stack (`prometheus` + `mimir` + `grafana`)
+
+## Folder naming conventions
+- Repo folders use lowercase kebab-case for multi-word names (for example `monad-fleet-service`).
+- Script domains are grouped by purpose under `scripts/` (for example `scripts/rpi/`, `scripts/smoke/`, `scripts/arduino/`).
+- Device run spool folders are state-oriented:
+  - `DATA_ROOT/pending/<run_id>/` for runs waiting to publish/replay
+  - `DATA_ROOT/sent/<run_id>/` for accepted/deduplicated runs kept for retention
 
 ## gRPC APIs
 - `fleet.v1.FleetManager` (legacy flow): `Hello`, `GetPolicy`, `PublishEvent`
@@ -39,6 +46,12 @@ This smoke test:
 - verifies artifact uploads in the created eLabFTW experiment,
 - when `RUN_PI=true`, runs strict report validation with `scripts/rpi/verify_real_run.sh`.
 
+Default artifact behavior in current Pi profile:
+- text artifacts are merged into `wifi-ble-csi-artifacts-bundle-*.tar.gz`,
+- CSI binary output is uploaded separately,
+- `run-summary.json` is uploaded separately,
+- typical strict real run uploads 3 artifacts total.
+
 Useful environment toggles:
 ```bash
 DO_BUILD=true         # rebuild containers first
@@ -54,6 +67,8 @@ REQUIRE_REAL_WIFI=true
 REQUIRE_REAL_BLE=true
 REQUIRE_REAL_CSI=true
 REQUIRE_CSI_FRAMES_MIN=1
+MERGE_TEXT_ARTIFACTS=true
+MERGE_TEXT_ARTIFACTS_DELETE_SOURCES=true
 ```
 
 Strict real-data command (Pi):
@@ -61,12 +76,28 @@ Strict real-data command (Pi):
 RUN_PI=true PI_HOST=monad-rpi5.local \
 SMOKE_PROFILE=wireless_spec \
 REAL_DATA_ENFORCE=true REQUIRE_REAL_WIFI=true REQUIRE_REAL_BLE=true REQUIRE_REAL_CSI=true \
-CSI_COLLECTOR_CMD='sudo feitcsi --frequency 5180 --channel-width 80 --format HESU --output-file /tmp/csi.dat -v' \
+CSI_COLLECTOR_CMD='sudo feitcsi --frequency 5240 --channel-width 80 --format VHT --output-file /tmp/csi.dat -v' \
 CSI_OUTPUT_PATH=/tmp/csi.dat \
 scripts/smoke/v3_end_to_end_smoke.sh
 ```
 If control-plane route is Wi-Fi and `REQUIRE_REAL_CSI=true`, the Pi smoke helper fails fast unless `ALLOW_WIFI_DISRUPTIVE_CSI=true`.
 Using that override may interrupt SSH during capture.
+
+Single-device wrapper (recommended when you have one Pi):
+```bash
+PI_HOST=<pi-host-or-ip> scripts/smoke/one_device_real.sh
+```
+
+First room-device bootstrap (continuous real agent on Pi):
+```bash
+FLEET_MANAGER_HOST=<fleet-host-ip> \
+scripts/rpi/prepare_room_device.sh <pi-host-or-ip>
+```
+This configures/restarts `monad-fleet-agent.service` with:
+- `EXECUTE_POLICY=true`
+- continuous sync (`MAX_SYNC_CYCLES=0`)
+- artifact upload enabled during measurement.
+- text artifact bundling enabled by default (`MERGE_TEXT_ARTIFACTS=true`).
 
 Reset only Fleet + metrics state (without touching MySQL/eLabFTW DB):
 ```bash
@@ -86,18 +117,38 @@ Example low-level sender payload:
 }
 ```
 
-## Agent data persistence (new)
+Arduino/ESP32 low-resource sender options:
+- Wi-Fi-capable board (ESP32): flash `scripts/arduino/esp32_fleet_metrics_sender.ino`, set Wi-Fi + Fleet host, and run continuously.
+- Non-Wi-Fi Arduino over USB serial: emit one-line JSON metrics and bridge to Fleet:
+```bash
+python3 scripts/arduino/serial_to_fleet_ingest.py \
+  --serial-port /dev/tty.usbmodemXXXX \
+  --baud 115200 \
+  --device-id arduino-room-01 \
+  --source arduino-serial \
+  --fleet-url http://127.0.0.1:9108/ingest/v1/metrics
+```
+
+## Agent data persistence
 The v2 agent now stores run data locally first and uploads reports after run completion:
 - local spool root: `DATA_ROOT` (default `./data` in agent working directory)
 - pending runs: `DATA_ROOT/pending/<run_id>/`
 - sent runs: `DATA_ROOT/sent/<run_id>/`
-- per-run files: `context.json`, `events.ndjson`, `report.json`, `artifacts/*.log`, `artifacts/run-summary.json`
+- per-run files: `context.json`, `events.ndjson`, `report.json`, `artifacts/*`
+- with default bundling, a sent run typically keeps:
+  - `artifacts/wifi-ble-csi-artifacts-bundle-*.tar.gz`
+  - `artifacts/csi-csi-capture-1-csi.dat` (when CSI is enabled)
+  - `artifacts/run-summary.json`
 
 Upload behavior:
 - after each run, the report is persisted locally
 - agent replays pending reports to `PublishReport`
 - on `ACCEPTED` or `DUPLICATE`, run directory moves from `pending/` to `sent/`
 - old sent runs are pruned by `SENT_RETENTION_DAYS` (default `14`)
+- set `MERGE_TEXT_ARTIFACTS=false` to keep/upload all text artifacts separately
+- set `MERGE_TEXT_ARTIFACTS_DELETE_SOURCES=false` to keep source text files on Pi after bundle creation
+
+See `docs/pi_artifacts_reference.md` for artifact naming and bundle inspection details.
 
 ## Run v2 agent on Raspberry Pi (Wi-Fi only mode)
 Automated from this repo host:

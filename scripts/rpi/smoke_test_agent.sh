@@ -126,8 +126,8 @@ AUTO_LINKLOCAL_ETHERNET_IPV4="${AUTO_LINKLOCAL_ETHERNET_IPV4:-true}"
 EXECUTE_POLICY="${EXECUTE_POLICY:-true}"
 MAX_SYNC_CYCLES="${MAX_SYNC_CYCLES:-1}"
 WIFI_SAMPLE_MIN_INTERVAL_S="${WIFI_SAMPLE_MIN_INTERVAL_S:-1}"
-WIFI_SAMPLE_MAX_DURATION_S="${WIFI_SAMPLE_MAX_DURATION_S:-300}"
-WIFI_SAMPLE_MAX_POINTS="${WIFI_SAMPLE_MAX_POINTS:-600}"
+WIFI_SAMPLE_MAX_DURATION_S="${WIFI_SAMPLE_MAX_DURATION_S:-7200}"
+WIFI_SAMPLE_MAX_POINTS="${WIFI_SAMPLE_MAX_POINTS:-7200}"
 ENABLE_HTTP_SAMPLE_INGEST="${ENABLE_HTTP_SAMPLE_INGEST:-true}"
 ENABLE_ELAB_ARTIFACT_UPLOAD="${ENABLE_ELAB_ARTIFACT_UPLOAD:-true}"
 ARTIFACT_UPLOAD_MAX_BYTES="${ARTIFACT_UPLOAD_MAX_BYTES:-20971520}"
@@ -141,6 +141,14 @@ REPORT_RPC_TIMEOUT_S="${REPORT_RPC_TIMEOUT_S:-120}"
 CONTROL_RPC_TIMEOUT_S="${CONTROL_RPC_TIMEOUT_S:-30}"
 AGENT_RUN_TIMEOUT_S="${AGENT_RUN_TIMEOUT_S:-900}"
 AGENT_STATUS_POLL_S="${AGENT_STATUS_POLL_S:-5}"
+POST_RUN_AUDIT="${POST_RUN_AUDIT:-true}"
+SEPARATE_MEASURE_AND_REPORT="${SEPARATE_MEASURE_AND_REPORT:-false}"
+RESTART_CONTROL_PLANE_BEFORE_REPORT="${RESTART_CONTROL_PLANE_BEFORE_REPORT:-false}"
+CONTROL_PLANE_RESTART_IFACE="${CONTROL_PLANE_RESTART_IFACE:-${CONTROL_PLANE_IFACE}}"
+CONTROL_PLANE_RESTART_DOWN_S="${CONTROL_PLANE_RESTART_DOWN_S:-2}"
+CONTROL_PLANE_RESTART_WAIT_S="${CONTROL_PLANE_RESTART_WAIT_S:-45}"
+CONTROL_PLANE_RESTART_CMD="${CONTROL_PLANE_RESTART_CMD:-}"
+ALLOW_WIFI_CONTROL_PLANE_RESTART="${ALLOW_WIFI_CONTROL_PLANE_RESTART:-false}"
 ALLOW_WIFI_DISRUPTIVE_CSI="${ALLOW_WIFI_DISRUPTIVE_CSI:-false}"
 DISABLE_CSI_CAPTURE="${DISABLE_CSI_CAPTURE:-}"
 REQUIRE_REAL_CSI="${REQUIRE_REAL_CSI:-false}"
@@ -280,6 +288,16 @@ if [[ "${REQUIRE_ETHERNET_CONTROL}" == "true" ]]; then
   esac
 fi
 
+if [[ "${RESTART_CONTROL_PLANE_BEFORE_REPORT}" == "true" && -n "${ROUTE_IFACE}" && "${ROUTE_IFACE}" == wl* ]]; then
+  if [[ "${ALLOW_WIFI_CONTROL_PLANE_RESTART}" == "true" ]]; then
+    echo "WARNING: forcing RESTART_CONTROL_PLANE_BEFORE_REPORT=true on Wi-Fi route iface=${ROUTE_IFACE}."
+  elif [[ -z "${CONTROL_PLANE_RESTART_CMD}" ]]; then
+    echo "Safety: disabling RESTART_CONTROL_PLANE_BEFORE_REPORT on Wi-Fi route iface=${ROUTE_IFACE}."
+    echo "Set ALLOW_WIFI_CONTROL_PLANE_RESTART=true to force hard iface restart on Wi-Fi."
+    RESTART_CONTROL_PLANE_BEFORE_REPORT="false"
+  fi
+fi
+
 if [[ -z "${DISABLE_CSI_CAPTURE}" ]]; then
   if [[ "${ALLOW_WIFI_DISRUPTIVE_CSI}" != "true" ]]; then
     # Safe default: avoid disruptive CSI capture whenever current Fleet route uses Wi-Fi.
@@ -354,6 +372,13 @@ ARTIFACT_UPLOAD_BACKOFF_S=\\\"${ARTIFACT_UPLOAD_BACKOFF_S}\\\" \\
 RUN_ARTIFACT_SOFT_LIMIT_BYTES=\\\"${RUN_ARTIFACT_SOFT_LIMIT_BYTES}\\\" \\
 REPORT_RPC_TIMEOUT_S=\\\"${REPORT_RPC_TIMEOUT_S}\\\" \\
 CONTROL_RPC_TIMEOUT_S=\\\"${CONTROL_RPC_TIMEOUT_S}\\\" \\
+SEPARATE_MEASURE_AND_REPORT=\\\"${SEPARATE_MEASURE_AND_REPORT}\\\" \\
+RESTART_CONTROL_PLANE_BEFORE_REPORT=\\\"${RESTART_CONTROL_PLANE_BEFORE_REPORT}\\\" \\
+CONTROL_PLANE_RESTART_IFACE=\\\"${CONTROL_PLANE_RESTART_IFACE}\\\" \\
+CONTROL_PLANE_RESTART_DOWN_S=\\\"${CONTROL_PLANE_RESTART_DOWN_S}\\\" \\
+CONTROL_PLANE_RESTART_WAIT_S=\\\"${CONTROL_PLANE_RESTART_WAIT_S}\\\" \\
+CONTROL_PLANE_RESTART_CMD=\\\"${CONTROL_PLANE_RESTART_CMD}\\\" \\
+ALLOW_WIFI_CONTROL_PLANE_RESTART=\\\"${ALLOW_WIFI_CONTROL_PLANE_RESTART}\\\" \\
 DISABLE_CSI_CAPTURE=\\\"${DISABLE_CSI_CAPTURE}\\\" \\
 CSI_COLLECTOR_CMD=\\\"${CSI_COLLECTOR_CMD}\\\" \\
 CSI_OUTPUT_PATH=\\\"${CSI_OUTPUT_PATH}\\\" \\
@@ -376,12 +401,52 @@ echo \"\$!\" > \"${REMOTE_PID}\"
 echo \"STARTED pid=\$(cat \"${REMOTE_PID}\") log=${REMOTE_LOG} exit=${REMOTE_EXIT}\"
 '"
 
+audit_latest_sent_run() {
+  run_ssh "${PI_USER}@${PI_HOST}" "bash -lc '
+set -euo pipefail
+data_root=\"${PI_DIR}/data\"
+sent_root=\"\${data_root}/sent\"
+pending_root=\"\${data_root}/pending\"
+latest_sent=\$(ls -1t \"\${sent_root}\" 2>/dev/null | head -n1 || true)
+pending_count=0
+if [[ -d \"\${pending_root}\" ]]; then
+  pending_count=\$(find \"\${pending_root}\" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d \" \\t\\r\\n\")
+fi
+echo \"Pi audit: pending_runs=\${pending_count}\"
+if [[ -z \"\${latest_sent}\" ]]; then
+  echo \"Pi audit: no sent runs found under \${sent_root}\"
+  exit 0
+fi
+run_dir=\"\${sent_root}/\${latest_sent}\"
+art_dir=\"\${run_dir}/artifacts\"
+echo \"Pi audit: latest_sent_run=\${latest_sent}\"
+if [[ -d \"\${art_dir}\" ]]; then
+  echo \"Pi audit: artifacts (bytes, name):\"
+  shopt -s nullglob
+  for f in \"\${art_dir}\"/*; do
+    [[ -f \"\${f}\" ]] || continue
+    bytes=\$(wc -c < \"\${f}\" | tr -d \" \\t\\r\\n\")
+    printf \"%10s %s\\n\" \"\${bytes}\" \"\$(basename \"\${f}\")\"
+  done | sort
+else
+  echo \"Pi audit: artifacts directory missing: \${art_dir}\"
+fi
+if [[ -f \"\${art_dir}/run-summary.json\" ]]; then
+  echo \"Pi audit: run-summary key metrics:\"
+  grep -E \"\\\"run_id\\\"|\\\"status\\\"|\\\"wifi_sampling_duration_s_requested\\\"|\\\"wifi_sampling_duration_s_applied\\\"|\\\"wifi_sampling_points_applied\\\"|\\\"wifi_scan_ok\\\"|\\\"ble_scan_ok\\\"|\\\"csi_capture_ok\\\"|\\\"csi_frames_total\\\"\" \"\${art_dir}/run-summary.json\" || true
+fi
+'"
+}
+
 finalize_remote_run() {
   local rc="$1"
   echo "Remote agent run finished with exit code ${rc}."
   run_ssh "${PI_USER}@${PI_HOST}" "bash -lc 'echo \"----- agent log tail (${REMOTE_LOG}) -----\"; tail -n 120 \"${REMOTE_LOG}\" || true'" || true
   if [[ "${rc}" != "0" ]]; then
     exit "${rc}"
+  fi
+  if [[ "${POST_RUN_AUDIT}" == "true" ]]; then
+    audit_latest_sent_run || true
   fi
 }
 
