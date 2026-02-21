@@ -924,6 +924,33 @@ scripts/smoke/v3_end_to_end_smoke.sh
 \end{verbatim}
 This mode fails the smoke run unless Wi-Fi/BLE/CSI command evidence and artifacts are present.
 
+\subsection{Phase-1 Acceptance Profile (5-minute single Pi)}
+Current acceptance scope for this deployment stage:
+\begin{itemize}
+  \item one Pi device is sufficient for acceptance
+  \item strict real-data mode remains required (\texttt{REAL\_DATA\_ENFORCE=true})
+  \item a 5-minute run is sufficient for acceptance at this stage
+  \item CSI being artifact-first is acceptable at this stage
+  \item CSI time-series export is not required at this stage
+  \item multi-day and multi-participant dataset coverage is deferred
+\end{itemize}
+
+\textbf{Reference 5-minute acceptance command:}
+\begin{verbatim}
+SMOKE_PROFILE=wireless_spec WIRELESS_SPEC_DURATION_S=300 \
+WIRELESS_SPEC_INTERVAL_S_PI=5 RUN_PI=true INJECT_HYPOTHETICAL_METRICS=false \
+REAL_DATA_ENFORCE=true REQUIRE_REAL_WIFI=true REQUIRE_REAL_BLE=true \
+REQUIRE_REAL_CSI=true DO_BUILD=false \
+scripts/smoke/v3_end_to_end_smoke.sh
+\end{verbatim}
+
+\textbf{Post-run verifier (required):}
+\begin{verbatim}
+SMOKE_EXPERIMENT_ID=<created_experiment_id> \
+REAL_DATA_ENFORCE=true REQUIRE_REAL_WIFI=true REQUIRE_REAL_BLE=true \
+REQUIRE_REAL_CSI=true scripts/rpi/verify_real_run.sh
+\end{verbatim}
+
 \subsection{Reference 2-minute full command}
 \begin{verbatim}
 SMOKE_PROFILE=full FULL_DURATION_S=120 FULL_INTERVAL_S_PI=2 \
