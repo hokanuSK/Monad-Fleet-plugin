@@ -1428,8 +1428,14 @@ def collect_wifi_scan(
         except Exception:
             log.exception("Failed to persist wifi link artifact")
 
-    if metrics.get("wifi_avg_rssi_dbm") is not None or metrics.get("wifi_connected") == "1":
+    has_channel_context = metrics.get("wifi_channel") is not None or metrics.get("wifi_freq_mhz") is not None
+    if (
+        metrics.get("wifi_avg_rssi_dbm") is not None
+        or metrics.get("wifi_connected") == "1"
+        or has_channel_context
+    ):
         # Treat inability to scan as non-fatal for smoke testing on restricted environments.
+        # Monitor-mode captures may be intentionally not associated but still provide channel/frequency evidence.
         metrics["wifi_scan_ok"] = "1"
         return 0, duration_ms2, msg, metrics, artifacts
 
@@ -1453,7 +1459,12 @@ def collect_wifi_scan(
                 artifacts.append(store.write_text_artifact(run_id, f"wifi-{cmd_id}-proc-wireless", proc_text))
             except Exception:
                 log.exception("Failed to persist proc wireless artifact")
-        if metrics.get("wifi_connected") == "1" or metrics.get("wifi_avg_rssi_dbm") is not None:
+        has_channel_context = metrics.get("wifi_channel") is not None or metrics.get("wifi_freq_mhz") is not None
+        if (
+            metrics.get("wifi_connected") == "1"
+            or metrics.get("wifi_avg_rssi_dbm") is not None
+            or has_channel_context
+        ):
             metrics["wifi_scan_ok"] = "1"
             return 0, duration_ms2, msg, metrics, artifacts
     except Exception:
@@ -1464,7 +1475,7 @@ def collect_wifi_scan(
     metrics.setdefault("wifi_ap_count", "0")
     metrics.update(_collect_device_status_metrics())
     failure_msg = (
-        "wifi sensing failed: no usable scan/link evidence "
+        "wifi sensing failed: no usable scan/link/channel evidence "
         "(scan unavailable and interface not connected)"
     )
     if iface_note:
@@ -1940,7 +1951,17 @@ def collect_wifi_scan_series(
         ap_samples.append(max(0, ap_count))
         if normalize(last_metrics.get("wifi_connected")) == "1":
             connected_samples += 1
-        if exit_code == 0:
+        sample_has_rssi = normalize(last_metrics.get("wifi_avg_rssi_dbm")) != ""
+        sample_has_channel_context = (
+            normalize(last_metrics.get("wifi_channel")) != ""
+            or normalize(last_metrics.get("wifi_freq_mhz")) != ""
+        )
+        if (
+            exit_code == 0
+            or normalize(last_metrics.get("wifi_connected")) == "1"
+            or sample_has_rssi
+            or sample_has_channel_context
+        ):
             scan_ok_samples += 1
 
         rssi = None

@@ -195,6 +195,170 @@ if [[ "${PRECHECK_ONLY}" == "true" ]]; then
   exit 0
 fi
 
+remote_iface_exists() {
+  local iface="$1"
+  if [[ -z "${iface}" ]]; then
+    return 1
+  fi
+  if run_ssh "${PI_USER}@${PI_HOST}" "test -d /sys/class/net/${iface}" >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+resolve_control_plane_iface() {
+  run_ssh "${PI_USER}@${PI_HOST}" "bash -lc '
+set -euo pipefail
+target=\"${FLEET_MANAGER_HOST}\"
+requested=\"${CONTROL_PLANE_IFACE}\"
+
+if [[ -n \"\${requested}\" && -d /sys/class/net/\"\${requested}\" ]]; then
+  printf \"%s\" \"\${requested}\"
+  exit 0
+fi
+
+line=\$(ip route get \"\${target}\" 2>/dev/null | head -n1 || true)
+route_iface=\$(printf \"%s\\n\" \"\${line}\" | sed -n \"s/.* dev \\([^ ]*\\).*/\\1/p\")
+if [[ -n \"\${route_iface}\" && -d /sys/class/net/\"\${route_iface}\" ]]; then
+  printf \"%s\" \"\${route_iface}\"
+  exit 0
+fi
+
+for cand in eth0 en0 wlan0 wlan1; do
+  if [[ -d /sys/class/net/\"\${cand}\" ]]; then
+    printf \"%s\" \"\${cand}\"
+    exit 0
+  fi
+done
+
+fallback=\$(ls /sys/class/net 2>/dev/null | grep -v \"^lo$\" | head -n1 || true)
+printf \"%s\" \"\${fallback}\"
+'"
+}
+
+resolve_wifi_scan_iface() {
+  run_ssh "${PI_USER}@${PI_HOST}" "bash -lc '
+set -euo pipefail
+requested=\"${WIFI_SCAN_IFACE}\"
+control_iface=\"${CONTROL_PLANE_IFACE}\"
+wifi_rows=\$(iw dev 2>/dev/null | awk \"\\\$1==\\\"Interface\\\"{iface=\\\$2} \\\$1==\\\"type\\\"{print iface \\\" \\\" \\\$2}\" || true)
+wifi_ifaces=\$(printf \"%s\\n\" \"\${wifi_rows}\" | awk \"{print \\\$1}\")
+
+if [[ -n \"\${requested}\" ]]; then
+  while IFS= read -r cand; do
+    [[ -n \"\${cand}\" ]] || continue
+    if [[ \"\${cand}\" == \"\${requested}\" ]]; then
+      printf \"%s\" \"\${cand}\"
+      exit 0
+    fi
+  done <<< \"\${wifi_ifaces}\"
+fi
+
+for pref in wlan0 wlan1; do
+  while IFS= read -r cand; do
+    [[ -n \"\${cand}\" ]] || continue
+    if [[ \"\${cand}\" == \"\${pref}\" ]]; then
+      printf \"%s\" \"\${cand}\"
+      exit 0
+    fi
+  done <<< \"\${wifi_ifaces}\"
+done
+
+for want in managed station client; do
+  cand=\$(printf \"%s\\n\" \"\${wifi_rows}\" | awk -v want=\"\${want}\" \"{t=tolower(\\\$2); if (t==want) {print \\\$1; exit}}\" || true)
+  if [[ -n \"\${cand}\" ]]; then
+    printf \"%s\" \"\${cand}\"
+    exit 0
+  fi
+done
+
+cand=\$(printf \"%s\\n\" \"\${wifi_rows}\" | awk \"{t=tolower(\\\$2); if (t==\\\"monitor\\\") {print \\\$1; exit}}\" || true)
+if [[ -n \"\${cand}\" ]]; then
+  printf \"%s\" \"\${cand}\"
+  exit 0
+fi
+
+cand=\$(printf \"%s\\n\" \"\${wifi_rows}\" | awk \"{t=tolower(\\\$2); if (t!=\\\"ap\\\") {print \\\$1; exit}}\" || true)
+if [[ -n \"\${cand}\" ]]; then
+  printf \"%s\" \"\${cand}\"
+  exit 0
+fi
+
+first_wifi=\$(printf \"%s\\n\" \"\${wifi_ifaces}\" | head -n1 || true)
+if [[ -n \"\${first_wifi}\" ]]; then
+  printf \"%s\" \"\${first_wifi}\"
+  exit 0
+fi
+
+printf \"%s\" \"\${control_iface}\"
+'"
+}
+
+resolve_agent_id() {
+  run_ssh "${PI_USER}@${PI_HOST}" "bash -lc '
+set -euo pipefail
+control_iface=\"${CONTROL_PLANE_IFACE}\"
+
+if [[ -n \"\${control_iface}\" && -f /sys/class/net/\"\${control_iface}\"/address ]]; then
+  cat /sys/class/net/\"\${control_iface}\"/address
+  exit 0
+fi
+
+for cand in eth0 en0 wlan0 wlan1; do
+  if [[ -f /sys/class/net/\"\${cand}\"/address ]]; then
+    cat /sys/class/net/\"\${cand}\"/address
+    exit 0
+  fi
+done
+
+fallback=\$(ls /sys/class/net 2>/dev/null | grep -v \"^lo$\" | head -n1 || true)
+if [[ -n \"\${fallback}\" && -f /sys/class/net/\"\${fallback}\"/address ]]; then
+  cat /sys/class/net/\"\${fallback}\"/address
+  exit 0
+fi
+
+if [[ -f /etc/machine-id ]]; then
+  mid=\$(cat /etc/machine-id | tr -d \"\\r\\n\")
+  printf \"machine-%s\" \"\${mid}\"
+  exit 0
+fi
+
+hostname
+'"
+}
+
+ORIGINAL_CONTROL_PLANE_IFACE="${CONTROL_PLANE_IFACE}"
+ORIGINAL_WIFI_SCAN_IFACE="${WIFI_SCAN_IFACE}"
+
+if ! remote_iface_exists "${CONTROL_PLANE_IFACE}"; then
+  RESOLVED_CONTROL_PLANE_IFACE="$(resolve_control_plane_iface || true)"
+  if [[ -n "${RESOLVED_CONTROL_PLANE_IFACE}" ]]; then
+    echo "WARNING: CONTROL_PLANE_IFACE=${CONTROL_PLANE_IFACE} not found on Pi; using ${RESOLVED_CONTROL_PLANE_IFACE}."
+    CONTROL_PLANE_IFACE="${RESOLVED_CONTROL_PLANE_IFACE}"
+    if [[ "${CONTROL_PLANE_RESTART_IFACE}" == "${ORIGINAL_CONTROL_PLANE_IFACE}" ]]; then
+      CONTROL_PLANE_RESTART_IFACE="${CONTROL_PLANE_IFACE}"
+    fi
+  fi
+fi
+
+if ! remote_iface_exists "${WIFI_SCAN_IFACE}"; then
+  RESOLVED_WIFI_SCAN_IFACE="$(resolve_wifi_scan_iface || true)"
+  if [[ -n "${RESOLVED_WIFI_SCAN_IFACE}" ]]; then
+    echo "WARNING: WIFI_SCAN_IFACE=${WIFI_SCAN_IFACE} not found on Pi; using ${RESOLVED_WIFI_SCAN_IFACE}."
+    WIFI_SCAN_IFACE="${RESOLVED_WIFI_SCAN_IFACE}"
+  fi
+fi
+
+if ! remote_iface_exists "${CONTROL_PLANE_IFACE}"; then
+  echo "ERROR: CONTROL_PLANE_IFACE=${CONTROL_PLANE_IFACE} does not exist on Pi after resolution."
+  exit 2
+fi
+
+if ! remote_iface_exists "${WIFI_SCAN_IFACE}"; then
+  echo "ERROR: WIFI_SCAN_IFACE=${WIFI_SCAN_IFACE} does not exist on Pi after resolution."
+  exit 2
+fi
+
 if [[ "${CONTROL_PLANE_IFACE}" == eth* || "${CONTROL_PLANE_IFACE}" == en* || "${CONTROL_PLANE_IFACE}" == enx* ]]; then
   run_ssh "${PI_USER}@${PI_HOST}" "bash -lc '
 set -euo pipefail
@@ -249,7 +413,12 @@ fi
 fi
 
 if [[ -z "${AGENT_ID}" ]]; then
-  AGENT_ID="$(run_ssh "${PI_USER}@${PI_HOST}" "cat /sys/class/net/${CONTROL_PLANE_IFACE}/address")"
+  AGENT_ID="$(resolve_agent_id || true)"
+fi
+
+if [[ -z "${AGENT_ID}" ]]; then
+  echo "ERROR: Failed to resolve AGENT_ID from Pi interfaces or machine id."
+  exit 2
 fi
 
 ROUTE_IFACE="$(
