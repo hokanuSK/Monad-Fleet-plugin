@@ -417,6 +417,14 @@ def parse_iso_timestamp(value: Any) -> datetime | None:
         return None
 
 
+def ensure_utc_timestamp(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def timestamp_from_unix_ms(unix_time_ms: int) -> Timestamp:
     ts = Timestamp()
     if unix_time_ms <= 0:
@@ -1284,18 +1292,63 @@ class FleetManagerServicer(fleet_gateway_pb2_grpc.FleetManagerServicer):
 
         return True
 
+    def _policy_measurement_window(self, policy: dict[str, Any]) -> tuple[datetime | None, datetime | None]:
+        range_obj = policy.get("range") if isinstance(policy, dict) else {}
+        if isinstance(range_obj, dict):
+            start_dt = ensure_utc_timestamp(parse_iso_timestamp(range_obj.get("from")))
+            end_dt = ensure_utc_timestamp(parse_iso_timestamp(range_obj.get("to")))
+            if start_dt is not None or end_dt is not None:
+                return start_dt, end_dt
+
+        starts: list[datetime] = []
+        ends: list[datetime] = []
+        groups = policy.get("command_groups") if isinstance(policy, dict) else []
+        if isinstance(groups, list):
+            for group in groups:
+                if not isinstance(group, dict):
+                    continue
+                group_range = group.get("range")
+                if not isinstance(group_range, dict):
+                    continue
+                start_dt = ensure_utc_timestamp(parse_iso_timestamp(group_range.get("from")))
+                end_dt = ensure_utc_timestamp(parse_iso_timestamp(group_range.get("to")))
+                if start_dt is not None:
+                    starts.append(start_dt)
+                if end_dt is not None:
+                    ends.append(end_dt)
+        return (min(starts) if starts else None, max(ends) if ends else None)
+
+    def _policy_window_bucket(self, policy: dict[str, Any], now_utc: datetime) -> int:
+        start_dt, end_dt = self._policy_measurement_window(policy)
+        if end_dt is not None and now_utc > end_dt:
+            return 0  # expired
+        if start_dt is not None and now_utc < start_dt:
+            return 1  # future
+        return 2  # active or unspecified
+
     def _select_policy_for_device(self, item: dict[str, Any], device_id: str) -> dict[str, Any] | None:
         experiments = self._fetch_fleet_experiments()
-        candidates: list[tuple[str, dict[str, Any]]] = []
+        now_utc = utc_now()
+        skip_expired = bool(self._cfg.get("skip_expired_policies", True))
+        candidates: list[tuple[int, int, int, int, dict[str, Any]]] = []
 
         for experiment_ref in experiments:
             exp_id = experiment_ref.get("id")
             if exp_id is None:
                 continue
 
-            experiment = self._elab_client.get_experiment(int(exp_id))
-            if not experiment:
+            experiment = experiment_ref if isinstance(experiment_ref, dict) else None
+            if not isinstance(experiment, dict):
                 continue
+
+            # /experiments list already contains metadata/tags on current eLabFTW builds.
+            # Avoid N+1 GET /experiments/{id} calls, which can exceed gRPC deadlines
+            # when many historical fleet experiments exist.
+            if "metadata" not in experiment or "tags" not in experiment:
+                fetched = self._elab_client.get_experiment(int(exp_id))
+                if not fetched:
+                    continue
+                experiment = fetched
 
             if not self._item_matches_experiment_tags(item, experiment):
                 continue
@@ -1312,14 +1365,25 @@ class FleetManagerServicer(fleet_gateway_pb2_grpc.FleetManagerServicer):
             if not self._item_matches_policy_selector(item, policy_ctx["policy"], device_id):
                 continue
 
-            modified_at = normalize_string(experiment.get("modified_at") or experiment_ref.get("modified_at"))
-            candidates.append((modified_at, policy_ctx))
+            window_bucket = self._policy_window_bucket(policy_ctx["policy"], now_utc)
+            if skip_expired and window_bucket == 0:
+                continue
+
+            start_dt, _ = self._policy_measurement_window(policy_ctx["policy"])
+            start_rank = int(start_dt.timestamp()) if start_dt is not None else 0
+            exp_id_rank = parse_experiment_numeric_id(experiment.get("id") or exp_id) or 0
+            modified_dt = ensure_utc_timestamp(
+                parse_iso_timestamp(experiment.get("modified_at") or experiment_ref.get("modified_at"))
+            )
+            modified_rank = int(modified_dt.timestamp()) if modified_dt is not None else 0
+
+            candidates.append((window_bucket, start_rank, exp_id_rank, modified_rank, policy_ctx))
 
         if not candidates:
             return None
 
-        candidates.sort(key=lambda row: row[0], reverse=True)
-        return candidates[0][1]
+        candidates.sort(key=lambda row: row[:4], reverse=True)
+        return candidates[0][4]
 
     def _run_key(self, event: fleet_gateway_pb2.Event) -> str:
         return f"{event.experiment_id}|{event.policy_revision}|{normalize_device_id(event.device_id)}"
@@ -2092,6 +2156,8 @@ def serve():
         "book_is_cancellable": normalize_string(os.environ.get("BOOK_IS_CANCELLABLE", "true")).lower() in {"1", "true", "yes"},
         "max_dedupe_events": int(os.environ.get("MAX_DEDUPE_EVENTS", "50000")),
         "allow_live_events": normalize_string(os.environ.get("ALLOW_LIVE_EVENTS", "false")).lower() in {"1", "true", "yes"},
+        "skip_expired_policies": normalize_string(os.environ.get("SKIP_EXPIRED_POLICIES", "true")).lower()
+        in {"1", "true", "yes"},
         "metrics_bind": os.environ.get("METRICS_BIND", "0.0.0.0"),
         "metrics_port": int(os.environ.get("METRICS_PORT", "9108")),
         "metrics_exclude_prefixes": tuple(
