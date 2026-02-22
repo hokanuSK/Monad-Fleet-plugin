@@ -817,6 +817,7 @@ DISABLE_CSI_CAPTURE=true|false
 # Strict real-data gates (enabled by default when RUN_PI=true)
 REAL_DATA_ENFORCE=true|false
 REQUIRE_REAL_WIFI=true|false
+REQUIRE_WIFI_CONNECTED=true|false
 REQUIRE_REAL_BLE=true|false
 REQUIRE_REAL_CSI=true|false
 REQUIRE_CSI_FRAMES_MIN=1
@@ -850,6 +851,7 @@ For Raspberry Pi runs, a higher interval is recommended (for example 5s or 10s),
 \textbf{Automation note:} Pi smoke scripts use SSH and are designed for key-based login (password-only SSH can block unattended runs).
 \textbf{SSH bootstrap note:} run \texttt{scripts/rpi/setup\_ssh\_key.sh} to create a dedicated keypair under \texttt{scripts/rpi/keys/}. Pi helper scripts use that key when \texttt{USE\_DEFAULT\_SSH\_KEY=true} (or when \texttt{SSH\_IDENTITY\_FILE} is explicitly set).
 \textbf{Real-data verification note:} \texttt{scripts/rpi/verify\_real\_run.sh} validates the run report for the created experiment and fails when required Wi-Fi/BLE/CSI evidence is missing.
+\texttt{REQUIRE\_WIFI\_CONNECTED=true} is optional and enforces associated/station Wi-Fi (\texttt{wifi\_connected=1}); default \texttt{false} allows monitor-mode acceptance when \texttt{wifi\_scan\_ok=1}.
 
 \subsection{Reference real-device smoke command}
 \begin{verbatim}
@@ -917,7 +919,7 @@ When strict CSI is required (\texttt{REQUIRE\_REAL\_CSI=true}), use Ethernet con
 \begin{verbatim}
 SMOKE_PROFILE=wireless_spec RUN_PI=true INJECT_HYPOTHETICAL_METRICS=false \
 REAL_DATA_ENFORCE=true REQUIRE_REAL_WIFI=true REQUIRE_REAL_BLE=true \
-REQUIRE_REAL_CSI=true REQUIRE_CSI_FRAMES_MIN=1 \
+REQUIRE_REAL_CSI=true REQUIRE_CSI_FRAMES_MIN=1 REQUIRE_WIFI_CONNECTED=false \
 CSI_COLLECTOR_CMD='sudo feitcsi --frequency 5240 --channel-width 80 --format VHT \
   --output-file /tmp/csi.dat -v' CSI_OUTPUT_PATH=/tmp/csi.dat \
 scripts/smoke/v3_end_to_end_smoke.sh
@@ -1034,6 +1036,8 @@ monad_fleet_artifact_uploads_total
 \subsection{Interpretation notes}
 \begin{itemize}
   \item \texttt{ble\_scan\_ok=1} means BLE scan command executed successfully; device discovery count may still be zero.
+  \item \texttt{wifi\_scan\_ok=1} means Wi-Fi sensing produced usable evidence; in monitor-mode runs this can be true with \texttt{wifi\_connected=0}.
+  \item set \texttt{REQUIRE\_WIFI\_CONNECTED=true} in verifier/smoke runs only when associated/station connectivity is an explicit acceptance requirement.
   \item \texttt{wifi\_avg\_rssi\_dbm} and \texttt{wifi\_link\_quality} are best-effort metrics based on available system tools.
   \item \texttt{wifi\_tx/rx\_bitrate\_mbps}, \texttt{wifi\_channel}, and interface counters provide richer Wi-Fi sensing context for RF/environment interpretation.
   \item \texttt{wifi\_sampling\_start\_jitter\_s\_applied}, \texttt{wifi\_sampling\_start\_wait\_epoch\_s\_applied}, and \texttt{wifi\_sampling\_preface\_sleep\_s\_applied} indicate how start de-synchronization was applied on sampled runs.
@@ -1068,6 +1072,7 @@ monad_fleet_artifact_uploads_total
   \item smoke-created experiment metadata can include RF room/scenario context (\texttt{fleet.rf\_context}) via \texttt{RF\_ROOM\_ID}, \texttt{RF\_SCENARIO\_ID}, and \texttt{RF\_RUN\_LABEL}.
   \item for Pi smoke runs, when \texttt{CSI\_COLLECTOR\_CMD} is unset the runner defaults to \texttt{sudo feitcsi --frequency 5240 --channel-width 80 --format VHT --output-file /tmp/csi.dat -v} with \texttt{CSI\_OUTPUT\_PATH=/tmp/csi.dat}.
   \item in strict real-data mode (\texttt{REAL\_DATA\_ENFORCE=true}, \texttt{REQUIRE\_REAL\_CSI=true}), smoke defaults \texttt{CSI\_REQUIRE\_EVIDENCE=true}, \texttt{CSI\_MIN\_FRAMES=REQUIRE\_CSI\_FRAMES\_MIN}, and \texttt{CSI\_MIN\_OUTPUT\_FILES=1} when not explicitly set.
+  \item verifier supports optional \texttt{REQUIRE\_WIFI\_CONNECTED=true}; when unset/default, monitor-mode Wi-Fi evidence is accepted if \texttt{wifi\_scan\_ok=1}.
   \item Pi smoke runner applies a safety gate for Wi-Fi-only control-plane and can force \texttt{DISABLE\_CSI\_CAPTURE=true} unless \texttt{ALLOW\_WIFI\_DISRUPTIVE\_CSI=true}.
   \item sampled Wi-Fi live HTTP ingest is auto-disabled when Fleet route uses Wi-Fi (\texttt{wl*}); post-run/report replay remains enabled. Override via \texttt{ALLOW\_WIFI\_LIVE\_INGEST=true}.
   \item Pi smoke runner applies a CSI power-health preflight when \texttt{REQUIRE\_REAL\_CSI=true}; undervoltage/throttle states fail fast unless \texttt{CSI\_ALLOW\_THROTTLED=true}.

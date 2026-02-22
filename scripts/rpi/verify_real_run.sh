@@ -38,6 +38,7 @@ run_ssh() {
 
 REAL_DATA_ENFORCE="${REAL_DATA_ENFORCE:-true}"
 REQUIRE_REAL_WIFI="${REQUIRE_REAL_WIFI:-}"
+REQUIRE_WIFI_CONNECTED="${REQUIRE_WIFI_CONNECTED:-false}"
 REQUIRE_REAL_BLE="${REQUIRE_REAL_BLE:-}"
 REQUIRE_REAL_CSI="${REQUIRE_REAL_CSI:-}"
 REQUIRE_CSI_FRAMES_MIN="${REQUIRE_CSI_FRAMES_MIN:-1}"
@@ -59,7 +60,7 @@ fi
 
 echo "Inspecting latest Pi report for experiment elabftw:${SMOKE_EXPERIMENT_ID} on ${PI_USER}@${PI_HOST}"
 run_ssh "${PI_USER}@${PI_HOST}" \
-  "DATA_ROOT='${DATA_ROOT}' SMOKE_EXPERIMENT_ID='${SMOKE_EXPERIMENT_ID}' REAL_DATA_ENFORCE='${REAL_DATA_ENFORCE}' REQUIRE_REAL_WIFI='${REQUIRE_REAL_WIFI}' REQUIRE_REAL_BLE='${REQUIRE_REAL_BLE}' REQUIRE_REAL_CSI='${REQUIRE_REAL_CSI}' REQUIRE_CSI_FRAMES_MIN='${REQUIRE_CSI_FRAMES_MIN}' bash -s" <<'REMOTE_SCRIPT'
+  "DATA_ROOT='${DATA_ROOT}' SMOKE_EXPERIMENT_ID='${SMOKE_EXPERIMENT_ID}' REAL_DATA_ENFORCE='${REAL_DATA_ENFORCE}' REQUIRE_REAL_WIFI='${REQUIRE_REAL_WIFI}' REQUIRE_WIFI_CONNECTED='${REQUIRE_WIFI_CONNECTED}' REQUIRE_REAL_BLE='${REQUIRE_REAL_BLE}' REQUIRE_REAL_CSI='${REQUIRE_REAL_CSI}' REQUIRE_CSI_FRAMES_MIN='${REQUIRE_CSI_FRAMES_MIN}' bash -s" <<'REMOTE_SCRIPT'
 set -euo pipefail
 python3 - <<'PY'
 import json
@@ -104,6 +105,7 @@ data_root = Path((os.environ.get("DATA_ROOT") or "./data").strip())
 
 real_data_enforce = parse_bool(os.environ.get("REAL_DATA_ENFORCE"), True)
 require_real_wifi = parse_bool(os.environ.get("REQUIRE_REAL_WIFI"), real_data_enforce)
+require_wifi_connected = parse_bool(os.environ.get("REQUIRE_WIFI_CONNECTED"), False)
 require_real_ble = parse_bool(os.environ.get("REQUIRE_REAL_BLE"), real_data_enforce)
 require_real_csi = parse_bool(os.environ.get("REQUIRE_REAL_CSI"), real_data_enforce)
 require_csi_frames_min = max(0, to_int(os.environ.get("REQUIRE_CSI_FRAMES_MIN"), 1))
@@ -177,6 +179,7 @@ has_csi_artifact = any("csi" in name for name in artifact_names) or any("csi" in
 has_summary_artifact = any("run-summary" in name for name in artifact_names)
 
 wifi_scan_ok = to_int(metric("wifi_scan_ok"), 0)
+wifi_connected = to_int(metric("wifi_connected"), 0)
 ble_scan_ok = to_int(metric("ble_scan_ok"), 0)
 csi_collector_configured = to_int(metric("csi_collector_configured"), 0)
 csi_capture_ok = to_int(metric("csi_capture_ok"), 0)
@@ -194,6 +197,7 @@ result = {
     "status": str(report.get("status") or ""),
     "summary_metrics": {
         "wifi_scan_ok": wifi_scan_ok,
+        "wifi_connected": wifi_connected,
         "ble_scan_ok": ble_scan_ok,
         "csi_collector_configured": csi_collector_configured,
         "csi_capture_ok": csi_capture_ok,
@@ -227,6 +231,8 @@ if require_real_wifi:
         failures.append("wifi command event not found")
     if wifi_scan_ok < 1:
         failures.append("wifi_scan_ok != 1")
+    if require_wifi_connected and wifi_connected < 1:
+        failures.append("wifi_connected != 1 (set REQUIRE_WIFI_CONNECTED=false for monitor-mode acceptance)")
     if not has_wifi_artifact:
         failures.append("wifi artifact missing")
 

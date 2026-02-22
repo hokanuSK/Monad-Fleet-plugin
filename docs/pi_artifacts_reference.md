@@ -20,6 +20,16 @@ The accompanying line:
 
 is the raw collector execution outcome, not a data-loss signal by itself.
 
+## Wi-Fi Success Semantics (Current)
+
+`wifi_scan_ok=1` means Wi-Fi sensing command execution produced usable evidence.
+
+For monitor-mode runs this can be true even when `wifi_connected=0`, because channel/frequency evidence is still valid sensing data.
+
+If you need associated/station-only Wi-Fi for acceptance, enable:
+
+- `REQUIRE_WIFI_CONNECTED=true` in smoke/verifier runs.
+
 ## Artifact Types
 
 Common artifact name patterns and meaning:
@@ -124,9 +134,8 @@ Expected layout:
 For a strict real run, check `run-summary.json`:
 
 - `wifi_scan_ok=1`
+- `wifi_connected=1` only when `REQUIRE_WIFI_CONNECTED=true`
 - `ble_scan_ok=1`
 - `csi_capture_ok=1` (when CSI required)
 - `csi_frames_total >= required minimum`
 - `csi_output_files_count >= required minimum`
-
-If Wi-Fi evidence is invalid, the agent now fails Wi-Fi sensing instead of silently accepting `Not connected` fallback output.

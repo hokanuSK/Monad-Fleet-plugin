@@ -89,6 +89,7 @@ RUN_PI=true \
 INJECT_HYPOTHETICAL_METRICS=false \
 REAL_DATA_ENFORCE=true \
 REQUIRE_REAL_WIFI=true \
+REQUIRE_WIFI_CONNECTED=false \
 REQUIRE_REAL_BLE=true \
 REQUIRE_REAL_CSI=true \
 DO_BUILD=false \
@@ -101,6 +102,12 @@ If Wi-Fi-only route is required and you accept disruption:
 ALLOW_WIFI_DISRUPTIVE_CSI=true
 ```
 
+If you explicitly require associated/station Wi-Fi (not monitor-only evidence):
+
+```bash
+REQUIRE_WIFI_CONNECTED=true
+```
+
 ## 5.2 Post-run verifier
 
 ```bash
@@ -108,6 +115,7 @@ PI_HOST=<pi-host-or-ip> \
 SMOKE_EXPERIMENT_ID=<experiment_id> \
 REAL_DATA_ENFORCE=true \
 REQUIRE_REAL_WIFI=true \
+REQUIRE_WIFI_CONNECTED=false \
 REQUIRE_REAL_BLE=true \
 REQUIRE_REAL_CSI=true \
 scripts/rpi/verify_real_run.sh
@@ -118,6 +126,7 @@ scripts/rpi/verify_real_run.sh
 A run is Phase-1 pass only if:
 
 - Wi-Fi command evidence exists and `wifi_scan_ok=1`.
+- If connected-station Wi-Fi is required for a run, set `REQUIRE_WIFI_CONNECTED=true` and require `wifi_connected=1`.
 - BLE command evidence exists and `ble_scan_ok=1`.
 - CSI command evidence exists and `csi_capture_ok=1` (when CSI required).
 - CSI evidence exists (`csi_frames_total >= min` or output files present).
@@ -205,10 +214,16 @@ If upload is interrupted, these remain locally under:
   - `DEVICE_PI=<actual_agent_id>`
   - `TARGET_DEVICE_IDS_CSV=<same_agent_id>`
 
+## Symptom: `REAL_DATA_CHECK=FAIL - wifi_connected != 1`
+
+- Cause: run used monitor-mode evidence (valid for `wifi_scan_ok`) but no associated station link.
+- Action:
+  - Keep `REQUIRE_WIFI_CONNECTED=false` for monitor-mode acceptance (default), or
+  - switch to station/associated interface and rerun with `REQUIRE_WIFI_CONNECTED=true`.
+
 ## 9. Next Steps (After Phase-1)
 
 1. Standardize Ethernet control-plane for strict CSI certification.
 2. Add automatic replay job on Pi startup/service recovery.
 3. Add explicit Fleet endpoint override in smoke helper to avoid DNS ambiguity.
 4. Move to Phase-2: labeling pipeline + multi-day/multi-participant protocol.
-
