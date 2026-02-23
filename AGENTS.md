@@ -2,6 +2,15 @@
 
 This repo runs a local eLabFTW instance plus a Python gRPC "fleet manager" service and a simulated/real device agent.
 
+## Current Handoff (2026-02-23)
+
+- Operational handoff for next Codex windows/agents: `docs/agent_handoff_single_radio_2026-02-23.md`
+- Confirmed:
+  - single-radio flow can complete runs and replay reports from spool,
+  - `measureinject` loop was verified in real run logs.
+- Open blocker:
+  - CSI evidence remains `frames=0` / `files=0` on real run, even when injection loop is active.
+
 ## Repo Layout
 
 - `docker-compose.yml`: brings up eLabFTW (web + mysql) + Monad Fleet service + device simulator + observability.
@@ -13,6 +22,36 @@ This repo runs a local eLabFTW instance plus a Python gRPC "fleet manager" servi
 - `scripts/rpi/`: deploy/run the v2 agent on a Raspberry Pi via SSH + systemd.
 - `observability/`: Prometheus/Mimir/Grafana config/provisioning.
 - `elabimg/`: Docker build context for the custom `elabftw/elabimg` image used by `docker-compose.yml`.
+
+## Notion Ops Workflow (For Agents)
+
+Use the Notion layer as the execution memory for this project.
+
+- Main project page:
+  - `https://www.notion.so/30ffc7f91bce81be9586e12521811a25`
+- Ops hub:
+  - `https://www.notion.so/310fc7f91bce81c9b36cdbbc6c13ddde`
+- Ops databases:
+  - Runs DB: `https://www.notion.so/8dc731920bf34966bb711472100c7057`
+  - Decisions DB: `https://www.notion.so/0912fe3c3c6b4aa2ba1d67e867665d4c`
+  - Incidents DB: `https://www.notion.so/da72692b8106430bb1e3892866d41d20`
+  - Tasks DB: `https://www.notion.so/4a5936bb0baa4614bb61bc8daed18cee`
+
+Required behavior for agents:
+
+1. After each smoke/real run, add or update one entry in Runs DB.
+2. If a run fails or is flaky, create an Incident entry with root cause, fix, and prevention.
+3. If implementation/process direction changes, create a Decision entry with rationale and impact.
+4. Convert every non-trivial follow-up into a Task entry with owner and due date.
+5. Cross-link entries by run id / experiment id / issue or PR links in page content.
+6. Do not store secrets in Notion (API keys, tokens, passwords).
+
+Source-of-truth boundaries:
+
+- Git repo: code, proto contracts, scripts, implementation docs.
+- eLabFTW: experiment metadata and uploaded artifacts.
+- Prometheus/Grafana: time-series metrics.
+- Notion: operational log, decisions, incidents, and execution tasks.
 
 ## Quick Start (Docker Compose)
 
@@ -63,6 +102,24 @@ Logs:
 ```bash
 docker compose logs -f monad-fleet-service
 docker compose logs -f model-device
+```
+
+## eLab MCP (Compose on-demand)
+
+MCP server for eLab diagnostics is available as Compose service `elab-mcp` under profile `mcp`.
+It is intentionally on-demand (not started by default in `docker compose up`).
+
+Run MCP server over stdio:
+
+```bash
+docker compose run --rm -T elab-mcp
+```
+
+Quick MCP handshake smoke:
+
+```bash
+MODE=local scripts/smoke/mcp_elab_smoke.sh
+MODE=compose scripts/smoke/mcp_elab_smoke.sh
 ```
 
 ## Smoke Test (v3 WiFi/BLE/CSI + Metrics)
@@ -241,4 +298,3 @@ python -m grpc_tools.protoc -I device-sim/proto --python_out=device-sim --grpc_p
   device-sim/proto/fleet_gateway.proto device-sim/proto/fleet_gateway_v2.proto
 FLEET_MANAGER_HOST=127.0.0.1 FLEET_MANAGER_PORT=50060 MAX_SYNC_CYCLES=1 EXECUTE_POLICY=false python -u device-sim/agent_v2_client.py
 ```
-

@@ -21,6 +21,25 @@ This repository has 4 parts and can be run with `docker-compose`:
 docker compose up -d --build
 ```
 
+## Run eLab MCP via Docker Compose (on-demand)
+`elab-mcp` service je pod Compose profilom `mcp`, takze sa nespusta pri standardnom `up`.
+
+```bash
+docker compose run --rm -T elab-mcp
+```
+
+Priklad MCP klient konfiguracie:
+```json
+{
+  "mcpServers": {
+    "elab-fleet": {
+      "command": "docker",
+      "args": ["compose", "run", "--rm", "-T", "elab-mcp"]
+    }
+  }
+}
+```
+
 Web endpoints:
 - eLabFTW: `https://localhost:8443`
 - Grafana: `http://localhost:3000` (`admin` / `admin`)
@@ -45,6 +64,16 @@ This smoke test:
 - verifies metrics in Prometheus and Mimir query APIs,
 - verifies artifact uploads in the created eLabFTW experiment,
 - when `RUN_PI=true`, runs strict report validation with `scripts/rpi/verify_real_run.sh`.
+
+## Current Pi single-radio status (2026-02-23)
+
+- Handoff document for next agent windows: `docs/agent_handoff_single_radio_2026-02-23.md`.
+- Validated:
+  - run/report flow is stable enough for repeated runs without mandatory manual reboot each cycle,
+  - local spool replay and pending corruption quarantine are active,
+  - CSI `measureinject` loop is confirmed in real artifacts/logs.
+- Still unresolved:
+  - CSI evidence gate fails for real run (`csi_frames_total=0`, `csi_output_files_count=0`) despite active injection loop.
 
 Default artifact behavior in current Pi profile:
 - text artifacts are merged into `wifi-ble-csi-artifacts-bundle-*.tar.gz`,
