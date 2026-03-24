@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
 DEVICE_MODEL="${DEVICE_MODEL:-02:42:ac:14:00:04}"
 DEVICE_PI="${DEVICE_PI:-2c:cf:67:80:f5:d9}"
 MAX_SYNC_CYCLES="${MAX_SYNC_CYCLES:-1}"
@@ -16,6 +19,7 @@ RUN_PI="${RUN_PI:-false}"
 RUN_PI_PASSIVE="${RUN_PI_PASSIVE:-false}"   # when true, do not SSH into Pi; rely on always-running Pi agent
 PI_HOST="${PI_HOST:-monad-rpi5.local}"
 PI_HOSTS_CSV="${PI_HOSTS_CSV:-}"
+PI_RECOVERY_HOSTS_CSV="${PI_RECOVERY_HOSTS_CSV:-}"
 AGENT_IDS_CSV="${AGENT_IDS_CSV:-}"
 PI_HOSTS_FALLBACK="${PI_HOSTS_FALLBACK:-true}"  # when true, PI_HOSTS_CSV may be used as fallback candidates for one Pi
 ALLOW_WIFI_DISRUPTIVE_CSI="${ALLOW_WIFI_DISRUPTIVE_CSI:-false}"
@@ -67,6 +71,12 @@ REPORT_RPC_TIMEOUT_S="${REPORT_RPC_TIMEOUT_S:-120}"
 CONTROL_RPC_TIMEOUT_S="${CONTROL_RPC_TIMEOUT_S:-30}"
 AGENT_RUN_TIMEOUT_S="${AGENT_RUN_TIMEOUT_S:-900}"
 AGENT_STATUS_POLL_S="${AGENT_STATUS_POLL_S:-5}"
+SSH_WAIT_TIMEOUT_S="${SSH_WAIT_TIMEOUT_S:-180}"
+SSH_WAIT_INTERVAL_S="${SSH_WAIT_INTERVAL_S:-5}"
+SSH_DROP_FAIL_FAST_S="${SSH_DROP_FAIL_FAST_S:-0}"
+RESTART_NOW_HINT_ON_SSH_DROP="${RESTART_NOW_HINT_ON_SSH_DROP:-true}"
+MANAGE_SYSTEMD_AGENT="${MANAGE_SYSTEMD_AGENT:-true}"
+SYSTEMD_AGENT_SERVICE="${SYSTEMD_AGENT_SERVICE:-monad-fleet-agent.service}"
 ENABLE_ELAB_ARTIFACT_UPLOAD="${ENABLE_ELAB_ARTIFACT_UPLOAD:-true}"
 ARTIFACT_UPLOAD_MAX_BYTES="${ARTIFACT_UPLOAD_MAX_BYTES:-20971520}"
 ARTIFACT_UPLOAD_TARGET="${ARTIFACT_UPLOAD_TARGET:-elabftw}"
@@ -75,13 +85,42 @@ ARTIFACT_EVICT_AFTER_UPLOAD="${ARTIFACT_EVICT_AFTER_UPLOAD:-false}"
 ARTIFACT_UPLOAD_DURING_MEASURE_TIMEOUT_S="${ARTIFACT_UPLOAD_DURING_MEASURE_TIMEOUT_S:-3}"
 ARTIFACT_UPLOAD_BACKOFF_S="${ARTIFACT_UPLOAD_BACKOFF_S:-15}"
 RUN_ARTIFACT_SOFT_LIMIT_BYTES="${RUN_ARTIFACT_SOFT_LIMIT_BYTES:-0}"
+DATA_SINKS="${DATA_SINKS:-}"
+METRICS_SINKS="${METRICS_SINKS:-}"
+EVENT_SINKS="${EVENT_SINKS:-}"
+ARTIFACT_SINKS="${ARTIFACT_SINKS:-}"
+WEBHOOK_URL="${WEBHOOK_URL:-}"
+WEBHOOK_TOKEN="${WEBHOOK_TOKEN:-}"
+WEBHOOK_TIMEOUT_S="${WEBHOOK_TIMEOUT_S:-}"
+WEBHOOK_ARTIFACT_INLINE_MAX_BYTES="${WEBHOOK_ARTIFACT_INLINE_MAX_BYTES:-}"
+SQLITE_SINK_PATH="${SQLITE_SINK_PATH:-}"
 SEPARATE_MEASURE_AND_REPORT="${SEPARATE_MEASURE_AND_REPORT:-false}"
 RESTART_CONTROL_PLANE_BEFORE_REPORT="${RESTART_CONTROL_PLANE_BEFORE_REPORT:-false}"
+CONTROL_PLANE_IFACE="${CONTROL_PLANE_IFACE:-wlan0}"
+WIFI_SCAN_IFACE="${WIFI_SCAN_IFACE:-${CONTROL_PLANE_IFACE}}"
+CONTROL_PLANE_BAND_EXPECT="${CONTROL_PLANE_BAND_EXPECT:-}"
+CSI_MEASURE_IFACE="${CSI_MEASURE_IFACE:-}"
+CSI_MEASURE_BAND_EXPECT="${CSI_MEASURE_BAND_EXPECT:-}"
+CSI_REQUIRE_SEPARATE_IFACE="${CSI_REQUIRE_SEPARATE_IFACE:-false}"
+CSI_IFACE_FLAG="${CSI_IFACE_FLAG:-auto}"
+AUTO_SWITCH_CONTROL_PLANE_IFACE="${AUTO_SWITCH_CONTROL_PLANE_IFACE:-false}"
+AUTO_SWITCH_CSI_MEASURE_IFACE="${AUTO_SWITCH_CSI_MEASURE_IFACE:-true}"
+SINGLE_RADIO_MODE="${SINGLE_RADIO_MODE:-false}"
+SINGLE_RADIO_WIFI_PROFILE="${SINGLE_RADIO_WIFI_PROFILE:-auto}"
+SINGLE_RADIO_RECOVERY_RETRIES="${SINGLE_RADIO_RECOVERY_RETRIES:-3}"
+SINGLE_RADIO_RECOVERY_ROUTE_WAIT_S="${SINGLE_RADIO_RECOVERY_ROUTE_WAIT_S:-45}"
+SINGLE_RADIO_RECOVERY_CMD="${SINGLE_RADIO_RECOVERY_CMD:-}"
+SINGLE_RADIO_ROUTE_GATE="${SINGLE_RADIO_ROUTE_GATE:-true}"
+SINGLE_RADIO_ROUTE_HEALTH_TIMEOUT_S="${SINGLE_RADIO_ROUTE_HEALTH_TIMEOUT_S:-5}"
+SINGLE_RADIO_REBOOT_ON_RECOVERY_FAIL="${SINGLE_RADIO_REBOOT_ON_RECOVERY_FAIL:-false}"
 CONTROL_PLANE_RESTART_IFACE="${CONTROL_PLANE_RESTART_IFACE:-}"
 CONTROL_PLANE_RESTART_DOWN_S="${CONTROL_PLANE_RESTART_DOWN_S:-2}"
 CONTROL_PLANE_RESTART_WAIT_S="${CONTROL_PLANE_RESTART_WAIT_S:-45}"
 CONTROL_PLANE_RESTART_CMD="${CONTROL_PLANE_RESTART_CMD:-}"
 ALLOW_WIFI_CONTROL_PLANE_RESTART="${ALLOW_WIFI_CONTROL_PLANE_RESTART:-false}"
+STRICT_CONTROL_PLANE_IFACE="${STRICT_CONTROL_PLANE_IFACE:-false}"
+STRICT_WIFI_SCAN_IFACE="${STRICT_WIFI_SCAN_IFACE:-false}"
+REQUIRE_WIFI_CONTROL="${REQUIRE_WIFI_CONTROL:-false}"
 INJECT_HYPOTHETICAL_METRICS="${INJECT_HYPOTHETICAL_METRICS:-false}"
 CSI_COLLECTOR_CMD="${CSI_COLLECTOR_CMD:-}"
 CSI_OUTPUT_PATH="${CSI_OUTPUT_PATH:-}"
@@ -93,11 +132,20 @@ CSI_REQUIRE_EVIDENCE="${CSI_REQUIRE_EVIDENCE:-}"
 CSI_MIN_FRAMES="${CSI_MIN_FRAMES:-}"
 CSI_MIN_OUTPUT_FILES="${CSI_MIN_OUTPUT_FILES:-}"
 CSI_SUDO_NONINTERACTIVE="${CSI_SUDO_NONINTERACTIVE:-true}"
+CSI_TRAFFIC_ENABLE="${CSI_TRAFFIC_ENABLE:-}"
+CSI_TRAFFIC_TARGET="${CSI_TRAFFIC_TARGET:-}"
+CSI_TRAFFIC_IFACE="${CSI_TRAFFIC_IFACE:-}"
+CSI_TRAFFIC_INTERVAL_MS="${CSI_TRAFFIC_INTERVAL_MS:-}"
 CSI_ALLOW_THROTTLED="${CSI_ALLOW_THROTTLED:-false}"
+CSI_HARD_TIMEOUT_S="${CSI_HARD_TIMEOUT_S:-0}"
+CSI_CLEANUP_BEFORE_CAPTURE="${CSI_CLEANUP_BEFORE_CAPTURE:-true}"
+CSI_CLEANUP_AFTER_CAPTURE="${CSI_CLEANUP_AFTER_CAPTURE:-true}"
+CSI_KILL_PATTERNS="${CSI_KILL_PATTERNS:-feitcsi}"
 CSI_DEFAULT_FEIT_FREQ_MHZ="${CSI_DEFAULT_FEIT_FREQ_MHZ:-5240}"
 CSI_DEFAULT_FEIT_CHANNEL_WIDTH_MHZ="${CSI_DEFAULT_FEIT_CHANNEL_WIDTH_MHZ:-80}"
 CSI_DEFAULT_FEIT_FORMAT="${CSI_DEFAULT_FEIT_FORMAT:-VHT}"
 CSI_DEFAULT_OUTPUT_PATH="${CSI_DEFAULT_OUTPUT_PATH:-/tmp/csi.dat}"
+CSI_COLLECTOR_VERBOSE="${CSI_COLLECTOR_VERBOSE:-false}"
 REAL_DATA_ENFORCE="${REAL_DATA_ENFORCE:-}"
 REQUIRE_REAL_WIFI="${REQUIRE_REAL_WIFI:-}"
 REQUIRE_WIFI_CONNECTED="${REQUIRE_WIFI_CONNECTED:-false}"
@@ -109,6 +157,216 @@ RF_SCENARIO_ID="${RF_SCENARIO_ID:-}"
 RF_RUN_LABEL="${RF_RUN_LABEL:-}"
 TARGET_DEVICE_IDS_CSV="${TARGET_DEVICE_IDS_CSV:-}"
 PASSIVE_AGENT_WAIT_S="${PASSIVE_AGENT_WAIT_S:-120}"  # extra wait for passive Pi mode before verification
+PASSIVE_VERIFY_MAX_WAIT_S="${PASSIVE_VERIFY_MAX_WAIT_S:-900}"  # additional async verify window for passive mode
+PASSIVE_VERIFY_POLL_S="${PASSIVE_VERIFY_POLL_S:-15}"  # polling interval for passive async verification
+
+NOTION_SYNC="${NOTION_SYNC:-false}"
+NOTION_SYNC_STRICT="${NOTION_SYNC_STRICT:-false}"
+NOTION_API_TOKEN="${NOTION_API_TOKEN:-}"
+OPS_OUTPUT_DIR="${OPS_OUTPUT_DIR:-${REPO_ROOT}/output/ops}"
+OPS_RUN_CONTEXT_PATH="${OPS_RUN_CONTEXT_PATH:-${OPS_OUTPUT_DIR}/latest_run_context.json}"
+OPS_INCIDENT_CONTEXT_PATH="${OPS_INCIDENT_CONTEXT_PATH:-${OPS_OUTPUT_DIR}/latest_incident_context.json}"
+OPS_TASK_CONTEXT_PATH="${OPS_TASK_CONTEXT_PATH:-${OPS_OUTPUT_DIR}/latest_task_context.json}"
+NOTION_RUNS_DB_ID="${NOTION_RUNS_DB_ID:-8dc731920bf34966bb711472100c7057}"
+NOTION_INCIDENTS_DB_ID="${NOTION_INCIDENTS_DB_ID:-da72692b8106430bb1e3892866d41d20}"
+NOTION_TASKS_DB_ID="${NOTION_TASKS_DB_ID:-4a5936bb0baa4614bb61bc8daed18cee}"
+OPS_RUN_ID="${OPS_RUN_ID:-}"
+
+SMOKE_STARTED_AT_UTC="$(date -u +%FT%TZ)"
+SMOKE_LAST_STEP="bootstrap"
+SMOKE_LAST_COMMAND=""
+SMOKE_EXPERIMENT_ID=""
+
+ensure_ops_output_dir() {
+  mkdir -p "${OPS_OUTPUT_DIR}"
+}
+
+write_run_context() {
+  local result="$1"
+  ensure_ops_output_dir
+  OPS_RUN_CONTEXT_PATH="${OPS_RUN_CONTEXT_PATH}" \
+  RESULT="${result}" \
+  SMOKE_STARTED_AT_UTC="${SMOKE_STARTED_AT_UTC}" \
+  SMOKE_LAST_STEP="${SMOKE_LAST_STEP}" \
+  SMOKE_LAST_COMMAND="${SMOKE_LAST_COMMAND}" \
+  SMOKE_EXPERIMENT_ID="${SMOKE_EXPERIMENT_ID}" \
+  OPS_RUN_ID="${OPS_RUN_ID}" \
+  RUN_PI="${RUN_PI}" \
+  RUN_PI_PASSIVE="${RUN_PI_PASSIVE}" \
+  SMOKE_PROFILE="${SMOKE_PROFILE}" \
+  DEVICE_MODEL="${DEVICE_MODEL}" \
+  DEVICE_PI="${DEVICE_PI}" \
+  TARGET_DEVICE_IDS_CSV="${TARGET_DEVICE_IDS_CSV}" \
+  REAL_DATA_ENFORCE="${REAL_DATA_ENFORCE}" \
+  CLEANUP="${CLEANUP}" \
+  python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+from datetime import datetime, timezone
+
+path = Path(os.environ["OPS_RUN_CONTEXT_PATH"])
+payload = {
+    "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "started_at_utc": os.environ.get("SMOKE_STARTED_AT_UTC", ""),
+    "result": os.environ.get("RESULT", "unknown"),
+    "run_id": os.environ.get("OPS_RUN_ID", ""),
+    "smoke_experiment_id": os.environ.get("SMOKE_EXPERIMENT_ID", ""),
+    "smoke_profile": os.environ.get("SMOKE_PROFILE", ""),
+    "run_pi": os.environ.get("RUN_PI", ""),
+    "run_pi_passive": os.environ.get("RUN_PI_PASSIVE", ""),
+    "device_model": os.environ.get("DEVICE_MODEL", ""),
+    "device_pi": os.environ.get("DEVICE_PI", ""),
+    "target_device_ids_csv": os.environ.get("TARGET_DEVICE_IDS_CSV", ""),
+    "real_data_enforce": os.environ.get("REAL_DATA_ENFORCE", ""),
+    "cleanup": os.environ.get("CLEANUP", ""),
+    "last_step": os.environ.get("SMOKE_LAST_STEP", ""),
+    "last_command": os.environ.get("SMOKE_LAST_COMMAND", ""),
+}
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+print(f"[ops] wrote {path}")
+PY
+}
+
+write_incident_context() {
+  ensure_ops_output_dir
+  OPS_INCIDENT_CONTEXT_PATH="${OPS_INCIDENT_CONTEXT_PATH}" \
+  OPS_RUN_ID="${OPS_RUN_ID}" \
+  SMOKE_EXPERIMENT_ID="${SMOKE_EXPERIMENT_ID}" \
+  SMOKE_PROFILE="${SMOKE_PROFILE}" \
+  SMOKE_LAST_STEP="${SMOKE_LAST_STEP}" \
+  SMOKE_LAST_COMMAND="${SMOKE_LAST_COMMAND}" \
+  python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+from datetime import datetime, timezone
+
+path = Path(os.environ["OPS_INCIDENT_CONTEXT_PATH"])
+experiment_id = os.environ.get("SMOKE_EXPERIMENT_ID", "").strip()
+payload = {
+    "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "severity": "S3",
+    "status": "open",
+    "run_id": os.environ.get("OPS_RUN_ID", ""),
+    "experiment_id": experiment_id,
+    "symptom": f"Smoke failed at step={os.environ.get('SMOKE_LAST_STEP', '')}",
+    "root_cause": "",
+    "fix": "",
+    "prevention": "",
+    "links": "",
+    "context": {
+        "smoke_profile": os.environ.get("SMOKE_PROFILE", ""),
+        "last_command": os.environ.get("SMOKE_LAST_COMMAND", ""),
+    },
+}
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+print(f"[ops] wrote {path}")
+PY
+}
+
+write_task_context() {
+  ensure_ops_output_dir
+  OPS_TASK_CONTEXT_PATH="${OPS_TASK_CONTEXT_PATH}" \
+  OPS_RUN_ID="${OPS_RUN_ID}" \
+  SMOKE_EXPERIMENT_ID="${SMOKE_EXPERIMENT_ID}" \
+  SMOKE_LAST_STEP="${SMOKE_LAST_STEP}" \
+  python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+from datetime import datetime, timezone
+
+path = Path(os.environ["OPS_TASK_CONTEXT_PATH"])
+experiment_id = os.environ.get("SMOKE_EXPERIMENT_ID", "").strip()
+run_id = os.environ.get("OPS_RUN_ID", "").strip()
+reference_parts = []
+if run_id:
+    reference_parts.append(f"run_id={run_id}")
+if experiment_id:
+    reference_parts.append(f"experiment_id={experiment_id}")
+payload = {
+    "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "title": "Follow-up: investigate smoke failure",
+    "priority": "P1",
+    "status": "todo",
+    "owner": "",
+    "due_date": "",
+    "source": "Incident",
+    "reference": ";".join(reference_parts),
+    "notes": f"Failed at step={os.environ.get('SMOKE_LAST_STEP', '')}",
+}
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+print(f"[ops] wrote {path}")
+PY
+}
+
+run_notion_hook() {
+  local hook_path="$1"
+  shift
+  if [[ "${NOTION_SYNC}" != "true" ]]; then
+    return 0
+  fi
+  if [[ ! -x "${hook_path}" ]]; then
+    echo "WARN: Notion sync enabled but hook missing/non-executable: ${hook_path}"
+    return 1
+  fi
+  "${hook_path}" "$@"
+}
+
+sync_notion_run() {
+  NOTION_API_TOKEN="${NOTION_API_TOKEN}" \
+  NOTION_RUNS_DB_ID="${NOTION_RUNS_DB_ID}" \
+  run_notion_hook "${REPO_ROOT}/scripts/ops/notion_log_run.sh" "${OPS_RUN_CONTEXT_PATH}"
+}
+
+sync_notion_incident_and_task() {
+  local rc=0
+  NOTION_API_TOKEN="${NOTION_API_TOKEN}" \
+  NOTION_INCIDENTS_DB_ID="${NOTION_INCIDENTS_DB_ID}" \
+  run_notion_hook "${REPO_ROOT}/scripts/ops/notion_log_incident.sh" "${OPS_INCIDENT_CONTEXT_PATH}" || rc=1
+  NOTION_API_TOKEN="${NOTION_API_TOKEN}" \
+  NOTION_TASKS_DB_ID="${NOTION_TASKS_DB_ID}" \
+  run_notion_hook "${REPO_ROOT}/scripts/ops/notion_log_task.sh" "${OPS_TASK_CONTEXT_PATH}" || rc=1
+  return "${rc}"
+}
+
+on_smoke_exit() {
+  local rc="$1"
+  set +e
+  local result="pass"
+  local hook_failed=0
+  if [[ "${rc}" -ne 0 || "${SMOKE_LAST_STEP}" != "8_done" ]]; then
+    result="fail"
+    if [[ "${rc}" -eq 0 ]]; then
+      rc=1
+    fi
+  fi
+
+  write_run_context "${result}" || hook_failed=1
+  sync_notion_run || hook_failed=1
+
+  if [[ "${result}" == "fail" ]]; then
+    write_incident_context || hook_failed=1
+    write_task_context || hook_failed=1
+    sync_notion_incident_and_task || hook_failed=1
+  fi
+
+  if [[ "${hook_failed}" -ne 0 && "${NOTION_SYNC_STRICT}" == "true" && "${rc}" -eq 0 ]]; then
+    return 90
+  fi
+  return "${rc}"
+}
+
+on_smoke_exit_trap() {
+  local rc="$1"
+  trap - EXIT
+  on_smoke_exit "${rc}"
+  exit $?
+}
+
+trap 'SMOKE_LAST_COMMAND="${BASH_COMMAND}"' ERR
+trap 'on_smoke_exit_trap $?' EXIT
 
 csv_to_lines() {
   local raw="$1"
@@ -168,6 +426,9 @@ if [[ "${RUN_PI}" == "true" ]]; then
       TARGET_DEVICE_IDS_CSV="${DEVICE_PI}"
     fi
   fi
+  if [[ -z "${PI_RECOVERY_HOSTS_CSV}" ]]; then
+    PI_RECOVERY_HOSTS_CSV="${PI_HOST}"
+  fi
 fi
 
 if [[ -z "${REAL_DATA_ENFORCE}" ]]; then
@@ -186,7 +447,11 @@ if [[ "${REAL_DATA_ENFORCE}" == "true" ]]; then
 fi
 
 if [[ "${RUN_PI}" == "true" && -z "${CSI_COLLECTOR_CMD}" ]]; then
-  CSI_COLLECTOR_CMD="sudo feitcsi --frequency ${CSI_DEFAULT_FEIT_FREQ_MHZ} --channel-width ${CSI_DEFAULT_FEIT_CHANNEL_WIDTH_MHZ} --format ${CSI_DEFAULT_FEIT_FORMAT} --output-file ${CSI_DEFAULT_OUTPUT_PATH} -v"
+  CSI_VERBOSE_FLAG=""
+  if [[ "${CSI_COLLECTOR_VERBOSE}" == "true" ]]; then
+    CSI_VERBOSE_FLAG=" -v"
+  fi
+  CSI_COLLECTOR_CMD="sudo feitcsi --frequency ${CSI_DEFAULT_FEIT_FREQ_MHZ} --channel-width ${CSI_DEFAULT_FEIT_CHANNEL_WIDTH_MHZ} --format ${CSI_DEFAULT_FEIT_FORMAT} --output-file ${CSI_DEFAULT_OUTPUT_PATH}${CSI_VERBOSE_FLAG}"
   echo "CSI default: using collector command '${CSI_COLLECTOR_CMD}'."
 fi
 if [[ -z "${CSI_OUTPUT_PATH}" && -z "${CSI_OUTPUT_GLOB}" ]]; then
@@ -274,6 +539,7 @@ if (( AGENT_RUN_TIMEOUT_S < expected_run_min_timeout_s )); then
   echo "Adjusted AGENT_RUN_TIMEOUT_S to ${AGENT_RUN_TIMEOUT_S}s for profile=${SMOKE_PROFILE}."
 fi
 
+SMOKE_LAST_STEP="1_core_services_restart"
 if [[ "${SKIP_CORE_SERVICES_RESTART}" == "true" ]]; then
   echo "[1/8] Skip core service restart (SKIP_CORE_SERVICES_RESTART=true)"
 else
@@ -287,6 +553,7 @@ else
   docker compose up -d --force-recreate --no-build monad-fleet-service model-device prometheus mimir grafana
 fi
 
+SMOKE_LAST_STEP="2_reset_fleet_state"
 if [[ "${RESET_STATE}" == "true" ]]; then
   echo "[2/8] Reset Fleet service state (dedupe + ingest journal) only"
   docker compose exec -T monad-fleet-service sh -lc "rm -f /data/state.json /data/ingest-metrics.ndjson || true"
@@ -295,6 +562,7 @@ else
   echo "[2/8] Skip Fleet state reset (RESET_STATE=${RESET_STATE})"
 fi
 
+SMOKE_LAST_STEP="3_reset_metrics"
 if [[ "${RESET_METRICS}" == "true" ]]; then
   echo "[3/8] Reset Prometheus+Mimir data only (does not touch eLabFTW/MySQL)"
   docker compose exec -T prometheus sh -lc "rm -rf /prometheus/* || true"
@@ -304,6 +572,7 @@ else
   echo "[3/8] Skip metrics reset (RESET_METRICS=${RESET_METRICS})"
 fi
 
+SMOKE_LAST_STEP="3b_reset_grafana"
 if [[ "${RESET_GRAFANA}" == "true" ]]; then
   echo "[3b/8] Reset Grafana local data (dashboards/users are wiped; metrics live in Mimir)"
   docker compose exec -T grafana sh -lc "rm -rf /var/lib/grafana/* || true"
@@ -312,6 +581,7 @@ else
   echo "[3b/8] Skip Grafana reset (RESET_GRAFANA=${RESET_GRAFANA})"
 fi
 
+SMOKE_LAST_STEP="3c_pi_preflight"
 if [[ "${RUN_PI}" == "true" && "${RUN_PI_PASSIVE}" != "true" ]]; then
   echo "[3c/8] Preflight Pi SSH reachability"
   ENFORCE_CONTROL_PLANE_ROUTE="false"
@@ -324,14 +594,15 @@ if [[ "${RUN_PI}" == "true" && "${RUN_PI_PASSIVE}" != "true" ]]; then
   fi
   for host in "${PI_HOSTS_LIST[@]}"; do
     echo "  -> precheck host=${host}"
-    PI_HOSTS_CSV="${PI_HOSTS_CSV_FOR_AGENT}" PRECHECK_ONLY="true" ENFORCE_CONTROL_PLANE_ROUTE="${ENFORCE_CONTROL_PLANE_ROUTE}" scripts/rpi/smoke_test_agent.sh "${host}"
+    PI_HOSTS_CSV="${PI_HOSTS_CSV_FOR_AGENT}" PI_RECOVERY_HOSTS_CSV="${PI_RECOVERY_HOSTS_CSV}" PRECHECK_ONLY="true" SSH_WAIT_TIMEOUT_S="${SSH_WAIT_TIMEOUT_S}" SSH_WAIT_INTERVAL_S="${SSH_WAIT_INTERVAL_S}" SSH_DROP_FAIL_FAST_S="${SSH_DROP_FAIL_FAST_S}" RESTART_NOW_HINT_ON_SSH_DROP="${RESTART_NOW_HINT_ON_SSH_DROP}" MANAGE_SYSTEMD_AGENT="${MANAGE_SYSTEMD_AGENT}" SYSTEMD_AGENT_SERVICE="${SYSTEMD_AGENT_SERVICE}" ENFORCE_CONTROL_PLANE_ROUTE="${ENFORCE_CONTROL_PLANE_ROUTE}" CONTROL_PLANE_IFACE="${CONTROL_PLANE_IFACE}" WIFI_SCAN_IFACE="${WIFI_SCAN_IFACE}" CONTROL_PLANE_BAND_EXPECT="${CONTROL_PLANE_BAND_EXPECT}" CSI_MEASURE_IFACE="${CSI_MEASURE_IFACE}" CSI_MEASURE_BAND_EXPECT="${CSI_MEASURE_BAND_EXPECT}" CSI_REQUIRE_SEPARATE_IFACE="${CSI_REQUIRE_SEPARATE_IFACE}" CSI_IFACE_FLAG="${CSI_IFACE_FLAG}" AUTO_SWITCH_CONTROL_PLANE_IFACE="${AUTO_SWITCH_CONTROL_PLANE_IFACE}" AUTO_SWITCH_CSI_MEASURE_IFACE="${AUTO_SWITCH_CSI_MEASURE_IFACE}" SINGLE_RADIO_MODE="${SINGLE_RADIO_MODE}" SINGLE_RADIO_WIFI_PROFILE="${SINGLE_RADIO_WIFI_PROFILE}" SINGLE_RADIO_RECOVERY_RETRIES="${SINGLE_RADIO_RECOVERY_RETRIES}" SINGLE_RADIO_RECOVERY_ROUTE_WAIT_S="${SINGLE_RADIO_RECOVERY_ROUTE_WAIT_S}" SINGLE_RADIO_RECOVERY_CMD="${SINGLE_RADIO_RECOVERY_CMD}" SINGLE_RADIO_ROUTE_GATE="${SINGLE_RADIO_ROUTE_GATE}" SINGLE_RADIO_ROUTE_HEALTH_TIMEOUT_S="${SINGLE_RADIO_ROUTE_HEALTH_TIMEOUT_S}" SINGLE_RADIO_REBOOT_ON_RECOVERY_FAIL="${SINGLE_RADIO_REBOOT_ON_RECOVERY_FAIL}" STRICT_CONTROL_PLANE_IFACE="${STRICT_CONTROL_PLANE_IFACE}" STRICT_WIFI_SCAN_IFACE="${STRICT_WIFI_SCAN_IFACE}" REQUIRE_WIFI_CONTROL="${REQUIRE_WIFI_CONTROL}" scripts/rpi/smoke_test_agent.sh "${host}"
   done
 elif [[ "${RUN_PI}" == "true" && "${RUN_PI_PASSIVE}" == "true" ]]; then
   echo "[3c/8] Skip Pi SSH preflight (RUN_PI_PASSIVE=true; expecting always-running Pi agent)"
 fi
 
+SMOKE_LAST_STEP="4_create_experiment"
 echo "[4/8] Create a new eLabFTW smoke experiment policy (profile=${SMOKE_PROFILE}; no existing experiments modified)"
-SMOKE_EXPERIMENT_ID="$(docker compose exec -T monad-fleet-service sh -lc "DEVICE_MODEL='${DEVICE_MODEL}' DEVICE_PI='${DEVICE_PI}' RUN_PI='${RUN_PI}' TARGET_DEVICE_IDS_CSV='${TARGET_DEVICE_IDS_CSV}' SMOKE_TITLE_PREFIX='${SMOKE_TITLE_PREFIX}' SMOKE_TAGS_CSV='${SMOKE_TAGS_CSV}' SMOKE_PROFILE='${SMOKE_PROFILE}' RSSI_DURATION_S='${RSSI_DURATION_S}' RSSI_INTERVAL_S='${RSSI_INTERVAL_S}' RSSI_INTERVAL_S_PI='${RSSI_INTERVAL_S_PI}' RSSI_ARTIFACT_STRIDE='${RSSI_ARTIFACT_STRIDE}' FULL_DURATION_S='${FULL_DURATION_S}' FULL_INTERVAL_S='${FULL_INTERVAL_S}' FULL_INTERVAL_S_PI='${FULL_INTERVAL_S_PI}' FULL_ARTIFACT_STRIDE='${FULL_ARTIFACT_STRIDE}' FULL_BLE_TIMEOUT_S='${FULL_BLE_TIMEOUT_S}' FULL_CSI_TIMEOUT_S='${FULL_CSI_TIMEOUT_S}' WIRELESS_SPEC_DURATION_S='${WIRELESS_SPEC_DURATION_S}' WIRELESS_SPEC_INTERVAL_S='${WIRELESS_SPEC_INTERVAL_S}' WIRELESS_SPEC_INTERVAL_S_PI='${WIRELESS_SPEC_INTERVAL_S_PI}' WIRELESS_SPEC_ARTIFACT_STRIDE='${WIRELESS_SPEC_ARTIFACT_STRIDE}' WIRELESS_SPEC_BLE_TIMEOUT_S='${WIRELESS_SPEC_BLE_TIMEOUT_S}' WIRELESS_SPEC_CSI_TIMEOUT_S='${WIRELESS_SPEC_CSI_TIMEOUT_S}' WIRELESS_SPEC_ENV_SNAPSHOT='${WIRELESS_SPEC_ENV_SNAPSHOT}' RFPAPER_BASELINE_S='${RFPAPER_BASELINE_S}' RFPAPER_SCRIPTED_S='${RFPAPER_SCRIPTED_S}' RFPAPER_FREEFORM_S='${RFPAPER_FREEFORM_S}' RFPAPER_INTERVAL_S='${RFPAPER_INTERVAL_S}' RFPAPER_INTERVAL_S_PI='${RFPAPER_INTERVAL_S_PI}' RFPAPER_ARTIFACT_STRIDE='${RFPAPER_ARTIFACT_STRIDE}' RFPAPER_BLE_TIMEOUT_S='${RFPAPER_BLE_TIMEOUT_S}' RFPAPER_CSI_TIMEOUT_S='${RFPAPER_CSI_TIMEOUT_S}' RFPAPER_ENV_SNAPSHOT='${RFPAPER_ENV_SNAPSHOT}' RFPAPER_ACTIVITY_LABEL='${RFPAPER_ACTIVITY_LABEL}' RFPAPER_FREEFORM_LABEL='${RFPAPER_FREEFORM_LABEL}' RFPAPER_REQUIRE_ETHERNET_CONTROL='${RFPAPER_REQUIRE_ETHERNET_CONTROL}' RFPAPER_EXCITATION_RATE_HZ='${RFPAPER_EXCITATION_RATE_HZ}' RFPAPER_FIXED_FREQ_MHZ='${RFPAPER_FIXED_FREQ_MHZ}' RFPAPER_FIXED_CHANNEL_WIDTH_MHZ='${RFPAPER_FIXED_CHANNEL_WIDTH_MHZ}' RFPAPER_FIXED_MCS='${RFPAPER_FIXED_MCS}' RFPAPER_FIXED_TX_POWER_DBM='${RFPAPER_FIXED_TX_POWER_DBM}' RFPAPER_CSI_PER_PHASE='${RFPAPER_CSI_PER_PHASE}' WIFI_SAMPLE_START_JITTER_S='${WIFI_SAMPLE_START_JITTER_S}' WIFI_SAMPLE_START_AT_EPOCH_S='${WIFI_SAMPLE_START_AT_EPOCH_S}' RF_ROOM_ID='${RF_ROOM_ID}' RF_SCENARIO_ID='${RF_SCENARIO_ID}' RF_RUN_LABEL='${RF_RUN_LABEL}' ARTIFACT_UPLOAD_TARGET='${ARTIFACT_UPLOAD_TARGET}' ARTIFACT_UPLOAD_DURING_MEASURE='${ARTIFACT_UPLOAD_DURING_MEASURE}' ARTIFACT_EVICT_AFTER_UPLOAD='${ARTIFACT_EVICT_AFTER_UPLOAD}' RUN_ARTIFACT_SOFT_LIMIT_BYTES='${RUN_ARTIFACT_SOFT_LIMIT_BYTES}' CSI_COLLECTOR_CMD='${CSI_COLLECTOR_CMD}' CSI_OUTPUT_PATH='${CSI_OUTPUT_PATH}' CSI_OUTPUT_GLOB='${CSI_OUTPUT_GLOB}' CSI_FRAMES_REGEX='${CSI_FRAMES_REGEX}' CSI_OUTPUT_MAX_FILES='${CSI_OUTPUT_MAX_FILES}' CSI_PARSE_MAX_BYTES='${CSI_PARSE_MAX_BYTES}' CSI_REQUIRE_EVIDENCE='${CSI_REQUIRE_EVIDENCE}' CSI_MIN_FRAMES='${CSI_MIN_FRAMES}' CSI_MIN_OUTPUT_FILES='${CSI_MIN_OUTPUT_FILES}' CSI_SUDO_NONINTERACTIVE='${CSI_SUDO_NONINTERACTIVE}' python - <<'PY'
+SMOKE_EXPERIMENT_ID="$(docker compose exec -T monad-fleet-service sh -lc "DEVICE_MODEL='${DEVICE_MODEL}' DEVICE_PI='${DEVICE_PI}' RUN_PI='${RUN_PI}' TARGET_DEVICE_IDS_CSV='${TARGET_DEVICE_IDS_CSV}' SMOKE_TITLE_PREFIX='${SMOKE_TITLE_PREFIX}' SMOKE_TAGS_CSV='${SMOKE_TAGS_CSV}' SMOKE_PROFILE='${SMOKE_PROFILE}' RSSI_DURATION_S='${RSSI_DURATION_S}' RSSI_INTERVAL_S='${RSSI_INTERVAL_S}' RSSI_INTERVAL_S_PI='${RSSI_INTERVAL_S_PI}' RSSI_ARTIFACT_STRIDE='${RSSI_ARTIFACT_STRIDE}' FULL_DURATION_S='${FULL_DURATION_S}' FULL_INTERVAL_S='${FULL_INTERVAL_S}' FULL_INTERVAL_S_PI='${FULL_INTERVAL_S_PI}' FULL_ARTIFACT_STRIDE='${FULL_ARTIFACT_STRIDE}' FULL_BLE_TIMEOUT_S='${FULL_BLE_TIMEOUT_S}' FULL_CSI_TIMEOUT_S='${FULL_CSI_TIMEOUT_S}' WIRELESS_SPEC_DURATION_S='${WIRELESS_SPEC_DURATION_S}' WIRELESS_SPEC_INTERVAL_S='${WIRELESS_SPEC_INTERVAL_S}' WIRELESS_SPEC_INTERVAL_S_PI='${WIRELESS_SPEC_INTERVAL_S_PI}' WIRELESS_SPEC_ARTIFACT_STRIDE='${WIRELESS_SPEC_ARTIFACT_STRIDE}' WIRELESS_SPEC_BLE_TIMEOUT_S='${WIRELESS_SPEC_BLE_TIMEOUT_S}' WIRELESS_SPEC_CSI_TIMEOUT_S='${WIRELESS_SPEC_CSI_TIMEOUT_S}' WIRELESS_SPEC_ENV_SNAPSHOT='${WIRELESS_SPEC_ENV_SNAPSHOT}' RFPAPER_BASELINE_S='${RFPAPER_BASELINE_S}' RFPAPER_SCRIPTED_S='${RFPAPER_SCRIPTED_S}' RFPAPER_FREEFORM_S='${RFPAPER_FREEFORM_S}' RFPAPER_INTERVAL_S='${RFPAPER_INTERVAL_S}' RFPAPER_INTERVAL_S_PI='${RFPAPER_INTERVAL_S_PI}' RFPAPER_ARTIFACT_STRIDE='${RFPAPER_ARTIFACT_STRIDE}' RFPAPER_BLE_TIMEOUT_S='${RFPAPER_BLE_TIMEOUT_S}' RFPAPER_CSI_TIMEOUT_S='${RFPAPER_CSI_TIMEOUT_S}' RFPAPER_ENV_SNAPSHOT='${RFPAPER_ENV_SNAPSHOT}' RFPAPER_ACTIVITY_LABEL='${RFPAPER_ACTIVITY_LABEL}' RFPAPER_FREEFORM_LABEL='${RFPAPER_FREEFORM_LABEL}' RFPAPER_REQUIRE_ETHERNET_CONTROL='${RFPAPER_REQUIRE_ETHERNET_CONTROL}' RFPAPER_EXCITATION_RATE_HZ='${RFPAPER_EXCITATION_RATE_HZ}' RFPAPER_FIXED_FREQ_MHZ='${RFPAPER_FIXED_FREQ_MHZ}' RFPAPER_FIXED_CHANNEL_WIDTH_MHZ='${RFPAPER_FIXED_CHANNEL_WIDTH_MHZ}' RFPAPER_FIXED_MCS='${RFPAPER_FIXED_MCS}' RFPAPER_FIXED_TX_POWER_DBM='${RFPAPER_FIXED_TX_POWER_DBM}' RFPAPER_CSI_PER_PHASE='${RFPAPER_CSI_PER_PHASE}' WIFI_SAMPLE_START_JITTER_S='${WIFI_SAMPLE_START_JITTER_S}' WIFI_SAMPLE_START_AT_EPOCH_S='${WIFI_SAMPLE_START_AT_EPOCH_S}' RF_ROOM_ID='${RF_ROOM_ID}' RF_SCENARIO_ID='${RF_SCENARIO_ID}' RF_RUN_LABEL='${RF_RUN_LABEL}' ARTIFACT_UPLOAD_TARGET='${ARTIFACT_UPLOAD_TARGET}' ARTIFACT_UPLOAD_DURING_MEASURE='${ARTIFACT_UPLOAD_DURING_MEASURE}' ARTIFACT_EVICT_AFTER_UPLOAD='${ARTIFACT_EVICT_AFTER_UPLOAD}' RUN_ARTIFACT_SOFT_LIMIT_BYTES='${RUN_ARTIFACT_SOFT_LIMIT_BYTES}' DATA_SINKS='${DATA_SINKS}' METRICS_SINKS='${METRICS_SINKS}' EVENT_SINKS='${EVENT_SINKS}' ARTIFACT_SINKS='${ARTIFACT_SINKS}' WEBHOOK_URL='${WEBHOOK_URL}' WEBHOOK_TOKEN='${WEBHOOK_TOKEN}' WEBHOOK_TIMEOUT_S='${WEBHOOK_TIMEOUT_S}' WEBHOOK_ARTIFACT_INLINE_MAX_BYTES='${WEBHOOK_ARTIFACT_INLINE_MAX_BYTES}' SQLITE_SINK_PATH='${SQLITE_SINK_PATH}' CSI_COLLECTOR_CMD='${CSI_COLLECTOR_CMD}' CSI_OUTPUT_PATH='${CSI_OUTPUT_PATH}' CSI_OUTPUT_GLOB='${CSI_OUTPUT_GLOB}' CSI_FRAMES_REGEX='${CSI_FRAMES_REGEX}' CSI_OUTPUT_MAX_FILES='${CSI_OUTPUT_MAX_FILES}' CSI_PARSE_MAX_BYTES='${CSI_PARSE_MAX_BYTES}' CSI_REQUIRE_EVIDENCE='${CSI_REQUIRE_EVIDENCE}' CSI_MIN_FRAMES='${CSI_MIN_FRAMES}' CSI_MIN_OUTPUT_FILES='${CSI_MIN_OUTPUT_FILES}' CSI_SUDO_NONINTERACTIVE='${CSI_SUDO_NONINTERACTIVE}' CSI_TRAFFIC_ENABLE='${CSI_TRAFFIC_ENABLE}' CSI_TRAFFIC_TARGET='${CSI_TRAFFIC_TARGET}' CSI_TRAFFIC_IFACE='${CSI_TRAFFIC_IFACE}' CSI_TRAFFIC_INTERVAL_MS='${CSI_TRAFFIC_INTERVAL_MS}' CSI_HARD_TIMEOUT_S='${CSI_HARD_TIMEOUT_S}' CSI_CLEANUP_BEFORE_CAPTURE='${CSI_CLEANUP_BEFORE_CAPTURE}' CSI_CLEANUP_AFTER_CAPTURE='${CSI_CLEANUP_AFTER_CAPTURE}' CSI_KILL_PATTERNS='${CSI_KILL_PATTERNS}' python - <<'PY'
 import json
 import os
 import re
@@ -399,13 +670,36 @@ csi_require_evidence = (os.environ.get('CSI_REQUIRE_EVIDENCE') or '').strip()
 csi_min_frames = (os.environ.get('CSI_MIN_FRAMES') or '').strip()
 csi_min_output_files = (os.environ.get('CSI_MIN_OUTPUT_FILES') or '').strip()
 csi_sudo_noninteractive = (os.environ.get('CSI_SUDO_NONINTERACTIVE') or '').strip()
+csi_traffic_enable = (os.environ.get('CSI_TRAFFIC_ENABLE') or '').strip()
+csi_traffic_target = (os.environ.get('CSI_TRAFFIC_TARGET') or '').strip()
+csi_traffic_iface = (os.environ.get('CSI_TRAFFIC_IFACE') or '').strip()
+csi_traffic_interval_ms = (os.environ.get('CSI_TRAFFIC_INTERVAL_MS') or '').strip()
+csi_hard_timeout_s = (os.environ.get('CSI_HARD_TIMEOUT_S') or '').strip()
+csi_cleanup_before_capture = (os.environ.get('CSI_CLEANUP_BEFORE_CAPTURE') or '').strip()
+csi_cleanup_after_capture = (os.environ.get('CSI_CLEANUP_AFTER_CAPTURE') or '').strip()
+csi_kill_patterns = (os.environ.get('CSI_KILL_PATTERNS') or '').strip()
 artifact_upload_target = (os.environ.get('ARTIFACT_UPLOAD_TARGET') or '').strip()
 artifact_upload_during_measure = (os.environ.get('ARTIFACT_UPLOAD_DURING_MEASURE') or '').strip()
 artifact_evict_after_upload = (os.environ.get('ARTIFACT_EVICT_AFTER_UPLOAD') or '').strip()
 run_artifact_soft_limit_bytes = (os.environ.get('RUN_ARTIFACT_SOFT_LIMIT_BYTES') or '').strip()
+data_sinks = (os.environ.get('DATA_SINKS') or '').strip()
+metrics_sinks = (os.environ.get('METRICS_SINKS') or '').strip()
+event_sinks = (os.environ.get('EVENT_SINKS') or '').strip()
+artifact_sinks = (os.environ.get('ARTIFACT_SINKS') or '').strip()
+webhook_url = (os.environ.get('WEBHOOK_URL') or '').strip()
+webhook_token = (os.environ.get('WEBHOOK_TOKEN') or '').strip()
+webhook_timeout_s = (os.environ.get('WEBHOOK_TIMEOUT_S') or '').strip()
+webhook_artifact_inline_max_bytes = (os.environ.get('WEBHOOK_ARTIFACT_INLINE_MAX_BYTES') or '').strip()
+sqlite_sink_path = (os.environ.get('SQLITE_SINK_PATH') or '').strip()
 now = datetime.now(timezone.utc)
 
 explicit_device_ids = [row.strip().lower() for row in target_device_ids_csv.split(',') if row.strip()]
+if run_pi:
+    # Always use Pi-safe sampling intervals when targeting real Pi runs.
+    rssi_interval_s = rssi_interval_s_pi
+    full_interval_s = full_interval_s_pi
+    wireless_spec_interval_s = wireless_spec_interval_s_pi
+    rfpaper_interval_s = rfpaper_interval_s_pi
 if explicit_device_ids:
     # Keep order stable while removing duplicates.
     seen_ids = set()
@@ -417,11 +711,6 @@ if explicit_device_ids:
         device_ids.append(row)
 elif run_pi and device_pi:
     device_ids = [device_pi]
-    # On real Pi, keep safer default interval unless explicitly overridden higher/lower by env.
-    rssi_interval_s = rssi_interval_s_pi
-    full_interval_s = full_interval_s_pi
-    wireless_spec_interval_s = wireless_spec_interval_s_pi
-    rfpaper_interval_s = rfpaper_interval_s_pi
 else:
     device_ids = [device_model]
 
@@ -436,6 +725,41 @@ def with_artifact_upload_env(env_map: dict[str, str]) -> dict[str, str]:
     if run_artifact_soft_limit_bytes:
         merged['RUN_ARTIFACT_SOFT_LIMIT_BYTES'] = run_artifact_soft_limit_bytes
     return merged
+
+def with_sink_env(env_map: dict[str, str]) -> dict[str, str]:
+    merged = dict(env_map)
+    if data_sinks:
+        merged['DATA_SINKS'] = data_sinks
+    if metrics_sinks:
+        merged['METRICS_SINKS'] = metrics_sinks
+    if event_sinks:
+        merged['EVENT_SINKS'] = event_sinks
+    if artifact_sinks:
+        merged['ARTIFACT_SINKS'] = artifact_sinks
+    if webhook_url:
+        merged['WEBHOOK_URL'] = webhook_url
+    if webhook_token:
+        merged['WEBHOOK_TOKEN'] = webhook_token
+    if webhook_timeout_s:
+        merged['WEBHOOK_TIMEOUT_S'] = webhook_timeout_s
+    if webhook_artifact_inline_max_bytes:
+        merged['WEBHOOK_ARTIFACT_INLINE_MAX_BYTES'] = webhook_artifact_inline_max_bytes
+    if sqlite_sink_path:
+        merged['SQLITE_SINK_PATH'] = sqlite_sink_path
+    return merged
+
+def with_runtime_env(env_map: dict[str, str]) -> dict[str, str]:
+    return with_sink_env(with_artifact_upload_env(env_map))
+
+def with_command_runtime_env(command: dict) -> dict:
+    merged_command = dict(command)
+    current_env = merged_command.get('env') if isinstance(merged_command.get('env'), dict) else {}
+    merged_env = with_runtime_env(current_env)
+    if merged_env:
+        merged_command['env'] = merged_env
+    elif 'env' in merged_command and not merged_command['env']:
+        merged_command.pop('env', None)
+    return merged_command
 
 csi_env = {}
 if csi_collector_cmd:
@@ -458,7 +782,23 @@ if csi_min_output_files:
     csi_env['CSI_MIN_OUTPUT_FILES'] = csi_min_output_files
 if csi_sudo_noninteractive:
     csi_env['CSI_SUDO_NONINTERACTIVE'] = csi_sudo_noninteractive
-csi_env = with_artifact_upload_env(csi_env)
+if csi_traffic_enable:
+    csi_env['CSI_TRAFFIC_ENABLE'] = csi_traffic_enable
+if csi_traffic_target:
+    csi_env['CSI_TRAFFIC_TARGET'] = csi_traffic_target
+if csi_traffic_iface:
+    csi_env['CSI_TRAFFIC_IFACE'] = csi_traffic_iface
+if csi_traffic_interval_ms:
+    csi_env['CSI_TRAFFIC_INTERVAL_MS'] = csi_traffic_interval_ms
+if csi_hard_timeout_s:
+    csi_env['CSI_HARD_TIMEOUT_S'] = csi_hard_timeout_s
+if csi_cleanup_before_capture:
+    csi_env['CSI_CLEANUP_BEFORE_CAPTURE'] = csi_cleanup_before_capture
+if csi_cleanup_after_capture:
+    csi_env['CSI_CLEANUP_AFTER_CAPTURE'] = csi_cleanup_after_capture
+if csi_kill_patterns:
+    csi_env['CSI_KILL_PATTERNS'] = csi_kill_patterns
+csi_env = with_runtime_env(csi_env)
 
 def wifi_sampling_env(duration_s: int, interval_s: int, artifact_stride: int) -> dict[str, str]:
     env_map = {
@@ -471,7 +811,7 @@ def wifi_sampling_env(duration_s: int, interval_s: int, artifact_stride: int) ->
         env_map['WIFI_SAMPLE_START_JITTER_S'] = str(wifi_sample_start_jitter_s)
     if wifi_sample_start_at_epoch_s:
         env_map['WIFI_SAMPLE_START_AT_EPOCH_S'] = wifi_sample_start_at_epoch_s
-    return with_artifact_upload_env(env_map)
+    return with_runtime_env(env_map)
 
 def with_rf_env(env_map: dict[str, str], phase: str, activity_label: str = '') -> dict[str, str]:
     merged = dict(env_map)
@@ -682,6 +1022,8 @@ if smoke_profile == 'rfpaper':
     csi_window_s = scripted_csi_timeout_s if not rfpaper_csi_per_phase else (baseline_csi_timeout_s + scripted_csi_timeout_s + freeform_csi_timeout_s)
     window_minutes = max(8, int((total_phase_s + (3 * rfpaper_ble_timeout_s) + csi_window_s + 240) / 60))
 
+commands = [with_command_runtime_env(command) for command in commands]
+
 policy = {
     'target_selector': {'device_ids': device_ids},
     'range': {
@@ -768,6 +1110,7 @@ PY"
 )"
 echo "Created smoke experiment id=${SMOKE_EXPERIMENT_ID}"
 
+SMOKE_LAST_STEP="5_run_agent_cycle"
 if [[ "${RUN_PI}" == "true" && "${RUN_PI_PASSIVE}" != "true" ]]; then
   echo "[5/8] Run Raspberry Pi one-cycle report(s) (real Wi-Fi/BLE collection if tools are available)"
   REQUIRE_ETHERNET_CONTROL="false"
@@ -787,16 +1130,17 @@ if [[ "${RUN_PI}" == "true" && "${RUN_PI_PASSIVE}" != "true" ]]; then
       agent_override="${AGENT_IDS_LIST[$idx]}"
     fi
     echo "  -> host=${host} agent_id=${agent_override:-auto-detect}"
-    PI_HOSTS_CSV="${PI_HOSTS_CSV_FOR_AGENT}" EXECUTE_POLICY="true" MAX_SYNC_CYCLES="${MAX_SYNC_CYCLES}" AGENT_ID="${agent_override}" WIFI_SAMPLE_MIN_INTERVAL_S="${WIFI_SAMPLE_MIN_INTERVAL_S}" WIFI_SAMPLE_MAX_DURATION_S="${WIFI_SAMPLE_MAX_DURATION_S}" WIFI_SAMPLE_MAX_POINTS="${WIFI_SAMPLE_MAX_POINTS}" ENABLE_ELAB_ARTIFACT_UPLOAD="${ENABLE_ELAB_ARTIFACT_UPLOAD}" ARTIFACT_UPLOAD_MAX_BYTES="${ARTIFACT_UPLOAD_MAX_BYTES}" ARTIFACT_UPLOAD_TARGET="${ARTIFACT_UPLOAD_TARGET}" ARTIFACT_UPLOAD_DURING_MEASURE="${ARTIFACT_UPLOAD_DURING_MEASURE}" ARTIFACT_EVICT_AFTER_UPLOAD="${ARTIFACT_EVICT_AFTER_UPLOAD}" ARTIFACT_UPLOAD_DURING_MEASURE_TIMEOUT_S="${ARTIFACT_UPLOAD_DURING_MEASURE_TIMEOUT_S}" ARTIFACT_UPLOAD_BACKOFF_S="${ARTIFACT_UPLOAD_BACKOFF_S}" RUN_ARTIFACT_SOFT_LIMIT_BYTES="${RUN_ARTIFACT_SOFT_LIMIT_BYTES}" REPORT_RPC_TIMEOUT_S="${REPORT_RPC_TIMEOUT_S}" CONTROL_RPC_TIMEOUT_S="${CONTROL_RPC_TIMEOUT_S}" AGENT_RUN_TIMEOUT_S="${AGENT_RUN_TIMEOUT_S}" AGENT_STATUS_POLL_S="${AGENT_STATUS_POLL_S}" SEPARATE_MEASURE_AND_REPORT="${SEPARATE_MEASURE_AND_REPORT}" RESTART_CONTROL_PLANE_BEFORE_REPORT="${RESTART_CONTROL_PLANE_BEFORE_REPORT}" CONTROL_PLANE_RESTART_IFACE="${CONTROL_PLANE_RESTART_IFACE}" CONTROL_PLANE_RESTART_DOWN_S="${CONTROL_PLANE_RESTART_DOWN_S}" CONTROL_PLANE_RESTART_WAIT_S="${CONTROL_PLANE_RESTART_WAIT_S}" CONTROL_PLANE_RESTART_CMD="${CONTROL_PLANE_RESTART_CMD}" ALLOW_WIFI_CONTROL_PLANE_RESTART="${ALLOW_WIFI_CONTROL_PLANE_RESTART}" ALLOW_WIFI_DISRUPTIVE_CSI="${ALLOW_WIFI_DISRUPTIVE_CSI}" REQUIRE_REAL_CSI="${REQUIRE_REAL_CSI}" REQUIRE_ETHERNET_CONTROL="${REQUIRE_ETHERNET_CONTROL}" ENFORCE_CONTROL_PLANE_ROUTE="${ENFORCE_CONTROL_PLANE_ROUTE}" CSI_COLLECTOR_CMD="${CSI_COLLECTOR_CMD}" CSI_OUTPUT_PATH="${CSI_OUTPUT_PATH}" CSI_OUTPUT_GLOB="${CSI_OUTPUT_GLOB}" CSI_FRAMES_REGEX="${CSI_FRAMES_REGEX}" CSI_OUTPUT_MAX_FILES="${CSI_OUTPUT_MAX_FILES}" CSI_PARSE_MAX_BYTES="${CSI_PARSE_MAX_BYTES}" CSI_REQUIRE_EVIDENCE="${CSI_REQUIRE_EVIDENCE}" CSI_MIN_FRAMES="${CSI_MIN_FRAMES}" CSI_MIN_OUTPUT_FILES="${CSI_MIN_OUTPUT_FILES}" CSI_SUDO_NONINTERACTIVE="${CSI_SUDO_NONINTERACTIVE}" CSI_ALLOW_THROTTLED="${CSI_ALLOW_THROTTLED}" scripts/rpi/smoke_test_agent.sh "${host}"
+    PI_HOSTS_CSV="${PI_HOSTS_CSV_FOR_AGENT}" PI_RECOVERY_HOSTS_CSV="${PI_RECOVERY_HOSTS_CSV}" EXECUTE_POLICY="true" MAX_SYNC_CYCLES="${MAX_SYNC_CYCLES}" AGENT_ID="${agent_override}" CONTROL_PLANE_IFACE="${CONTROL_PLANE_IFACE}" WIFI_SCAN_IFACE="${WIFI_SCAN_IFACE}" CONTROL_PLANE_BAND_EXPECT="${CONTROL_PLANE_BAND_EXPECT}" CSI_MEASURE_IFACE="${CSI_MEASURE_IFACE}" CSI_MEASURE_BAND_EXPECT="${CSI_MEASURE_BAND_EXPECT}" CSI_REQUIRE_SEPARATE_IFACE="${CSI_REQUIRE_SEPARATE_IFACE}" CSI_IFACE_FLAG="${CSI_IFACE_FLAG}" AUTO_SWITCH_CONTROL_PLANE_IFACE="${AUTO_SWITCH_CONTROL_PLANE_IFACE}" AUTO_SWITCH_CSI_MEASURE_IFACE="${AUTO_SWITCH_CSI_MEASURE_IFACE}" SINGLE_RADIO_MODE="${SINGLE_RADIO_MODE}" SINGLE_RADIO_WIFI_PROFILE="${SINGLE_RADIO_WIFI_PROFILE}" SINGLE_RADIO_RECOVERY_RETRIES="${SINGLE_RADIO_RECOVERY_RETRIES}" SINGLE_RADIO_RECOVERY_ROUTE_WAIT_S="${SINGLE_RADIO_RECOVERY_ROUTE_WAIT_S}" SINGLE_RADIO_RECOVERY_CMD="${SINGLE_RADIO_RECOVERY_CMD}" SINGLE_RADIO_ROUTE_GATE="${SINGLE_RADIO_ROUTE_GATE}" SINGLE_RADIO_ROUTE_HEALTH_TIMEOUT_S="${SINGLE_RADIO_ROUTE_HEALTH_TIMEOUT_S}" SINGLE_RADIO_REBOOT_ON_RECOVERY_FAIL="${SINGLE_RADIO_REBOOT_ON_RECOVERY_FAIL}" WIFI_SAMPLE_MIN_INTERVAL_S="${WIFI_SAMPLE_MIN_INTERVAL_S}" WIFI_SAMPLE_MAX_DURATION_S="${WIFI_SAMPLE_MAX_DURATION_S}" WIFI_SAMPLE_MAX_POINTS="${WIFI_SAMPLE_MAX_POINTS}" ENABLE_ELAB_ARTIFACT_UPLOAD="${ENABLE_ELAB_ARTIFACT_UPLOAD}" ARTIFACT_UPLOAD_MAX_BYTES="${ARTIFACT_UPLOAD_MAX_BYTES}" ARTIFACT_UPLOAD_TARGET="${ARTIFACT_UPLOAD_TARGET}" ARTIFACT_UPLOAD_DURING_MEASURE="${ARTIFACT_UPLOAD_DURING_MEASURE}" ARTIFACT_EVICT_AFTER_UPLOAD="${ARTIFACT_EVICT_AFTER_UPLOAD}" ARTIFACT_UPLOAD_DURING_MEASURE_TIMEOUT_S="${ARTIFACT_UPLOAD_DURING_MEASURE_TIMEOUT_S}" ARTIFACT_UPLOAD_BACKOFF_S="${ARTIFACT_UPLOAD_BACKOFF_S}" RUN_ARTIFACT_SOFT_LIMIT_BYTES="${RUN_ARTIFACT_SOFT_LIMIT_BYTES}" DATA_SINKS="${DATA_SINKS}" METRICS_SINKS="${METRICS_SINKS}" EVENT_SINKS="${EVENT_SINKS}" ARTIFACT_SINKS="${ARTIFACT_SINKS}" WEBHOOK_URL="${WEBHOOK_URL}" WEBHOOK_TOKEN="${WEBHOOK_TOKEN}" WEBHOOK_TIMEOUT_S="${WEBHOOK_TIMEOUT_S}" WEBHOOK_ARTIFACT_INLINE_MAX_BYTES="${WEBHOOK_ARTIFACT_INLINE_MAX_BYTES}" SQLITE_SINK_PATH="${SQLITE_SINK_PATH}" REPORT_RPC_TIMEOUT_S="${REPORT_RPC_TIMEOUT_S}" CONTROL_RPC_TIMEOUT_S="${CONTROL_RPC_TIMEOUT_S}" AGENT_RUN_TIMEOUT_S="${AGENT_RUN_TIMEOUT_S}" AGENT_STATUS_POLL_S="${AGENT_STATUS_POLL_S}" SSH_DROP_FAIL_FAST_S="${SSH_DROP_FAIL_FAST_S}" RESTART_NOW_HINT_ON_SSH_DROP="${RESTART_NOW_HINT_ON_SSH_DROP}" MANAGE_SYSTEMD_AGENT="${MANAGE_SYSTEMD_AGENT}" SYSTEMD_AGENT_SERVICE="${SYSTEMD_AGENT_SERVICE}" SEPARATE_MEASURE_AND_REPORT="${SEPARATE_MEASURE_AND_REPORT}" RESTART_CONTROL_PLANE_BEFORE_REPORT="${RESTART_CONTROL_PLANE_BEFORE_REPORT}" CONTROL_PLANE_RESTART_IFACE="${CONTROL_PLANE_RESTART_IFACE}" CONTROL_PLANE_RESTART_DOWN_S="${CONTROL_PLANE_RESTART_DOWN_S}" CONTROL_PLANE_RESTART_WAIT_S="${CONTROL_PLANE_RESTART_WAIT_S}" CONTROL_PLANE_RESTART_CMD="${CONTROL_PLANE_RESTART_CMD}" ALLOW_WIFI_CONTROL_PLANE_RESTART="${ALLOW_WIFI_CONTROL_PLANE_RESTART}" ALLOW_WIFI_DISRUPTIVE_CSI="${ALLOW_WIFI_DISRUPTIVE_CSI}" REQUIRE_REAL_CSI="${REQUIRE_REAL_CSI}" REQUIRE_ETHERNET_CONTROL="${REQUIRE_ETHERNET_CONTROL}" REQUIRE_WIFI_CONTROL="${REQUIRE_WIFI_CONTROL}" STRICT_CONTROL_PLANE_IFACE="${STRICT_CONTROL_PLANE_IFACE}" STRICT_WIFI_SCAN_IFACE="${STRICT_WIFI_SCAN_IFACE}" ENFORCE_CONTROL_PLANE_ROUTE="${ENFORCE_CONTROL_PLANE_ROUTE}" CSI_COLLECTOR_CMD="${CSI_COLLECTOR_CMD}" CSI_OUTPUT_PATH="${CSI_OUTPUT_PATH}" CSI_OUTPUT_GLOB="${CSI_OUTPUT_GLOB}" CSI_FRAMES_REGEX="${CSI_FRAMES_REGEX}" CSI_OUTPUT_MAX_FILES="${CSI_OUTPUT_MAX_FILES}" CSI_PARSE_MAX_BYTES="${CSI_PARSE_MAX_BYTES}" CSI_REQUIRE_EVIDENCE="${CSI_REQUIRE_EVIDENCE}" CSI_MIN_FRAMES="${CSI_MIN_FRAMES}" CSI_MIN_OUTPUT_FILES="${CSI_MIN_OUTPUT_FILES}" CSI_SUDO_NONINTERACTIVE="${CSI_SUDO_NONINTERACTIVE}" CSI_TRAFFIC_ENABLE="${CSI_TRAFFIC_ENABLE}" CSI_TRAFFIC_TARGET="${CSI_TRAFFIC_TARGET}" CSI_TRAFFIC_IFACE="${CSI_TRAFFIC_IFACE}" CSI_TRAFFIC_INTERVAL_MS="${CSI_TRAFFIC_INTERVAL_MS}" CSI_ALLOW_THROTTLED="${CSI_ALLOW_THROTTLED}" CSI_HARD_TIMEOUT_S="${CSI_HARD_TIMEOUT_S}" CSI_CLEANUP_BEFORE_CAPTURE="${CSI_CLEANUP_BEFORE_CAPTURE}" CSI_CLEANUP_AFTER_CAPTURE="${CSI_CLEANUP_AFTER_CAPTURE}" CSI_KILL_PATTERNS="${CSI_KILL_PATTERNS}" scripts/rpi/smoke_test_agent.sh "${host}"
   done
 elif [[ "${RUN_PI}" == "true" && "${RUN_PI_PASSIVE}" == "true" ]]; then
   echo "[5/8] Passive Pi mode: skip remote agent execution (RUN_PI_PASSIVE=true)"
   echo "      Waiting for always-running Pi agent(s) to pick up and execute the created policy."
 else
   echo "[5/8] Run local model-device one-cycle report"
-  docker compose exec -T model-device sh -lc "MAX_SYNC_CYCLES='${MAX_SYNC_CYCLES}' EXECUTE_POLICY='false' AGENT_ID='${DEVICE_MODEL}' CONTROL_PLANE_MODE='RF_SHARING' WIFI_SAMPLE_MIN_INTERVAL_S='${WIFI_SAMPLE_MIN_INTERVAL_S}' WIFI_SAMPLE_MAX_DURATION_S='${WIFI_SAMPLE_MAX_DURATION_S}' WIFI_SAMPLE_MAX_POINTS='${WIFI_SAMPLE_MAX_POINTS}' ENABLE_ELAB_ARTIFACT_UPLOAD='${ENABLE_ELAB_ARTIFACT_UPLOAD}' ARTIFACT_UPLOAD_MAX_BYTES='${ARTIFACT_UPLOAD_MAX_BYTES}' ARTIFACT_UPLOAD_TARGET='${ARTIFACT_UPLOAD_TARGET}' ARTIFACT_UPLOAD_DURING_MEASURE='${ARTIFACT_UPLOAD_DURING_MEASURE}' ARTIFACT_EVICT_AFTER_UPLOAD='${ARTIFACT_EVICT_AFTER_UPLOAD}' ARTIFACT_UPLOAD_DURING_MEASURE_TIMEOUT_S='${ARTIFACT_UPLOAD_DURING_MEASURE_TIMEOUT_S}' ARTIFACT_UPLOAD_BACKOFF_S='${ARTIFACT_UPLOAD_BACKOFF_S}' RUN_ARTIFACT_SOFT_LIMIT_BYTES='${RUN_ARTIFACT_SOFT_LIMIT_BYTES}' REPORT_RPC_TIMEOUT_S='${REPORT_RPC_TIMEOUT_S}' CONTROL_RPC_TIMEOUT_S='${CONTROL_RPC_TIMEOUT_S}' SEPARATE_MEASURE_AND_REPORT='${SEPARATE_MEASURE_AND_REPORT}' RESTART_CONTROL_PLANE_BEFORE_REPORT='${RESTART_CONTROL_PLANE_BEFORE_REPORT}' CONTROL_PLANE_RESTART_IFACE='${CONTROL_PLANE_RESTART_IFACE}' CONTROL_PLANE_RESTART_DOWN_S='${CONTROL_PLANE_RESTART_DOWN_S}' CONTROL_PLANE_RESTART_WAIT_S='${CONTROL_PLANE_RESTART_WAIT_S}' CONTROL_PLANE_RESTART_CMD='${CONTROL_PLANE_RESTART_CMD}' ALLOW_WIFI_CONTROL_PLANE_RESTART='${ALLOW_WIFI_CONTROL_PLANE_RESTART}' python -u agent_v2_client.py"
+  docker compose exec -T model-device sh -lc "MAX_SYNC_CYCLES='${MAX_SYNC_CYCLES}' EXECUTE_POLICY='false' AGENT_ID='${DEVICE_MODEL}' CONTROL_PLANE_MODE='RF_SHARING' WIFI_SAMPLE_MIN_INTERVAL_S='${WIFI_SAMPLE_MIN_INTERVAL_S}' WIFI_SAMPLE_MAX_DURATION_S='${WIFI_SAMPLE_MAX_DURATION_S}' WIFI_SAMPLE_MAX_POINTS='${WIFI_SAMPLE_MAX_POINTS}' ENABLE_ELAB_ARTIFACT_UPLOAD='${ENABLE_ELAB_ARTIFACT_UPLOAD}' ARTIFACT_UPLOAD_MAX_BYTES='${ARTIFACT_UPLOAD_MAX_BYTES}' ARTIFACT_UPLOAD_TARGET='${ARTIFACT_UPLOAD_TARGET}' ARTIFACT_UPLOAD_DURING_MEASURE='${ARTIFACT_UPLOAD_DURING_MEASURE}' ARTIFACT_EVICT_AFTER_UPLOAD='${ARTIFACT_EVICT_AFTER_UPLOAD}' ARTIFACT_UPLOAD_DURING_MEASURE_TIMEOUT_S='${ARTIFACT_UPLOAD_DURING_MEASURE_TIMEOUT_S}' ARTIFACT_UPLOAD_BACKOFF_S='${ARTIFACT_UPLOAD_BACKOFF_S}' RUN_ARTIFACT_SOFT_LIMIT_BYTES='${RUN_ARTIFACT_SOFT_LIMIT_BYTES}' DATA_SINKS='${DATA_SINKS}' METRICS_SINKS='${METRICS_SINKS}' EVENT_SINKS='${EVENT_SINKS}' ARTIFACT_SINKS='${ARTIFACT_SINKS}' WEBHOOK_URL='${WEBHOOK_URL}' WEBHOOK_TOKEN='${WEBHOOK_TOKEN}' WEBHOOK_TIMEOUT_S='${WEBHOOK_TIMEOUT_S}' WEBHOOK_ARTIFACT_INLINE_MAX_BYTES='${WEBHOOK_ARTIFACT_INLINE_MAX_BYTES}' SQLITE_SINK_PATH='${SQLITE_SINK_PATH}' REPORT_RPC_TIMEOUT_S='${REPORT_RPC_TIMEOUT_S}' CONTROL_RPC_TIMEOUT_S='${CONTROL_RPC_TIMEOUT_S}' SEPARATE_MEASURE_AND_REPORT='${SEPARATE_MEASURE_AND_REPORT}' RESTART_CONTROL_PLANE_BEFORE_REPORT='${RESTART_CONTROL_PLANE_BEFORE_REPORT}' CONTROL_PLANE_RESTART_IFACE='${CONTROL_PLANE_RESTART_IFACE}' CONTROL_PLANE_RESTART_DOWN_S='${CONTROL_PLANE_RESTART_DOWN_S}' CONTROL_PLANE_RESTART_WAIT_S='${CONTROL_PLANE_RESTART_WAIT_S}' CONTROL_PLANE_RESTART_CMD='${CONTROL_PLANE_RESTART_CMD}' ALLOW_WIFI_CONTROL_PLANE_RESTART='${ALLOW_WIFI_CONTROL_PLANE_RESTART}' python -u agent_v2_client.py"
 fi
 
+SMOKE_LAST_STEP="6_optional_ingest"
 if [[ "${INJECT_HYPOTHETICAL_METRICS}" == "true" ]]; then
 echo "[6/8] Send hypothetical low-level board payload to HTTP ingest"
 docker compose exec -T monad-fleet-service sh -lc "python - <<'PY'
@@ -819,6 +1163,7 @@ else
 echo "[6/8] Skip hypothetical low-level board payload (INJECT_HYPOTHETICAL_METRICS=${INJECT_HYPOTHETICAL_METRICS})"
 fi
 
+SMOKE_LAST_STEP="7_wait_scrape"
 WAIT_S=20
 if [[ "${RUN_PI}" == "true" && "${RUN_PI_PASSIVE}" == "true" ]]; then
   WAIT_S="${PASSIVE_AGENT_WAIT_S}"
@@ -826,6 +1171,7 @@ fi
 echo "[7/8] Wait for Prometheus scrape + remote_write (sleep=${WAIT_S}s)"
 sleep "${WAIT_S}"
 
+SMOKE_LAST_STEP="8_verify"
 echo "[8/8] Verify metrics in Prometheus and Mimir"
 docker compose exec -T monad-fleet-service sh -lc "DEVICE_ID='${DEVICE_PI}' TARGET_DEVICE_IDS_CSV='${TARGET_DEVICE_IDS_CSV}' RUN_PI='${RUN_PI}' DEVICE_MODEL='${DEVICE_MODEL}' INJECT_HYPOTHETICAL_METRICS='${INJECT_HYPOTHETICAL_METRICS}' python - <<'PY'
 import requests
@@ -891,6 +1237,7 @@ PY
 "
 
 echo "[8b/8] Verify artifact uploads in eLabFTW experiment"
+run_elab_upload_check() {
 docker compose exec -T monad-fleet-service sh -lc "EXPERIMENT_ID='${SMOKE_EXPERIMENT_ID}' REAL_DATA_ENFORCE='${REAL_DATA_ENFORCE}' REQUIRE_REAL_WIFI='${REQUIRE_REAL_WIFI}' REQUIRE_REAL_BLE='${REQUIRE_REAL_BLE}' REQUIRE_REAL_CSI='${REQUIRE_REAL_CSI}' python - <<'PY'
 import os
 import requests
@@ -938,11 +1285,33 @@ if failures:
     raise SystemExit('elab_upload_check_failed: ' + '; '.join(failures))
 PY
 "
+}
+
+if [[ "${RUN_PI}" == "true" && "${RUN_PI_PASSIVE}" == "true" ]]; then
+  echo "      Passive async verify enabled (max_wait=${PASSIVE_VERIFY_MAX_WAIT_S}s, poll=${PASSIVE_VERIFY_POLL_S}s)"
+  deadline_epoch=$(( $(date +%s) + PASSIVE_VERIFY_MAX_WAIT_S ))
+  attempt=0
+  while true; do
+    attempt=$((attempt + 1))
+    echo "  -> elab upload check attempt=${attempt}"
+    if run_elab_upload_check; then
+      break
+    fi
+    now_epoch=$(date +%s)
+    if (( now_epoch >= deadline_epoch )); then
+      echo "ERROR: passive async eLab upload verification timed out after ${PASSIVE_VERIFY_MAX_WAIT_S}s"
+      exit 1
+    fi
+    sleep "${PASSIVE_VERIFY_POLL_S}"
+  done
+else
+  run_elab_upload_check
+fi
 
 if [[ "${RUN_PI}" == "true" ]]; then
   echo "[8c/8] Verify latest Pi run report(s) for this experiment (real-data gates)"
-  for host in "${PI_HOSTS_LIST[@]}"; do
-    echo "  -> verify host=${host}"
+  run_real_verify_for_host() {
+    local host="$1"
     REAL_DATA_ENFORCE="${REAL_DATA_ENFORCE}" \
     REQUIRE_REAL_WIFI="${REQUIRE_REAL_WIFI}" \
     REQUIRE_WIFI_CONNECTED="${REQUIRE_WIFI_CONNECTED}" \
@@ -951,9 +1320,32 @@ if [[ "${RUN_PI}" == "true" ]]; then
     REQUIRE_CSI_FRAMES_MIN="${REQUIRE_CSI_FRAMES_MIN}" \
     SMOKE_EXPERIMENT_ID="${SMOKE_EXPERIMENT_ID}" \
     scripts/rpi/verify_real_run.sh "${host}"
+  }
+  for host in "${PI_HOSTS_LIST[@]}"; do
+    if [[ "${RUN_PI_PASSIVE}" == "true" ]]; then
+      deadline_epoch=$(( $(date +%s) + PASSIVE_VERIFY_MAX_WAIT_S ))
+      attempt=0
+      while true; do
+        attempt=$((attempt + 1))
+        echo "  -> verify host=${host} attempt=${attempt}"
+        if run_real_verify_for_host "${host}"; then
+          break
+        fi
+        now_epoch=$(date +%s)
+        if (( now_epoch >= deadline_epoch )); then
+          echo "ERROR: passive async real-data verification timed out host=${host} after ${PASSIVE_VERIFY_MAX_WAIT_S}s"
+          exit 1
+        fi
+        sleep "${PASSIVE_VERIFY_POLL_S}"
+      done
+    else
+      echo "  -> verify host=${host}"
+      run_real_verify_for_host "${host}"
+    fi
   done
 fi
 
+SMOKE_LAST_STEP="8_done"
 echo "Smoke test completed."
 echo "eLabFTW smoke experiment id: ${SMOKE_EXPERIMENT_ID}"
 echo "Grafana: http://localhost:3000 (admin/admin)"

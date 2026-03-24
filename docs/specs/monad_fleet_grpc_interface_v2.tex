@@ -6,8 +6,10 @@
 \usepackage[hidelinks]{hyperref}
 \usepackage{enumitem}
 \usepackage{longtable}
+\usepackage{graphicx}
 
 \setlist{noitemsep,topsep=4pt}
+\graphicspath{{../diagrams/svg/}}
 
 \title{Monad Fleet Device Protocol Specification\\fleet.v2 Implementation Profile}
 \author{FleetManager Project}
@@ -15,6 +17,8 @@
 
 \begin{document}
 \maketitle
+\tableofcontents
+\newpage
 
 \section{Document Purpose}
 This document is a full, implementation-first specification of the currently deployed Monad Fleet device protocol profile.
@@ -29,9 +33,32 @@ The scope includes:
   \item eLabFTW integration profile used by the running server.
 \end{itemize}
 
-\textbf{Implementation baseline:} February 18, 2026.
+\textbf{Implementation baseline:} February 23, 2026.
 This document describes the behavior currently implemented in this repository, not a hypothetical future API.
 \textbf{Canonical documentation note:} this file is the single source of truth for the Fleet device protocol profile.
+
+\section{Audience, Scope, and Non-goals}
+\textbf{Primary audience:}
+\begin{itemize}
+  \item engineers implementing a new device agent against \texttt{fleet.v2},
+  \item platform engineers deploying Monad Fleet with eLabFTW,
+  \item operators validating interoperability before production rollout.
+\end{itemize}
+
+\textbf{In scope:}
+\begin{itemize}
+  \item wire contract and behavioral semantics for \texttt{fleet.v2},
+  \item device lifecycle guarantees (prepare/measure/report),
+  \item idempotency and replay requirements,
+  \item mapping from device reports into eLabFTW and observability systems.
+\end{itemize}
+
+\textbf{Out of scope:}
+\begin{itemize}
+  \item direct device-to-eLabFTW API integrations,
+  \item RF-science interpretation methodology,
+  \item vendor-specific driver internals for Wi-Fi/BLE/CSI hardware.
+\end{itemize}
 
 \section{Normative Language}
 The words \textbf{MUST}, \textbf{SHOULD}, and \textbf{MAY} are used in the RFC-style sense:
@@ -47,6 +74,31 @@ The words \textbf{MUST}, \textbf{SHOULD}, and \textbf{MAY} are used in the RFC-s
   \item server implementation: \texttt{monad-fleet-service/gateway\_server.py}
   \item reference client: \texttt{device-sim/agent\_v2\_client.py}
   \item legacy v1 protobuf (still served): \texttt{monad-fleet-service/proto/fleet\_gateway.proto}
+\end{itemize}
+
+\section{Quick Start for New Device Integrators}
+Use this path to bring a new device implementation online with predictable interoperability:
+\begin{enumerate}
+  \item \textbf{Generate gRPC stubs from the v2 proto.}
+  Implement \texttt{fleet.v2.FleetManager} client calls from \texttt{fleet\_gateway\_v2.proto}.
+  \item \textbf{Implement required identity behavior.}
+  Persist a stable \texttt{agent\_id}. Do not generate a new identifier on every reboot.
+  \item \textbf{Implement PREPARE loop.}
+  \texttt{Hello} $\rightarrow$ \texttt{GetAssignment} $\rightarrow$ \texttt{GetPolicy} $\rightarrow$ \texttt{AckPrepared}.
+  Cache \texttt{policy\_id}; handle \texttt{NO\_WORK} and \texttt{NOT\_MODIFIED}.
+  \item \textbf{Implement MEASURE execution.}
+  Execute \texttt{CommandGroup.commands} in order with timeout/retry semantics.
+  \item \textbf{Implement REPORT replay safety.}
+  Persist run bundles locally and retry \texttt{PublishReport} until \texttt{ACCEPTED} or \texttt{DUPLICATE}.
+  \item \textbf{Validate with smoke and verifier.}
+  Run a real-device smoke flow and verify report acceptance, artifact linkage, and required metrics.
+\end{enumerate}
+
+\textbf{Minimal interoperability bar:}
+\begin{itemize}
+  \item correct handling of all required fields and enum statuses in this document,
+  \item safe retry behavior for transient transport/server faults,
+  \item local durability for unsent run reports.
 \end{itemize}
 
 \section{System Roles and Boundaries}
@@ -87,6 +139,27 @@ Device Agent <-> gRPC fleet.v2 <-> Monad Fleet <-> eLabFTW API
 
 \textbf{Security note:} run on trusted LAN/VPN for this profile, or add mTLS in a hardened profile.
 
+\section{Security and Trust Profile}
+\subsection{Current deployment profile}
+\begin{itemize}
+  \item gRPC is plaintext (\texttt{grpc.insecure\_channel}) on trusted network segments.
+  \item eLabFTW API credentials stay server-side; agents do not require eLabFTW API keys.
+  \item Device trust is identity-based (\texttt{agent\_id}) and network perimeter-based.
+\end{itemize}
+
+\subsection{Production hardening profile (recommended)}
+For deployments beyond trusted LAN/VPN boundaries, integrators \textbf{SHOULD} enable:
+\begin{itemize}
+  \item TLS for gRPC transport (preferably mTLS),
+  \item network segmentation so only approved devices can reach Fleet gRPC,
+  \item explicit credential rotation and revocation procedures for device identities,
+  \item audit logging for assignment, acknowledgement, and report ingestion events.
+\end{itemize}
+
+\textbf{Security boundary rule:}
+agents communicate only with Monad Fleet.
+Any direct integration with eLabFTW APIs from device firmware is out-of-profile and not required for interoperability.
+
 \section{Protocol Design Principles}
 \subsection{Backend agnostic send operation}
 The agent send operation is \texttt{PublishReport} (plus optional \texttt{PublishEvents}).
@@ -118,6 +191,38 @@ rpc PublishReport(PublishReportRequest) returns (PublishReportResponse);
 rpc PublishEvents(PublishEventsRequest) returns (PublishEventsResponse); // optional
 \end{verbatim}
 
+\section{RPC Contract Matrix}
+\begin{longtable}{p{2.5cm}p{3.0cm}p{4.0cm}p{4.3cm}}
+\textbf{RPC} & \textbf{Required request fields} & \textbf{Successful response pattern} & \textbf{Client action guidance} \\
+\hline
+\endhead
+\texttt{Hello} &
+\texttt{agent.agent\_id} &
+gRPC success with \texttt{allowed\_mode}, poll hint, server metadata &
+Call on startup and periodically on reconnect; refresh local control-plane assumptions from response. \\
+\texttt{GetAssignment} &
+\texttt{agent\_id} &
+\texttt{ASSIGNED} or \texttt{NO\_WORK} &
+If \texttt{NO\_WORK}, sleep using \texttt{recommended\_prepare\_poll\_sec}. \\
+\texttt{GetPolicy} &
+\texttt{agent\_id} &
+\texttt{OK}, \texttt{NOT\_MODIFIED}, or \texttt{NO\_POLICY} &
+Cache by \texttt{policy\_id}. Reuse cached policy on \texttt{NOT\_MODIFIED}. \\
+\texttt{AckPrepared} &
+\texttt{agent\_id}, \texttt{preparation\_id}, \texttt{policy\_id} &
+\texttt{ACCEPTED} (including duplicate \texttt{preparation\_id}) &
+Treat \texttt{REJECTED} as a control-plane failure; reacquire assignment/policy before measure. \\
+\texttt{PublishReport} &
+\texttt{report.run\_id} and agent identity &
+\texttt{ACCEPTED} or \texttt{DUPLICATE} &
+Retry identical report for transient failures; move run to sent on \texttt{ACCEPTED}/\texttt{DUPLICATE}. \\
+\texttt{PublishEvents} &
+\texttt{agent\_id} for live mode &
+per-event ack list &
+Optional in this profile; currently disabled by default and returns \texttt{REJECTED} acks. \\
+\hline
+\end{longtable}
+
 \section{Run Lifecycle}
 \subsection{Operational phases}
 \begin{itemize}
@@ -139,6 +244,86 @@ rpc PublishEvents(PublishEventsRequest) returns (PublishEventsResponse); // opti
    g) PublishReport(run_id, events, artifacts, summary)
    h) on ACCEPTED or DUPLICATE: cache policy_id and continue
 \end{verbatim}
+
+\section{Process Flow Diagrams}
+
+This section provides visual representations of the key processes in the Monad Fleet protocol.
+
+\subsection{Process A: Experiment Creation and Event Generation}
+
+The following diagram illustrates the complete flow of experiment creation and event generation, showing the interaction between the Researcher, Web GUI, eLabFTW API, and Monad Fleet plugin:
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{process-a.svg}
+\caption{Process A - Complete flow from experiment creation through event generation. The researcher creates or updates experiments via the web interface, which triggers the Monad Fleet plugin to poll for changes and generate appropriate events for device execution.}
+\label{fig:process-a}
+\end{figure}
+
+\textbf{Key activities in Process A:}
+\begin{itemize}
+  \item \textbf{Researcher actions:} Create or update experiments with custom JSON metadata and tags
+  \item \textbf{Web GUI:} Provides interface for experiment management and policy configuration
+  \item \textbf{eLabFTW API:} Stores experiment data and provides REST endpoints for CRUD operations
+  \item \textbf{Monad Fleet plugin:} Monitors for experiment changes and generates events for device execution
+\end{itemize}
+
+\subsection{Process B: Report Publishing and Event Management}
+
+The following diagram shows the report publishing flow and how events are managed within the system:
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{process-b.svg}
+\caption{Process B - Report publishing flow showing device execution, report submission, and event management. Devices execute policies, publish reports, and the system manages event creation and updates.}
+\label{fig:process-b}
+\end{figure}
+
+\textbf{Key activities in Process B:}
+\begin{itemize}
+  \item \textbf{Device execution:} Executes command groups from cached policies and persists run bundles
+  \item \textbf{Report publishing:} Submits comprehensive reports with events, artifacts, and metrics
+  \item \textbf{Event management:} Creates and updates events in eLabFTW with proper deduplication
+  \item \textbf{Metrics ingestion:} Forwards numeric metrics to the observability stack
+\end{itemize}
+
+\subsection{Event Creation Flow}
+
+This diagram details the specific process of creating new events when reports are published:
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{event-create.svg}
+\caption{Event creation flow showing the detailed steps for creating new events from device reports. Includes deduplication checks and metadata management.}
+\label{fig:event-create}
+\end{figure}
+
+\textbf{Event creation process:}
+\begin{itemize}
+  \item \textbf{Report validation:} Checks report deduplication using run\_id, agent\_id, and policy\_id
+  \item \textbf{Event initialization:} Creates new events with proper metadata and status tracking
+  \item \textbf{Metadata bridging:} Transfers events and summary information to the event record
+  \item \textbf{State management:} Updates internal state to track event mappings
+\end{itemize}
+
+\subsection{Event Update Flow}
+
+This diagram shows how existing events are updated with additional report data:
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{event-update.svg}
+\caption{Event update flow for appending new data to existing events. Handles incremental updates and terminal state management.}
+\label{fig:event-update}
+\end{figure}
+
+\textbf{Event update process:}
+\begin{itemize}
+  \item \textbf{Event resolution:} Locates existing events using stored mappings
+  \item \textbf{Incremental updates:} Appends new events, artifacts, and summary data
+  \item \textbf{Status progression:} Updates event status and completion tracking
+  \item \textbf{Terminal handling:} Manages completion timestamps for finished experiments
+\end{itemize}
 
 \section{Control Plane Mode Semantics}
 \subsection{Modes}
@@ -232,6 +417,40 @@ duplicate \texttt{preparation\_id} is accepted and treated as already acknowledg
 \subsection{\texttt{PublishEvents}}
 In this deployment profile, live events are disabled (\texttt{ALLOW\_LIVE\_EVENTS=false}).
 When disabled, each ack is \texttt{REJECTED} with reason \texttt{live events disabled}.
+
+\section{Error Model and Retry Strategy}
+\subsection{Transport-level gRPC status handling}
+\begin{longtable}{p{3.4cm}p{5.0cm}p{4.8cm}}
+\textbf{gRPC code} & \textbf{Typical cause in this deployment} & \textbf{Agent behavior} \\
+\hline
+\endhead
+\texttt{INVALID\_ARGUMENT} & missing required request fields (for example empty \texttt{agent\_id}) &
+Do not blind-retry. Fix request construction and log as implementation defect. \\
+\texttt{INTERNAL} & unhandled server-side exception &
+Retry with bounded exponential backoff + jitter. Preserve idempotency keys. \\
+\texttt{UNAVAILABLE} / \texttt{DEADLINE\_EXCEEDED} &
+network disruption, service restart, or timeout &
+Treat as transient. Retry using backoff and keep local spool/replay intact. \\
+\texttt{UNAUTHENTICATED} / \texttt{PERMISSION\_DENIED} &
+possible in hardened profiles with authz/authn layers &
+Stop and raise operator-visible configuration/security error. \\
+\hline
+\end{longtable}
+
+\subsection{Application-level response status handling}
+\begin{itemize}
+  \item \texttt{AckPrepared.REJECTED}: reacquire assignment/policy and do not execute stale policy.
+  \item \texttt{PublishReport.REJECTED}: keep run in pending spool and retry after backoff.
+  \item \texttt{PublishReport.DUPLICATE}: treat as successful delivery outcome.
+  \item \texttt{PublishEvents.EventAck.REJECTED}: do not fail the run lifecycle in this profile (live events are optional).
+\end{itemize}
+
+\subsection{Retry timing guidance}
+\begin{itemize}
+  \item Control-plane RPCs (\texttt{Hello/GetAssignment/GetPolicy/AckPrepared}): start with 1-2s base delay and cap at 30-60s with jitter.
+  \item Report replay (\texttt{PublishReport}): keep retrying until \texttt{ACCEPTED} or \texttt{DUPLICATE}; never drop unsent runs silently.
+  \item Preserve the same idempotency identifiers across retries (\texttt{preparation\_id}, \texttt{run\_id}, \texttt{event\_id}).
+\end{itemize}
 
 \section{Idempotency and De-duplication}
 \begin{itemize}
@@ -448,6 +667,35 @@ policy_id = sha256:<digest>
 This profile lets experiment authors define sampling cadence in the policy itself.
 Device-side constraints may clamp requested values (minimum interval, maximum duration, maximum points).
 
+\subsection{Policy JSON to \texttt{fleet.v2} mapping rules}
+When policy is authored in eLabFTW metadata, the Fleet server maps JSON to proto with the following rules:
+\begin{itemize}
+  \item command type aliases:
+    \begin{itemize}
+      \item \texttt{type} or \texttt{command\_type} are accepted,
+      \item unknown types are coerced to \texttt{SHELL}.
+    \end{itemize}
+  \item command timeout:
+    \begin{itemize}
+      \item use \texttt{timeout\_ms} when present and $>0$,
+      \item otherwise derive from \texttt{timeout\_s} (default 60s).
+    \end{itemize}
+  \item retry mapping:
+    \begin{itemize}
+      \item \texttt{retry.max\_attempts} is total attempts including first try,
+      \item legacy \texttt{retries=N} becomes \texttt{max\_attempts=N+1}.
+    \end{itemize}
+  \item command ordering:
+    \begin{itemize}
+      \item list form preserves list order,
+      \item map form is sorted by \texttt{order} when provided.
+    \end{itemize}
+  \item \texttt{expected\_artifacts[*].path} and \texttt{path\_or\_glob} are both accepted.
+\end{itemize}
+
+\textbf{Interoperability recommendation:}
+prefer explicit \texttt{timeout\_ms}, \texttt{retry.max\_attempts}, and ordered list-form \texttt{commands} to avoid ambiguous interpretation across client implementations.
+
 \section{Device Persistence and Deferred Upload}
 \subsection{Goal}
 Preserve run outputs during network outages and retry upload later without data loss.
@@ -589,12 +837,21 @@ CSI remains artifact-first (run artifacts and optional eLabFTW uploads).
 
 \subsection{Device resources}
 On first \texttt{Hello}, server ensures resource item exists for \texttt{Device <agent\_id>} and updates metadata.
+During \texttt{GetAssignment} and later prepare/report RPCs, the server reuses that resource and patches runtime status metadata (\texttt{fleet\_v2\_runtime}) for operational visibility.
 Bookable defaults are enforced in current deployment:
 \begin{itemize}
   \item \texttt{is\_bookable=1}
   \item \texttt{book\_max\_minutes=180}
   \item \texttt{book\_can\_overlap=1}
   \item \texttt{book\_is\_cancellable=1}
+\end{itemize}
+Typical runtime states include:
+\begin{itemize}
+  \item \texttt{ONLINE}
+  \item \texttt{ASSIGNED}/\texttt{IDLE}
+  \item \texttt{POLICY\_READY}/\texttt{POLICY\_CACHED}/\texttt{WAITING\_POLICY}
+  \item \texttt{PREPARED}/\texttt{PREPARE\_REJECTED}
+  \item \texttt{REPORT\_ACCEPTED}/\texttt{REPORT\_DUPLICATE}/\texttt{REPORT\_REJECTED}
 \end{itemize}
 
 \subsection{Scheduler run mapping}
@@ -1095,15 +1352,35 @@ monad_fleet_artifact_uploads_total
   \item Grafana: \texttt{http://localhost:3000} (\texttt{admin/admin} unless changed)
 \end{itemize}
 
+\section{Third-Party Agent Conformance Test Plan}
+Before onboarding a non-reference device agent, run at least the following tests:
+\begin{enumerate}
+  \item \textbf{Identity stability test}: reboot device and confirm \texttt{agent\_id} is unchanged.
+  \item \textbf{Required field validation}: verify no control-plane call is sent with missing required IDs.
+  \item \textbf{No-work polling}: verify \texttt{GetAssignment.NO\_WORK} respects poll interval backoff.
+  \item \textbf{Policy cache test}: verify \texttt{GetPolicy.NOT\_MODIFIED} reuses cached policy.
+  \item \textbf{Ack idempotency}: replay same \texttt{preparation\_id}; ensure server keeps \texttt{ACCEPTED}.
+  \item \textbf{Report idempotency}: replay same \texttt{run\_id|agent\_id|policy\_id}; ensure \texttt{DUPLICATE}.
+  \item \textbf{Offline replay}: disconnect network during report, then reconnect and confirm deferred upload succeeds.
+  \item \textbf{Artifact linkage}: confirm published \texttt{ArtifactRef} entries appear in run history/eLab mapping.
+  \item \textbf{Transport fault handling}: inject timeout/unavailable faults and verify bounded retry with no data loss.
+  \item \textbf{Smoke verifier pass}: run real-device smoke profile and \texttt{scripts/rpi/verify\_real\_run.sh}.
+\end{enumerate}
+
+\textbf{Exit criterion for production onboarding:}
+all mandatory conformance tests pass on the target hardware/OS image with the same configuration profile intended for operations.
+
 \section{Integrator Checklist}
 Before declaring a new device implementation production-ready, confirm:
 \begin{enumerate}
   \item agent sends stable \texttt{agent\_id} and \texttt{Hello} metadata
   \item agent follows prepare/measure/report lifecycle with retries
   \item idempotency keys are implemented (\texttt{preparation\_id}, \texttt{run\_id}, \texttt{event\_id})
+  \item transport-level and application-level failure handling follows Section ``Error Model and Retry Strategy''
   \item policy typed commands (\texttt{WIFI\_SCAN}/\texttt{BLE\_SCAN}/\texttt{CAPTURE\_CSI}) are handled or safely reported as unsupported
   \item run artifacts are persisted locally and published as \texttt{ArtifactRef.uri}, and optionally uploaded to eLabFTW via \texttt{/ingest/v1/artifacts}
   \item numeric metrics are exported via \texttt{summary\_metrics} and/or \texttt{event.metrics}
+  \item network and transport security profile is explicitly selected (trusted LAN profile or hardened TLS profile)
   \item smoke test validates report acceptance, metrics visibility, and eLabFTW artifact uploads
 \end{enumerate}
 

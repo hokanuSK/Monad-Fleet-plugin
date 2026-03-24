@@ -102,6 +102,32 @@ services:
       - "50060:50060"
       - "9108:9108"
 
+  elab-mcp:
+    image: python:3.12-slim
+    container_name: elab-mcp
+    profiles:
+      - mcp
+    depends_on:
+      - web
+      - monad-fleet-service
+    working_dir: /workspace
+    command: ["python3", "-u", "tools/elab-mcp/server.py"]
+    stdin_open: true
+    tty: false
+    environment:
+      - "ELAB_BASE_URL=https://web/api/v2"
+      - "ELAB_API_KEY=apiKey4Test"
+      - "ELAB_VERIFY_TLS=false"
+      - "FLEET_EXPERIMENT_TAG=fleet"
+      - "RESOURCE_TAG_PREFIX=device:"
+      - "POLICY_METADATA_KEYS=fleet.policy,policy,fleet_policy,policy_json"
+      - "ELAB_MCP_ARTIFACT_JOURNAL_PATH=/workspace/data/fleet/ingest-artifacts.ndjson"
+      - "ELAB_MCP_ENABLE_WRITE=false"
+    volumes:
+      - ./:/workspace:ro
+    networks:
+      - elabftw-net
+
   model-device:
     build: ./device-sim
     container_name: model-device

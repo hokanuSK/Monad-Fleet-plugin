@@ -15,7 +15,7 @@
     </style>
   </defs>
 
-  <rect x="0" y="0" width="1220" height="720" class="bg"/>
+  <!-- Removed background rectangle -->
   <text x="610" y="32" text-anchor="middle" class="title">Process A v2 - Pull Policy Flow (no iteration block)</text>
 
   <rect x="25" y="60" width="130" height="30" rx="5" class="box"/><text x="90" y="80" text-anchor="middle" class="label">Researcher</text>

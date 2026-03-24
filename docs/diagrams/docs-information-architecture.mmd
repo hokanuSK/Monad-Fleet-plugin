@@ -1,0 +1,67 @@
+%% NOTE: Keep this diagram updated with any protocol or flow changes!
+%% Last updated: 2026-03-22
+flowchart TB
+    subgraph Nav["Navigation Layer"]
+        RootReadme["README.md<br/>entry point + build commands"]
+        Map["DOCS_MAP.md<br/>inventory + read order"]
+    end
+
+    subgraph Canon["Canonical Content Layer"]
+        Spec["specs/monad_fleet_grpc_interface_v2.tex<br/>protocol source of truth"]
+        Ops["ops/*.md<br/>playbooks + handoffs + workflow"]
+        Research["research/*.tex<br/>analysis drafts"]
+        MMD["diagrams/*.mmd<br/>diagram source of truth"]
+    end
+
+    subgraph Build["Build / Render Layer"]
+        SVG["diagrams/svg/*.svg<br/>rendered assets"]
+        PDF["spec PDF output<br/>from specs/*.tex"]
+    end
+
+    subgraph Runtime["Runtime Evidence Layer"]
+        Smoke["scripts/smoke/* results"]
+        OpsJSON["output/ops/*.json fallback"]
+        Notion["Notion Ops DB (runs/incidents/tasks/decisions)"]
+    end
+
+    subgraph Consumers["Consumer Layer"]
+        Integrator["Agent/Service integrator"]
+        Operator["Ops / Pi operator"]
+        Reviewer["Research / architecture reviewer"]
+    end
+
+    RootReadme --> Spec
+    RootReadme --> Ops
+    RootReadme --> Research
+    RootReadme --> MMD
+    Map --> Spec
+    Map --> Ops
+    Map --> Research
+    Map --> MMD
+
+    MMD --> SVG
+    SVG --> Spec
+    Spec --> PDF
+
+    Smoke --> OpsJSON
+    Smoke --> Notion
+    OpsJSON --> Ops
+    Notion --> Ops
+
+    Spec --> Integrator
+    Ops --> Operator
+    Research --> Reviewer
+    SVG --> Integrator
+    SVG --> Operator
+
+    classDef nav fill:#e8f0fe,stroke:#1a73e8,stroke-width:1px,color:#0d47a1
+    classDef canon fill:#eaf7ec,stroke:#1b5e20,stroke-width:1px,color:#1b5e20
+    classDef build fill:#fff8e1,stroke:#ef6c00,stroke-width:1px,color:#e65100
+    classDef runtime fill:#fce4ec,stroke:#ad1457,stroke-width:1px,color:#880e4f
+    classDef users fill:#f3e5f5,stroke:#6a1b9a,stroke-width:1px,color:#4a148c
+
+    class RootReadme,Map nav
+    class Spec,Ops,Research,MMD canon
+    class SVG,PDF build
+    class Smoke,OpsJSON,Notion runtime
+    class Integrator,Operator,Reviewer users

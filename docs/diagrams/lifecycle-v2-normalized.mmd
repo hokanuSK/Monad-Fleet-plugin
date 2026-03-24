@@ -1,0 +1,87 @@
+%% NOTE: Keep this diagram updated with any protocol or flow changes!
+%% Last updated: 2026-03-22
+sequenceDiagram
+    title: Fleet v2 Lifecycle with Resource Bootstrap + Device State Updates
+    autonumber
+
+    box Device Agent
+        participant Agent as Agent v2
+        participant Spool as DATA_ROOT/pending,sent
+    end
+    box Fleet Service
+        participant Fleet as Monad Fleet
+        participant State as state.json
+    end
+    box Upstream Backends
+        participant ELab as eLabFTW
+        participant Obs as Prometheus/Mimir
+    end
+
+    rect rgb(232,245,233)
+        Note over Agent,Fleet: PREPARE
+        Agent->>Fleet: Hello(agent_descriptor)
+        Fleet->>ELab: GET /items?search=agent_id
+        alt resource item missing
+            Fleet->>ELab: POST /items (create device resource)
+        else resource exists
+            Fleet->>ELab: PATCH /items/{id} metadata(last_seen, interfaces, mode)
+        end
+        Fleet->>ELab: PATCH /items/{id} metadata(fleet_v2_runtime.device_state=ONLINE)
+        Fleet-->>Agent: allowed_mode + prepare_poll_sec
+
+        Agent->>Fleet: GetAssignment(agent_id)
+        alt ASSIGNED
+            Fleet->>ELab: PATCH /items/{id} metadata(state=ASSIGNED, assignment context)
+            Fleet-->>Agent: experiment_id + policy_id
+            Agent->>Fleet: GetPolicy(agent_id, experiment_id, last_policy_id)
+            alt policy OK
+                Fleet->>ELab: PATCH /items/{id} metadata(state=POLICY_READY, policy_id)
+                Fleet-->>Agent: GetPolicyResponse(OK)
+                Agent->>Fleet: AckPrepared(preparation_id, policy_id)
+                alt prepare accepted
+                    Fleet->>ELab: PATCH /items/{id} metadata(state=PREPARED, mode, route_verified)
+                    Fleet-->>Agent: AckPreparedResponse(ACCEPTED)
+                else prepare rejected
+                    Fleet->>ELab: PATCH /items/{id} metadata(state=PREPARE_REJECTED, reason)
+                    Fleet-->>Agent: AckPreparedResponse(REJECTED)
+                end
+            else policy not modified / missing
+                Fleet->>ELab: PATCH /items/{id} metadata(state=POLICY_CACHED or WAITING_POLICY)
+                Fleet-->>Agent: GetPolicyResponse(NOT_MODIFIED / NO_POLICY)
+            end
+        else NO_WORK
+            Fleet->>ELab: PATCH /items/{id} metadata(state=IDLE)
+            Fleet-->>Agent: NO_WORK
+        end
+    end
+
+    rect rgb(227,242,253)
+        Note over Agent: MEASURE
+        Agent->>Spool: Execute command_groups + persist run bundle
+    end
+
+    rect rgb(255,243,224)
+        Note over Agent,Fleet: REPORT
+        Agent->>Fleet: PublishReport(report with run_id)
+        Fleet->>State: report_key dedupe (run_id|agent_id|policy_id)
+        alt DUPLICATE
+            Fleet->>ELab: PATCH /items/{id} metadata(state=REPORT_DUPLICATE, run_id)
+            Fleet-->>Agent: DUPLICATE
+            Agent->>Spool: Move pending -> sent
+        else ACCEPTED path
+            Fleet->>ELab: create/update event metadata
+            Fleet->>Obs: ingest numeric summary/event metrics
+            Fleet->>State: mark report_key accepted
+            Fleet->>ELab: PATCH /items/{id} metadata(state=REPORT_ACCEPTED, run_id)
+            Fleet-->>Agent: ACCEPTED
+            Agent->>Spool: Move pending -> sent
+        else ingest failure
+            Fleet->>ELab: PATCH /items/{id} metadata(state=REPORT_REJECTED, reason)
+            Fleet-->>Agent: REJECTED
+        end
+    end
+
+    opt live events mode enabled
+        Agent->>Fleet: PublishEvents(agent_id, events[])
+        Fleet-->>Agent: per-event ack
+    end

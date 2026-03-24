@@ -1,0 +1,19 @@
+{
+  "theme": "default",
+  "themeVariables": {
+    "background": "#ffffff",
+    "primaryColor": "#f4f4f4",
+    "edgeLabelBackground":"#ffffff",
+    "fontFamily": "Inter, Arial, sans-serif"
+  },
+  "sequence": {
+    "actorBorder": "#222",
+    "actorBkg": "#e6f7ff",
+    "actorTextColor": "#222",
+    "participantBkg": "#f4f4f4",
+    "participantBorder": "#222",
+    "participantTextColor": "#222",
+    "noteBkgColor": "#fffbe6",
+    "noteBorderColor": "#ffe58f"
+  }
+}

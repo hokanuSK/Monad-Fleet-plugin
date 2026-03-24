@@ -40,6 +40,17 @@ DEFAULT_POLICY_METADATA_KEYS = (
     "fleet_policy",
     "policy_json",
 )
+DEFAULT_RESOURCE_STATUS_IDS_TEAM1 = {
+    "maintenance mode": 1,
+    "operational": 2,
+    "in stock": 3,
+    "need to reorder": 4,
+    "destroyed": 5,
+    "processed": 6,
+    "waiting": 7,
+    "open": 8,
+    "closed": 9,
+}
 PROM_REGISTRY = CollectorRegistry()
 
 REPORTS_TOTAL = Counter(
@@ -1609,6 +1620,20 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
         self._core = core
         self._cfg = cfg
         self._state = core._state
+        raw_map = cfg.get("resource_status_id_map") or {}
+        normalized_map: dict[str, int] = {}
+        if isinstance(raw_map, dict):
+            for raw_key, raw_value in raw_map.items():
+                key = normalize_string(raw_key).lower()
+                if not key:
+                    continue
+                try:
+                    value = int(raw_value)
+                except Exception:
+                    continue
+                if value > 0:
+                    normalized_map[key] = value
+        self._resource_status_id_map = normalized_map
 
     def _choose_allowed_mode(self, agent: fleet_gateway_v2_pb2.AgentDescriptor) -> tuple[int, str]:
         requested = int(agent.requested_mode)
@@ -1665,6 +1690,144 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
         if not item:
             return None
         return self._core._select_policy_for_device(item, agent_id)
+
+    def _resolve_item_and_policy_ctx(self, agent_id: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        item = self._core._get_or_create_device_item(agent_id, None)
+        if not item:
+            return None, None
+        return item, self._core._select_policy_for_device(item, agent_id)
+
+    def _resource_status_title_for_runtime_state(self, state: str) -> str | None:
+        token = normalize_string(state).upper()
+        mapping = {
+            "ONLINE": "Operational",
+            "ASSIGNED": "Open",
+            "IDLE": "Operational",
+            "POLICY_READY": "Open",
+            "POLICY_CACHED": "Open",
+            "WAITING_POLICY": "Waiting",
+            "PREPARED": "Open",
+            "PREPARE_REJECTED": "Maintenance mode",
+            "REPORT_ACCEPTED": "Processed",
+            "REPORT_DUPLICATE": "Processed",
+            "REPORT_REJECTED": "Maintenance mode",
+        }
+        return mapping.get(token)
+
+    def _resolve_resource_status_id(self, item: dict[str, Any], status_title: str | None) -> int | None:
+        title = normalize_string(status_title)
+        if not title:
+            return None
+        title_key = title.lower()
+
+        override_id = self._resource_status_id_map.get(title_key)
+        if override_id is not None:
+            return int(override_id)
+
+        team_value = item.get("team")
+        try:
+            team_id = int(team_value)
+        except Exception:
+            team_id = 0
+
+        # Local Compose bootstrap seed for team 1 matches these IDs.
+        if team_id == 1:
+            fallback = DEFAULT_RESOURCE_STATUS_IDS_TEAM1.get(title_key)
+            if fallback is not None:
+                return int(fallback)
+        return None
+
+    def _set_device_runtime_state(
+        self,
+        agent_id: str,
+        state: str,
+        *,
+        item: dict[str, Any] | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        if not bool(self._cfg.get("enable_v2_device_state_patch", True)):
+            return
+
+        token = normalize_device_id(agent_id)
+        if not token:
+            return
+
+        def strip_timestamps(value: Any) -> Any:
+            if isinstance(value, dict):
+                cleaned: dict[str, Any] = {}
+                for raw_key, raw_value in value.items():
+                    key = normalize_string(raw_key)
+                    if key == "at" or key.endswith("_at"):
+                        continue
+                    cleaned[key] = strip_timestamps(raw_value)
+                return cleaned
+            if isinstance(value, list):
+                return [strip_timestamps(row) for row in value]
+            return value
+
+        try:
+            current_item = item if isinstance(item, dict) else self._core._find_device_item(token)
+            if current_item is None:
+                current_item = self._core._get_or_create_device_item(token, None)
+            if not isinstance(current_item, dict):
+                return
+
+            item_id = current_item.get("id")
+            if not item_id:
+                return
+
+            metadata = parse_maybe_json(current_item.get("metadata"), {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+
+            runtime = metadata.get("fleet_v2_runtime")
+            if not isinstance(runtime, dict):
+                runtime = {}
+            runtime_current = parse_maybe_json(stable_dumps(runtime), {})
+            if not isinstance(runtime_current, dict):
+                runtime_current = {}
+            runtime_next = parse_maybe_json(stable_dumps(runtime_current), {})
+            if not isinstance(runtime_next, dict):
+                runtime_next = {}
+
+            runtime_next["agent_id"] = token
+            runtime_next["device_state"] = normalize_string(state).upper() or "UNKNOWN"
+            if isinstance(details, dict):
+                for key, value in details.items():
+                    if value is None:
+                        continue
+                    runtime_next[key] = value
+
+            target_status_id: int | None = None
+            target_status_title = self._resource_status_title_for_runtime_state(state)
+            if target_status_title:
+                target_status_id = self._resolve_resource_status_id(current_item, target_status_title)
+
+            current_status_value = current_item.get("status")
+            try:
+                current_status_id = int(current_status_value) if current_status_value is not None else None
+            except Exception:
+                current_status_id = None
+            should_patch_status = target_status_id is not None and current_status_id != int(target_status_id)
+
+            current_semantic = strip_timestamps(runtime_current)
+            next_semantic = strip_timestamps(runtime_next)
+            if stable_dumps(current_semantic) == stable_dumps(next_semantic) and not should_patch_status:
+                return
+
+            runtime_next["state_updated_at"] = utc_now_iso()
+            metadata["fleet_v2_runtime"] = runtime_next
+            patch_fields: dict[str, Any] = {"metadata": stable_dumps(metadata)}
+            if should_patch_status and target_status_id is not None:
+                patch_fields["status"] = int(target_status_id)
+            self._core._elab_client.patch_item_fields(int(item_id), patch_fields)
+        except Exception as exc:
+            log.warning(
+                "Failed to patch fleet_v2_runtime state for agent_id=%s state=%s: %s",
+                token,
+                normalize_string(state),
+                exc,
+            )
 
     def _measurement_window(self, policy: dict[str, Any]) -> tuple[str, str]:
         range_obj = policy.get("range") if isinstance(policy, dict) else {}
@@ -1916,6 +2079,21 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
             item = self._core._get_or_create_device_item(agent_id, v1)
             self._update_v2_presence(item, agent)
             allowed_mode, reason = self._choose_allowed_mode(agent)
+            self._set_device_runtime_state(
+                agent_id,
+                "ONLINE",
+                item=item,
+                details={
+                    "last_hello": {
+                        "allowed_mode": mode_enum_to_text(allowed_mode),
+                        "mode_reason": normalize_string(reason),
+                        "requested_mode": mode_enum_to_text(int(agent.requested_mode)),
+                        "control_plane_iface": normalize_string(agent.control_plane_iface),
+                        "fleet_manager_target": normalize_string(agent.fleet_manager_target),
+                        "at": utc_now_iso(),
+                    }
+                },
+            )
             mark_device_seen(agent_id)
             return fleet_gateway_v2_pb2.HelloResponse(
                 server_version="monad-fleet-service-v2-draft",
@@ -1934,17 +2112,45 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
         if not agent_id:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "agent_id is required")
         try:
-            policy_ctx = self._resolve_policy_ctx(agent_id)
+            item, policy_ctx = self._resolve_item_and_policy_ctx(agent_id)
             if not policy_ctx:
+                self._set_device_runtime_state(
+                    agent_id,
+                    "IDLE",
+                    item=item,
+                    details={
+                        "last_assignment": {
+                            "status": "NO_WORK",
+                            "at": utc_now_iso(),
+                        }
+                    },
+                )
                 return fleet_gateway_v2_pb2.GetAssignmentResponse(
                     status=fleet_gateway_v2_pb2.GetAssignmentResponse.NO_WORK
                 )
             policy = policy_ctx["policy"]
             start_iso, end_iso = self._measurement_window(policy)
+            experiment_id = normalize_string(policy.get("experiment_id"))
+            policy_id = normalize_string(policy_ctx["policy_revision"])
+            self._set_device_runtime_state(
+                agent_id,
+                "ASSIGNED",
+                item=item,
+                details={
+                    "last_assignment": {
+                        "status": "ASSIGNED",
+                        "experiment_id": experiment_id,
+                        "policy_id": policy_id,
+                        "measurement_from": start_iso,
+                        "measurement_to": end_iso,
+                        "at": utc_now_iso(),
+                    }
+                },
+            )
             return fleet_gateway_v2_pb2.GetAssignmentResponse(
                 status=fleet_gateway_v2_pb2.GetAssignmentResponse.ASSIGNED,
-                experiment_id=normalize_string(policy.get("experiment_id")),
-                policy_id=normalize_string(policy_ctx["policy_revision"]),
+                experiment_id=experiment_id,
+                policy_id=policy_id,
                 measurement_from=timestamp_from_iso(start_iso),
                 measurement_to=timestamp_from_iso(end_iso),
             )
@@ -1957,22 +2163,76 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
         if not agent_id:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "agent_id is required")
         try:
-            policy_ctx = self._resolve_policy_ctx(agent_id)
+            item, policy_ctx = self._resolve_item_and_policy_ctx(agent_id)
             if not policy_ctx:
+                self._set_device_runtime_state(
+                    agent_id,
+                    "WAITING_POLICY",
+                    item=item,
+                    details={
+                        "last_policy_fetch": {
+                            "status": "NO_POLICY",
+                            "requested_experiment_id": normalize_string(request.experiment_id),
+                            "at": utc_now_iso(),
+                        }
+                    },
+                )
                 return fleet_gateway_v2_pb2.GetPolicyResponse(
                     status=fleet_gateway_v2_pb2.GetPolicyResponse.NO_POLICY
                 )
             policy_id = normalize_string(policy_ctx["policy_revision"])
             if normalize_string(request.last_policy_id) == policy_id:
+                self._set_device_runtime_state(
+                    agent_id,
+                    "POLICY_CACHED",
+                    item=item,
+                    details={
+                        "last_policy_fetch": {
+                            "status": "NOT_MODIFIED",
+                            "policy_id": policy_id,
+                            "requested_experiment_id": normalize_string(request.experiment_id),
+                            "at": utc_now_iso(),
+                        }
+                    },
+                )
                 return fleet_gateway_v2_pb2.GetPolicyResponse(
                     status=fleet_gateway_v2_pb2.GetPolicyResponse.NOT_MODIFIED
                 )
             policy = policy_ctx["policy"]
+            experiment_id = normalize_string(policy.get("experiment_id"))
             if normalize_string(request.experiment_id):
-                if normalize_string(policy.get("experiment_id")) != normalize_string(request.experiment_id):
+                if experiment_id != normalize_string(request.experiment_id):
+                    self._set_device_runtime_state(
+                        agent_id,
+                        "WAITING_POLICY",
+                        item=item,
+                        details={
+                            "last_policy_fetch": {
+                                "status": "NO_POLICY",
+                                "reason": "experiment_id mismatch",
+                                "requested_experiment_id": normalize_string(request.experiment_id),
+                                "resolved_experiment_id": experiment_id,
+                                "policy_id": policy_id,
+                                "at": utc_now_iso(),
+                            }
+                        },
+                    )
                     return fleet_gateway_v2_pb2.GetPolicyResponse(
                         status=fleet_gateway_v2_pb2.GetPolicyResponse.NO_POLICY
                     )
+            self._set_device_runtime_state(
+                agent_id,
+                "POLICY_READY",
+                item=item,
+                details={
+                    "last_policy_fetch": {
+                        "status": "OK",
+                        "policy_id": policy_id,
+                        "experiment_id": experiment_id,
+                        "at": utc_now_iso(),
+                    }
+                },
+            )
             return fleet_gateway_v2_pb2.GetPolicyResponse(
                 status=fleet_gateway_v2_pb2.GetPolicyResponse.OK,
                 policy=self._policy_to_v2(policy, policy_id),
@@ -1985,11 +2245,42 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
         agent_id = normalize_device_id(request.agent_id)
         preparation_id = normalize_string(request.preparation_id)
         if not agent_id or not preparation_id:
+            self._set_device_runtime_state(
+                agent_id,
+                "PREPARE_REJECTED",
+                details={
+                    "last_prepare": {
+                        "status": "REJECTED",
+                        "reason": "agent_id and preparation_id are required",
+                        "preparation_id": preparation_id,
+                        "policy_id": normalize_string(request.policy_id),
+                        "experiment_id": normalize_string(request.experiment_id),
+                        "at": utc_now_iso(),
+                    }
+                },
+            )
             return fleet_gateway_v2_pb2.AckPreparedResponse(
                 status=fleet_gateway_v2_pb2.AckPreparedResponse.REJECTED,
                 reason="agent_id and preparation_id are required",
             )
         if self._state.has_preparation(preparation_id):
+            self._set_device_runtime_state(
+                agent_id,
+                "PREPARED",
+                details={
+                    "last_prepare": {
+                        "status": "ACCEPTED",
+                        "reason": "duplicate preparation acknowledged",
+                        "preparation_id": preparation_id,
+                        "policy_id": normalize_string(request.policy_id),
+                        "experiment_id": normalize_string(request.experiment_id),
+                        "mode": mode_enum_to_text(int(request.mode)),
+                        "control_plane_iface": normalize_string(request.control_plane_iface),
+                        "route_verified": bool(request.route_verified),
+                        "at": utc_now_iso(),
+                    }
+                },
+            )
             return fleet_gateway_v2_pb2.AckPreparedResponse(
                 status=fleet_gateway_v2_pb2.AckPreparedResponse.ACCEPTED,
                 reason="duplicate preparation acknowledged",
@@ -1999,11 +2290,45 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
         iface = normalize_string(request.control_plane_iface).lower()
         if requested_mode == fleet_gateway_v2_pb2.DUAL_NIC:
             if not request.route_verified:
+                self._set_device_runtime_state(
+                    agent_id,
+                    "PREPARE_REJECTED",
+                    details={
+                        "last_prepare": {
+                            "status": "REJECTED",
+                            "reason": "DUAL_NIC requires route_verified=true",
+                            "preparation_id": preparation_id,
+                            "policy_id": normalize_string(request.policy_id),
+                            "experiment_id": normalize_string(request.experiment_id),
+                            "mode": mode_enum_to_text(requested_mode),
+                            "control_plane_iface": normalize_string(request.control_plane_iface),
+                            "route_verified": bool(request.route_verified),
+                            "at": utc_now_iso(),
+                        }
+                    },
+                )
                 return fleet_gateway_v2_pb2.AckPreparedResponse(
                     status=fleet_gateway_v2_pb2.AckPreparedResponse.REJECTED,
                     reason="DUAL_NIC requires route_verified=true",
                 )
             if iface and not iface.startswith("eth"):
+                self._set_device_runtime_state(
+                    agent_id,
+                    "PREPARE_REJECTED",
+                    details={
+                        "last_prepare": {
+                            "status": "REJECTED",
+                            "reason": "DUAL_NIC requires ethernet control_plane_iface",
+                            "preparation_id": preparation_id,
+                            "policy_id": normalize_string(request.policy_id),
+                            "experiment_id": normalize_string(request.experiment_id),
+                            "mode": mode_enum_to_text(requested_mode),
+                            "control_plane_iface": normalize_string(request.control_plane_iface),
+                            "route_verified": bool(request.route_verified),
+                            "at": utc_now_iso(),
+                        }
+                    },
+                )
                 return fleet_gateway_v2_pb2.AckPreparedResponse(
                     status=fleet_gateway_v2_pb2.AckPreparedResponse.REJECTED,
                     reason="DUAL_NIC requires ethernet control_plane_iface",
@@ -2011,17 +2336,69 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
 
         policy_ctx = self._resolve_policy_ctx(agent_id)
         if not policy_ctx:
+            self._set_device_runtime_state(
+                agent_id,
+                "PREPARE_REJECTED",
+                details={
+                    "last_prepare": {
+                        "status": "REJECTED",
+                        "reason": "no policy assigned",
+                        "preparation_id": preparation_id,
+                        "policy_id": normalize_string(request.policy_id),
+                        "experiment_id": normalize_string(request.experiment_id),
+                        "mode": mode_enum_to_text(requested_mode),
+                        "control_plane_iface": normalize_string(request.control_plane_iface),
+                        "route_verified": bool(request.route_verified),
+                        "at": utc_now_iso(),
+                    }
+                },
+            )
             return fleet_gateway_v2_pb2.AckPreparedResponse(
                 status=fleet_gateway_v2_pb2.AckPreparedResponse.REJECTED,
                 reason="no policy assigned",
             )
         if normalize_string(request.policy_id) != normalize_string(policy_ctx["policy_revision"]):
+            self._set_device_runtime_state(
+                agent_id,
+                "PREPARE_REJECTED",
+                details={
+                    "last_prepare": {
+                        "status": "REJECTED",
+                        "reason": "policy_id mismatch",
+                        "preparation_id": preparation_id,
+                        "policy_id": normalize_string(request.policy_id),
+                        "expected_policy_id": normalize_string(policy_ctx["policy_revision"]),
+                        "experiment_id": normalize_string(request.experiment_id),
+                        "mode": mode_enum_to_text(requested_mode),
+                        "control_plane_iface": normalize_string(request.control_plane_iface),
+                        "route_verified": bool(request.route_verified),
+                        "at": utc_now_iso(),
+                    }
+                },
+            )
             return fleet_gateway_v2_pb2.AckPreparedResponse(
                 status=fleet_gateway_v2_pb2.AckPreparedResponse.REJECTED,
                 reason="policy_id mismatch",
             )
 
         self._state.mark_preparation(preparation_id)
+        self._set_device_runtime_state(
+            agent_id,
+            "PREPARED",
+            details={
+                "last_prepare": {
+                    "status": "ACCEPTED",
+                    "reason": "prepared accepted",
+                    "preparation_id": preparation_id,
+                    "policy_id": normalize_string(request.policy_id),
+                    "experiment_id": normalize_string(request.experiment_id),
+                    "mode": mode_enum_to_text(requested_mode),
+                    "control_plane_iface": normalize_string(request.control_plane_iface),
+                    "route_verified": bool(request.route_verified),
+                    "at": utc_now_iso(),
+                }
+            },
+        )
         return fleet_gateway_v2_pb2.AckPreparedResponse(
             status=fleet_gateway_v2_pb2.AckPreparedResponse.ACCEPTED,
             reason="prepared accepted",
@@ -2032,6 +2409,20 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
         agent_id = normalize_device_id(request.agent_id or report.agent_id)
         run_id = normalize_string(report.run_id)
         if not agent_id or not run_id:
+            self._set_device_runtime_state(
+                agent_id,
+                "REPORT_REJECTED",
+                details={
+                    "last_report": {
+                        "status": "REJECTED",
+                        "reason": "agent_id and report.run_id are required",
+                        "run_id": run_id,
+                        "policy_id": normalize_string(report.policy_id),
+                        "experiment_id": normalize_string(report.experiment_id),
+                        "at": utc_now_iso(),
+                    }
+                },
+            )
             return fleet_gateway_v2_pb2.PublishReportResponse(
                 status=fleet_gateway_v2_pb2.PublishReportResponse.REJECTED,
                 reason="agent_id and report.run_id are required",
@@ -2039,6 +2430,21 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
 
         report_key = self._report_key(report, agent_id)
         if self._state.has_report(report_key):
+            self._set_device_runtime_state(
+                agent_id,
+                "REPORT_DUPLICATE",
+                details={
+                    "last_report": {
+                        "status": "DUPLICATE",
+                        "reason": "duplicate report ignored",
+                        "run_id": run_id,
+                        "policy_id": normalize_string(report.policy_id),
+                        "experiment_id": normalize_string(report.experiment_id),
+                        "report_status": normalize_string(report.status),
+                        "at": utc_now_iso(),
+                    }
+                },
+            )
             return fleet_gateway_v2_pb2.PublishReportResponse(
                 status=fleet_gateway_v2_pb2.PublishReportResponse.DUPLICATE,
                 reason="duplicate report ignored",
@@ -2081,6 +2487,21 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
                 log.warning("PublishReport(v2) artifact ingest failed: %s", ack.message)
 
         if had_failure:
+            self._set_device_runtime_state(
+                agent_id,
+                "REPORT_REJECTED",
+                details={
+                    "last_report": {
+                        "status": "REJECTED",
+                        "reason": "one or more events failed to ingest",
+                        "run_id": run_id,
+                        "policy_id": normalize_string(report.policy_id),
+                        "experiment_id": normalize_string(report.experiment_id),
+                        "report_status": normalize_string(report.status),
+                        "at": utc_now_iso(),
+                    }
+                },
+            )
             return fleet_gateway_v2_pb2.PublishReportResponse(
                 status=fleet_gateway_v2_pb2.PublishReportResponse.REJECTED,
                 reason="one or more events failed to ingest",
@@ -2088,6 +2509,23 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
 
         self._state.mark_report(report_key)
         self._record_report_metrics(report, agent_id)
+        self._set_device_runtime_state(
+            agent_id,
+            "REPORT_ACCEPTED",
+            details={
+                "last_report": {
+                    "status": "ACCEPTED",
+                    "reason": "report accepted",
+                    "run_id": run_id,
+                    "policy_id": normalize_string(report.policy_id),
+                    "experiment_id": normalize_string(report.experiment_id),
+                    "report_status": normalize_string(report.status),
+                    "events_count": len(report.events),
+                    "artifacts_count": len(report.artifacts),
+                    "at": utc_now_iso(),
+                }
+            },
+        )
         return fleet_gateway_v2_pb2.PublishReportResponse(
             status=fleet_gateway_v2_pb2.PublishReportResponse.ACCEPTED,
             reason="report accepted",
@@ -2156,6 +2594,8 @@ def serve():
         "book_is_cancellable": normalize_string(os.environ.get("BOOK_IS_CANCELLABLE", "true")).lower() in {"1", "true", "yes"},
         "max_dedupe_events": int(os.environ.get("MAX_DEDUPE_EVENTS", "50000")),
         "allow_live_events": normalize_string(os.environ.get("ALLOW_LIVE_EVENTS", "false")).lower() in {"1", "true", "yes"},
+        "enable_v2_device_state_patch": normalize_string(os.environ.get("ENABLE_V2_DEVICE_STATE_PATCH", "true")).lower()
+        in {"1", "true", "yes"},
         "skip_expired_policies": normalize_string(os.environ.get("SKIP_EXPIRED_POLICIES", "true")).lower()
         in {"1", "true", "yes"},
         "metrics_bind": os.environ.get("METRICS_BIND", "0.0.0.0"),
@@ -2167,6 +2607,7 @@ def serve():
         ),
         "ingest_api_token": os.environ.get("INGEST_API_TOKEN", ""),
         "artifact_max_bytes": int(os.environ.get("ARTIFACT_MAX_BYTES", str(20 * 1024 * 1024))),
+        "resource_status_id_map": parse_maybe_json(os.environ.get("RESOURCE_STATUS_ID_MAP_JSON"), {}),
     }
 
     data_dir = Path(os.environ.get("DATA_DIR", "/data"))
@@ -2178,6 +2619,7 @@ def serve():
     METRICS_EXCLUDE_PREFIXES = tuple(cfg.get("metrics_exclude_prefixes") or ())
     if METRICS_EXCLUDE_PREFIXES:
         log.info("Metrics export filter enabled, excluded prefixes: %s", ",".join(METRICS_EXCLUDE_PREFIXES))
+    log.info("fleet.v2 device state metadata patching enabled=%s", cfg["enable_v2_device_state_patch"])
     state = LocalState(data_dir / "state.json", max_event_ids=cfg["max_dedupe_events"])
 
     elab_client = ElabFTWClient(base_url=base_url, api_key=api_key, verify_tls=verify_tls)

@@ -16,6 +16,7 @@ Python gRPC service that integrates devices with eLabFTW for Wi-Fi sensing autom
   - `POST /ingest/v1/artifacts` (JSON+base64 artifact ingest; uploads to eLabFTW experiment attachments)
 - Device resource discovery/creation in eLabFTW Items/Resources.
 - Device `last_seen_at` and capabilities updates on `Hello`.
+- Device runtime state updates in item metadata (`fleet_v2_runtime`) across `GetAssignment`, `GetPolicy`, `AckPrepared`, and `PublishReport`.
 - Policy fetch from fleet-tagged experiments (`fleet` by default), using experiment metadata from JSON editor/custom fields.
   - Default metadata keys checked in order: `fleet.policy`, `policy`, `fleet_policy`, `policy_json`.
 - Canonical policy hashing (`policy_revision = sha256:<hash>`).
@@ -40,6 +41,8 @@ Python gRPC service that integrates devices with eLabFTW for Wi-Fi sensing autom
 - `HELLO_POLL_INTERVAL_S` (`30`)
 - `REQUIRED_MIN_AGENT_VERSION` (empty by default)
 - `ALLOW_LIVE_EVENTS` (`false`)
+- `ENABLE_V2_DEVICE_STATE_PATCH` (`true`; set `false` to disable v2 item metadata runtime-state patching)
+- `RESOURCE_STATUS_ID_MAP_JSON` (optional JSON object for runtime-state -> eLab status id resolution by status title, e.g. `{\"waiting\":7,\"operational\":2,\"open\":8,\"processed\":6,\"maintenance mode\":1}`)
 - `METRICS_BIND` (`0.0.0.0`)
 - `METRICS_PORT` (`9108`)
 - `INGEST_API_TOKEN` (empty by default; set to require `x-ingest-token` on HTTP ingest)

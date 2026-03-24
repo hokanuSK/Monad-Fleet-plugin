@@ -2,14 +2,18 @@
 
 This repo runs a local eLabFTW instance plus a Python gRPC "fleet manager" service and a simulated/real device agent.
 
-## Current Handoff (2026-02-23)
+## Current Handoff (2026-03-19)
 
-- Operational handoff for next Codex windows/agents: `docs/agent_handoff_single_radio_2026-02-23.md`
+- Primary operational handoff for next Codex windows/agents:
+  - `docs/agent_handoff_notion_ops_2026-03-19.md`
+- Previous CSI-focused handoff (still relevant for real Pi CSI stabilization):
+  - `docs/agent_handoff_single_radio_2026-02-23.md`
 - Confirmed:
-  - single-radio flow can complete runs and replay reports from spool,
-  - `measureinject` loop was verified in real run logs.
-- Open blocker:
-  - CSI evidence remains `frames=0` / `files=0` on real run, even when injection loop is active.
+  - smoke flow now emits Notion ops context JSON on exit (run/incident/task as applicable),
+  - strict sync mode (`NOTION_SYNC_STRICT=true`) was runtime-verified.
+- Open blockers:
+  - live Notion API write path is not validated in this environment (missing token during verification),
+  - CSI evidence blocker from previous handoff remains open for real Pi runs.
 
 ## Repo Layout
 
@@ -45,6 +49,7 @@ Required behavior for agents:
 4. Convert every non-trivial follow-up into a Task entry with owner and due date.
 5. Cross-link entries by run id / experiment id / issue or PR links in page content.
 6. Do not store secrets in Notion (API keys, tokens, passwords).
+7. Definition of Done for smoke execution includes Notion ops capture (or fallback JSON in `output/ops/*.json` when API sync is unavailable).
 
 Source-of-truth boundaries:
 
@@ -52,6 +57,12 @@ Source-of-truth boundaries:
 - eLabFTW: experiment metadata and uploaded artifacts.
 - Prometheus/Grafana: time-series metrics.
 - Notion: operational log, decisions, incidents, and execution tasks.
+
+Naming requirements for ops records:
+
+- Use stable `run_id` when available.
+- Always include `experiment_id` (smoke experiment id).
+- Include `device_id` or target device list context.
 
 ## Quick Start (Docker Compose)
 

@@ -13,11 +13,12 @@
 
 ## TODO (prakticke kroky)
 - [ ] Prejst projekt a spresnit experimentalny protokol.
-- [ ] Formalne definovat gRPC rozhranie ako vystup prace.
+- [ ] Formalne definovat gRPC rozhranie pre manazment flotily zariadeny ako vystup bakalarskej prace.
 - [ ] Vytvorit implementacnu dokumentaciu.
 - [ ] Vytvorit pouzivatelsku prirucku.
 - [ ] Pozriet MCP servery a vybrat tie, ktore realne pomozu.
 
 ## Prebrat s Kubom
+
 - [ ] Experiment na viacerych zariadeniach naraz.
 - [ ] Ako spristupnit setup na dalsi vyvoj a opakovane testy.

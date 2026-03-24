@@ -9,8 +9,8 @@ This document is the practical operations guide for running Monad Fleet v2 with 
 
 It complements, but does not replace:
 
-- `docs/monad_fleet_grpc_interface_v2.tex` (full protocol/profile spec)
-- `docs/pi_artifacts_reference.md` (artifact naming and meaning)
+- `docs/specs/monad_fleet_grpc_interface_v2.tex` (full protocol/profile spec)
+- `docs/ops/pi_artifacts_reference.md` (artifact naming and meaning)
 
 ## 2. Phase-1 Scope (What "ready" means now)
 

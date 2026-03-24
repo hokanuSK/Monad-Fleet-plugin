@@ -13,6 +13,7 @@ import shlex
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import tarfile
 import time
@@ -114,6 +115,45 @@ def parse_bool(value: Any, default: bool = False) -> bool:
     return text in {"1", "true", "yes", "on"}
 
 
+def _parse_csv_tokens(value: Any) -> list[str]:
+    text = normalize(value)
+    if not text:
+        return []
+    return [normalize(part) for part in text.split(",") if normalize(part)]
+
+
+def _normalize_sink_name(value: Any) -> str:
+    name = normalize(value).lower()
+    if not name:
+        return ""
+    if name in {"none", "disabled", "off", "null"}:
+        return "none"
+    if name in {"elab", "elabftw"}:
+        return "elabftw"
+    if name in {"fleet", "fleet_http", "fleet-http", "ingest", "http_ingest"}:
+        return "fleet_http"
+    if name in {"webhook", "http", "http_webhook"}:
+        return "webhook"
+    if name in {"sqlite", "sqlite3", "db"}:
+        return "sqlite"
+    return name
+
+
+def _resolve_sink_list(primary: Any, fallback: Any = "") -> list[str]:
+    tokens = _parse_csv_tokens(primary) or _parse_csv_tokens(fallback)
+    if not tokens:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        normalized = _normalize_sink_name(token)
+        if not normalized or normalized == "none" or normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+    return out
+
+
 def parse_timeout_seconds(env_name: str, default: int, *, minimum: int = 1) -> int:
     return max(minimum, parse_int(os.environ.get(env_name), default))
 
@@ -141,6 +181,18 @@ def route_interface_for_target(target_host: str) -> str:
     except Exception:
         return ""
     match = re.search(r"\bdev\s+(\S+)", out)
+    return match.group(1) if match else ""
+
+
+def default_ipv4_gateway(*, iface: str = "") -> str:
+    cmd = ["ip", "-4", "route", "show", "default"]
+    if normalize(iface):
+        cmd.extend(["dev", normalize(iface)])
+    try:
+        out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL)
+    except Exception:
+        return ""
+    match = re.search(r"\bvia\s+(\d+\.\d+\.\d+\.\d+)\b", out)
     return match.group(1) if match else ""
 
 
@@ -330,6 +382,405 @@ def restart_control_plane_before_report(
         time.sleep(1)
 
     log.warning("Pre-report reconnect did not restore route to %s within %ss", target_host, wait_s)
+    return False
+
+
+def _iface_has_ipv4(iface: str) -> bool:
+    name = normalize(iface)
+    if not name:
+        return False
+    rc, out = _run_local_cmd(["ip", "-4", "-o", "addr", "show", "dev", name], timeout_s=5)
+    if rc != 0:
+        return False
+    return bool(re.search(r"\binet\s+\d+\.\d+\.\d+\.\d+/\d+\b", out or ""))
+
+
+def wait_for_route_ready(
+    target_host: str,
+    *,
+    expected_iface: str = "",
+    timeout_s: int = 30,
+    require_ipv4: bool = True,
+) -> tuple[bool, str]:
+    host = normalize(target_host)
+    expect = normalize(expected_iface)
+    if not host:
+        return True, ""
+
+    deadline = time.time() + max(1, int(timeout_s))
+    last_iface = ""
+    while time.time() <= deadline:
+        route_iface = route_interface_for_target(host)
+        last_iface = route_iface
+        if route_iface:
+            if expect and route_iface != expect:
+                time.sleep(1)
+                continue
+            if require_ipv4 and not _iface_has_ipv4(route_iface):
+                time.sleep(1)
+                continue
+            return True, route_iface
+        time.sleep(1)
+    return False, last_iface
+
+
+def _run_first_success(commands: list[list[str]], *, timeout_s: int = 15) -> tuple[bool, int, str, list[str]]:
+    last_rc = 127
+    last_out = ""
+    last_cmd: list[str] = []
+    for cmd in commands:
+        if not cmd:
+            continue
+        rc, out = _run_local_cmd(cmd, timeout_s=timeout_s)
+        last_rc = rc
+        last_out = out
+        last_cmd = cmd
+        if rc == 0:
+            return True, rc, out, cmd
+    return False, last_rc, last_out, last_cmd
+
+
+def _detect_active_wifi_profile(iface: str) -> str:
+    name = normalize(iface)
+    for cmd in (
+        ["nmcli", "-g", "GENERAL.CONNECTION", "device", "show", name],
+        ["sudo", "-n", "nmcli", "-g", "GENERAL.CONNECTION", "device", "show", name],
+    ):
+        if not name:
+            break
+        rc, out = _run_local_cmd(cmd, timeout_s=8)
+        if rc != 0:
+            continue
+        for row in (out or "").splitlines():
+            candidate = normalize(row)
+            if candidate and candidate not in {"--", "(unknown)", "(null)"}:
+                return candidate
+
+    for cmd in (
+        ["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show", "--active"],
+        ["sudo", "-n", "nmcli", "-t", "-f", "NAME,TYPE", "connection", "show", "--active"],
+    ):
+        rc, out = _run_local_cmd(cmd, timeout_s=8)
+        if rc != 0:
+            continue
+        for row in (out or "").splitlines():
+            line = normalize(row)
+            if not line:
+                continue
+            parts = line.rsplit(":", 1)
+            if len(parts) != 2:
+                continue
+            profile_name = normalize(parts[0])
+            profile_type = normalize(parts[1]).lower()
+            if profile_name and profile_type == "wifi":
+                return profile_name
+    return ""
+
+
+def cleanup_csi_collectors(reason: str, *, patterns_csv: str = "") -> tuple[int, list[str]]:
+    raw_patterns = [normalize(row) for row in normalize(patterns_csv).split(",") if normalize(row)]
+    patterns = raw_patterns or ["feitcsi"]
+    killed = 0
+    notes: list[str] = []
+    for pattern in patterns:
+        ok, rc, out, cmd = _run_first_success(
+            [
+                ["pkill", "-f", pattern],
+                ["sudo", "-n", "pkill", "-f", pattern],
+            ],
+            timeout_s=10,
+        )
+        if ok:
+            killed += 1
+            notes.append(f"{' '.join(cmd)} rc={rc}")
+            continue
+        # rc=1 from pkill commonly means "no process matched"; treat as informational.
+        if rc == 1:
+            notes.append(f"no-match pattern={pattern}")
+        else:
+            notes.append(f"failed pattern={pattern} rc={rc} out={_short_message(out, 200)}")
+    if killed > 0:
+        log.info("CSI cleanup (%s): killed=%d notes=%s", normalize(reason) or "unspecified", killed, "; ".join(notes))
+    else:
+        log.debug("CSI cleanup (%s): no active collectors (%s)", normalize(reason) or "unspecified", "; ".join(notes))
+    return killed, notes
+
+
+def recover_single_radio_control_plane(
+    iface: str,
+    target_host: str,
+    *,
+    wifi_profile: str,
+    max_attempts: int,
+    down_s: int,
+    route_wait_s: int,
+    custom_cmd: str,
+    csi_kill_patterns: str,
+) -> bool:
+    control_iface = normalize(iface)
+    route_target = normalize(target_host)
+    profile_raw = normalize(wifi_profile)
+    profile_auto = profile_raw.lower() in {"", "auto", "detect", "active", "default"}
+    if not control_iface:
+        log.warning("Single-radio recovery skipped: no control iface configured")
+        return False
+
+    attempts = max(1, int(max_attempts))
+    base_route_wait_s = max(5, int(route_wait_s))
+    fallback_route_wait_s = max(8, min(20, base_route_wait_s // 2))
+    for attempt in range(1, attempts + 1):
+        profile = profile_raw
+        if profile_auto:
+            profile = _detect_active_wifi_profile(control_iface)
+            if profile:
+                log.info(
+                    "Single-radio recovery auto-detected Wi-Fi profile '%s' on iface=%s",
+                    profile,
+                    control_iface,
+                )
+            elif attempt == 1:
+                log.warning(
+                    "Single-radio recovery could not auto-detect active Wi-Fi profile on iface=%s; "
+                    "falling back to 'nmcli device connect'",
+                    control_iface,
+                )
+
+        log.info(
+            "Single-radio recovery attempt %d/%d iface=%s profile=%s target=%s",
+            attempt,
+            attempts,
+            control_iface,
+            profile or "<unset>",
+            route_target or "<unset>",
+        )
+
+        cleanup_csi_collectors("single-radio-recovery", patterns_csv=csi_kill_patterns)
+
+        down_ok, down_rc, down_out, _ = _run_first_success(
+            [
+                ["sudo", "-n", "ip", "link", "set", control_iface, "down"],
+                ["ip", "link", "set", control_iface, "down"],
+            ],
+            timeout_s=12,
+        )
+        if not down_ok:
+            log.warning(
+                "Single-radio recovery: failed to set iface down (%s) rc=%s out=%s",
+                control_iface,
+                down_rc,
+                _short_message(down_out, 240),
+            )
+        if down_s > 0:
+            time.sleep(max(0, int(down_s)))
+
+        up_ok, up_rc, up_out, _ = _run_first_success(
+            [
+                ["sudo", "-n", "ip", "link", "set", control_iface, "up"],
+                ["ip", "link", "set", control_iface, "up"],
+            ],
+            timeout_s=12,
+        )
+        if not up_ok:
+            log.warning(
+                "Single-radio recovery: failed to set iface up (%s) rc=%s out=%s",
+                control_iface,
+                up_rc,
+                _short_message(up_out, 240),
+                )
+
+        nm_connect_ok = False
+        if profile:
+            nm_ok, nm_rc, nm_out, _ = _run_first_success(
+                [
+                    ["nmcli", "connection", "up", profile],
+                    ["sudo", "-n", "nmcli", "connection", "up", profile],
+                ],
+                timeout_s=20,
+            )
+            if not nm_ok:
+                log.warning(
+                    "Single-radio recovery: nmcli up failed profile=%s rc=%s out=%s",
+                    profile,
+                    nm_rc,
+                    _short_message(nm_out, 320),
+                )
+            else:
+                nm_connect_ok = True
+
+        if not nm_connect_ok:
+            nm_dev_ok, nm_dev_rc, nm_dev_out, _ = _run_first_success(
+                [
+                    ["nmcli", "device", "connect", control_iface],
+                    ["sudo", "-n", "nmcli", "device", "connect", control_iface],
+                ],
+                timeout_s=20,
+            )
+            if not nm_dev_ok:
+                log.warning(
+                    "Single-radio recovery: nmcli device connect failed iface=%s rc=%s out=%s",
+                    control_iface,
+                    nm_dev_rc,
+                    _short_message(nm_dev_out, 320),
+                )
+
+        if custom_cmd:
+            rc, out = _run_local_cmd(["bash", "-lc", custom_cmd], timeout_s=max(10, route_wait_s + 10))
+            if rc != 0:
+                log.warning("Single-radio recovery custom cmd failed rc=%s out=%s", rc, _short_message(out, 320))
+
+        ready, route_iface = wait_for_route_ready(
+            route_target,
+            expected_iface=control_iface,
+            timeout_s=base_route_wait_s,
+            require_ipv4=True,
+        )
+        if ready:
+            log.info("Single-radio recovery succeeded on iface=%s", route_iface or control_iface)
+            return True
+        log.warning(
+            "Single-radio recovery attempt %d/%d initial stage did not restore route to %s; "
+            "running hard-reset fallbacks",
+            attempt,
+            attempts,
+            route_target or "<unset>",
+        )
+
+        # Fallback 1: ask NetworkManager to reconnect the device directly.
+        _run_first_success(
+            [
+                ["nmcli", "device", "disconnect", control_iface],
+                ["sudo", "-n", "nmcli", "device", "disconnect", control_iface],
+            ],
+            timeout_s=12,
+        )
+        _run_first_success(
+            [
+                ["nmcli", "device", "connect", control_iface],
+                ["sudo", "-n", "nmcli", "device", "connect", control_iface],
+            ],
+            timeout_s=20,
+        )
+        if profile:
+            _run_first_success(
+                [
+                    ["nmcli", "connection", "up", profile],
+                    ["sudo", "-n", "nmcli", "connection", "up", profile],
+                ],
+                timeout_s=20,
+            )
+        ready, route_iface = wait_for_route_ready(
+            route_target,
+            expected_iface=control_iface,
+            timeout_s=fallback_route_wait_s,
+            require_ipv4=True,
+        )
+        if ready:
+            log.info("Single-radio recovery succeeded after nmcli reconnect on iface=%s", route_iface or control_iface)
+            return True
+
+        # Fallback 2: hard-reset Wi-Fi radio using rfkill.
+        rf_block_ok, _, _, _ = _run_first_success(
+            [
+                ["sudo", "-n", "rfkill", "block", "wifi"],
+                ["rfkill", "block", "wifi"],
+            ],
+            timeout_s=10,
+        )
+        if rf_block_ok:
+            time.sleep(1)
+        _run_first_success(
+            [
+                ["sudo", "-n", "rfkill", "unblock", "wifi"],
+                ["rfkill", "unblock", "wifi"],
+            ],
+            timeout_s=10,
+        )
+        time.sleep(1)
+        _run_first_success(
+            [
+                ["sudo", "-n", "ip", "link", "set", control_iface, "up"],
+                ["ip", "link", "set", control_iface, "up"],
+            ],
+            timeout_s=12,
+        )
+        if profile:
+            _run_first_success(
+                [
+                    ["nmcli", "connection", "up", profile],
+                    ["sudo", "-n", "nmcli", "connection", "up", profile],
+                ],
+                timeout_s=20,
+            )
+        ready, route_iface = wait_for_route_ready(
+            route_target,
+            expected_iface=control_iface,
+            timeout_s=fallback_route_wait_s,
+            require_ipv4=True,
+        )
+        if ready:
+            log.info("Single-radio recovery succeeded after rfkill reset on iface=%s", route_iface or control_iface)
+            return True
+
+        # Fallback 3: restart NetworkManager and bring profile up once more.
+        _run_first_success(
+            [
+                ["sudo", "-n", "systemctl", "restart", "NetworkManager"],
+                ["systemctl", "restart", "NetworkManager"],
+            ],
+            timeout_s=25,
+        )
+        time.sleep(2)
+        if profile:
+            _run_first_success(
+                [
+                    ["nmcli", "connection", "up", profile],
+                    ["sudo", "-n", "nmcli", "connection", "up", profile],
+                ],
+                timeout_s=20,
+            )
+        ready, route_iface = wait_for_route_ready(
+            route_target,
+            expected_iface=control_iface,
+            timeout_s=fallback_route_wait_s,
+            require_ipv4=True,
+        )
+        if ready:
+            log.info(
+                "Single-radio recovery succeeded after NetworkManager restart on iface=%s",
+                route_iface or control_iface,
+            )
+            return True
+
+        log.warning(
+            "Single-radio recovery attempt %d/%d failed after hard-reset fallbacks target=%s",
+            attempt,
+            attempts,
+            route_target or "<unset>",
+        )
+
+    return False
+
+
+def request_controlled_reboot(reason: str) -> bool:
+    msg = normalize(reason) or "single-radio recovery failure"
+    marker = Path("/tmp/fleet-agent-reboot-request.txt")
+    try:
+        marker.write_text(f"{now_utc().isoformat().replace('+00:00', 'Z')} {msg}\n", encoding="utf-8")
+    except Exception:
+        pass
+    log.warning("Requesting controlled reboot: %s", msg)
+    ok, rc, out, cmd = _run_first_success(
+        [
+            ["sudo", "-n", "systemctl", "reboot"],
+            ["sudo", "-n", "reboot"],
+            ["reboot"],
+        ],
+        timeout_s=15,
+    )
+    if ok:
+        log.warning("Reboot command issued via: %s", " ".join(cmd))
+        return True
+    log.warning("Reboot request failed rc=%s out=%s", rc, _short_message(out, 300))
     return False
 
 
@@ -1034,18 +1485,26 @@ class RunStore:
         self.root = root
         self.pending_dir = root / "pending"
         self.sent_dir = root / "sent"
+        self.failed_dir = root / "failed"
         self.sent_retention_days = max(1, int(sent_retention_days))
         self.pending_dir.mkdir(parents=True, exist_ok=True)
         self.sent_dir.mkdir(parents=True, exist_ok=True)
+        self.failed_dir.mkdir(parents=True, exist_ok=True)
 
     def _run_dir(self, run_id: str, *, sent: bool = False) -> Path:
         return (self.sent_dir if sent else self.pending_dir) / sanitize_name(run_id, "run")
 
-    def _write_json_atomic(self, path: Path, payload: dict[str, Any]) -> None:
+    def _write_text_atomic(self, path: Path, content: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
+        with tmp.open("w", encoding="utf-8") as fh:
+            fh.write(content)
+            fh.flush()
+            os.fsync(fh.fileno())
         tmp.replace(path)
+
+    def _write_json_atomic(self, path: Path, payload: dict[str, Any]) -> None:
+        self._write_text_atomic(path, json.dumps(payload, sort_keys=True, indent=2))
 
     def start_run(self, run_id: str, context: dict[str, Any]) -> Path:
         run_dir = self._run_dir(run_id)
@@ -1066,6 +1525,8 @@ class RunStore:
         with (run_dir / "events.ndjson").open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(event_to_dict(event), sort_keys=True))
             fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
 
     def write_command_log(
         self,
@@ -1081,7 +1542,8 @@ class RunStore:
         safe_cmd = sanitize_name(cmd_id, "command")
         file_name = f"{safe_cmd}-{int(time.time() * 1000)}.log"
         path = artifacts_dir / file_name
-        path.write_text(
+        self._write_text_atomic(
+            path,
             "\n".join(
                 [
                     f"timestamp={now_utc().isoformat().replace('+00:00', 'Z')}",
@@ -1093,7 +1555,6 @@ class RunStore:
                     message,
                 ]
             ),
-            encoding="utf-8",
         )
         return artifact_from_path(file_name, path, run_id)
 
@@ -1101,7 +1562,7 @@ class RunStore:
         artifacts_dir = self._run_dir(run_id) / "artifacts"
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         path = artifacts_dir / "run-summary.json"
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        self._write_text_atomic(path, json.dumps(payload, indent=2, sort_keys=True))
         return artifact_from_path("run-summary.json", path, run_id)
 
     def write_text_artifact(self, run_id: str, prefix: str, content: str, *, suffix: str = ".txt") -> fleet_gateway_v2_pb2.ArtifactRef:
@@ -1110,7 +1571,7 @@ class RunStore:
         stamp = int(time.time() * 1000)
         file_name = f"{sanitize_name(prefix, 'artifact')}-{stamp}{suffix}"
         path = artifacts_dir / file_name
-        path.write_text(content or "", encoding="utf-8")
+        self._write_text_atomic(path, content or "")
         return artifact_from_path(file_name, path, run_id)
 
     def import_file_artifact(
@@ -1194,17 +1655,69 @@ class RunStore:
         if not report_path.exists():
             return None
         try:
-            payload = json.loads(report_path.read_text(encoding="utf-8"))
-        except Exception:
+            raw = report_path.read_text(encoding="utf-8")
+        except Exception as exc:
+            log.exception("Failed to read stored report for run_id=%s", run_id)
+            self.quarantine_pending_run(run_id, "report_read_error", f"{type(exc).__name__}: {exc}")
+            return None
+        if not raw.strip():
+            log.error("Stored report is empty for run_id=%s; quarantining pending run", run_id)
+            self.quarantine_pending_run(run_id, "report_empty")
+            return None
+        try:
+            payload = json.loads(raw)
+        except Exception as exc:
             log.exception("Failed to parse stored report for run_id=%s", run_id)
+            self.quarantine_pending_run(run_id, "report_invalid_json", f"{type(exc).__name__}: {exc}")
             return None
         if not isinstance(payload, dict):
+            log.error("Stored report payload is not an object for run_id=%s; quarantining", run_id)
+            self.quarantine_pending_run(run_id, "report_invalid_shape")
             return None
         try:
             return report_from_dict(payload)
-        except Exception:
+        except Exception as exc:
             log.exception("Failed to rebuild protobuf report for run_id=%s", run_id)
+            self.quarantine_pending_run(run_id, "report_invalid_proto", f"{type(exc).__name__}: {exc}")
             return None
+
+    def quarantine_pending_run(self, run_id: str, reason: str, detail: str = "") -> None:
+        source = self._run_dir(run_id)
+        if not source.exists():
+            return
+        target = self.failed_dir / sanitize_name(run_id, "run")
+        if target.exists():
+            target = self.failed_dir / f"{sanitize_name(run_id, 'run')}-{int(time.time() * 1000)}"
+        try:
+            source.replace(target)
+        except Exception:
+            log.exception("Failed to move pending run to failed run_id=%s", run_id)
+            return
+
+        context_path = target / "context.json"
+        payload: dict[str, Any] = {
+            "state": "failed",
+            "updated_at": now_utc().isoformat().replace("+00:00", "Z"),
+            "run_id": run_id,
+            "failure_reason": normalize(reason),
+        }
+        if context_path.exists():
+            try:
+                current = json.loads(context_path.read_text(encoding="utf-8"))
+                if isinstance(current, dict):
+                    payload.update(current)
+            except Exception:
+                pass
+        payload["state"] = "failed"
+        payload["updated_at"] = now_utc().isoformat().replace("+00:00", "Z")
+        payload["failure_reason"] = normalize(reason)
+        self._write_json_atomic(context_path, payload)
+        if detail:
+            self._write_text_atomic(
+                target / "failure-reason.txt",
+                f"{now_utc().isoformat().replace('+00:00', 'Z')} {normalize(reason)}\n{detail}\n",
+            )
+        log.warning("Quarantined pending run run_id=%s reason=%s", run_id, normalize(reason))
 
     def mark_sent(self, run_id: str) -> None:
         source = self._run_dir(run_id)
@@ -1497,13 +2010,16 @@ def _ingest_metrics_http(
     values: dict[str, float],
     *,
     source: str = "agent-wifi-sampler",
+    endpoint: str = "",
+    ingest_token: str = "",
+    timeout_s: int = 3,
 ) -> None:
     if not values:
         return
     if not parse_bool(os.environ.get("ENABLE_HTTP_SAMPLE_INGEST"), True):
         return
 
-    url = normalize(os.environ.get("FLEET_METRICS_INGEST_URL"))
+    url = normalize(endpoint) or normalize(os.environ.get("FLEET_METRICS_INGEST_URL"))
     if not url:
         host = normalize(os.environ.get("FLEET_MANAGER_HOST"))
         if not host:
@@ -1520,25 +2036,39 @@ def _ingest_metrics_http(
     req = urllib.request.Request(url, data=body, method="POST")
     req.add_header("Content-Type", "application/json")
 
-    token = normalize(os.environ.get("INGEST_API_TOKEN"))
+    token = normalize(ingest_token) or normalize(os.environ.get("INGEST_API_TOKEN"))
     if token:
         req.add_header("x-ingest-token", token)
 
     try:
-        with urllib.request.urlopen(req, timeout=3) as resp:
+        with urllib.request.urlopen(req, timeout=max(1, int(timeout_s))) as resp:
             if int(getattr(resp, "status", 200)) >= 300:
                 log.debug("metrics ingest returned status=%s", getattr(resp, "status", "unknown"))
     except Exception:
         log.debug("metrics ingest failed", exc_info=True)
 
 
-def _post_json(url: str, payload: dict[str, Any], *, timeout: int = 15) -> dict[str, Any]:
+def _post_json(
+    url: str,
+    payload: dict[str, Any],
+    *,
+    timeout: int = 15,
+    token: str = "",
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
     body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST")
     req.add_header("Content-Type", "application/json")
-    token = normalize(os.environ.get("INGEST_API_TOKEN"))
-    if token:
-        req.add_header("x-ingest-token", token)
+    auth = normalize(token) or normalize(os.environ.get("INGEST_API_TOKEN"))
+    if auth:
+        req.add_header("x-ingest-token", auth)
+    if headers:
+        for key, value in headers.items():
+            k = normalize(key)
+            v = normalize(value)
+            if not k or not v:
+                continue
+            req.add_header(k, v)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         raw = resp.read().decode("utf-8", errors="replace")
         if not raw.strip():
@@ -1548,23 +2078,28 @@ def _post_json(url: str, payload: dict[str, Any], *, timeout: int = 15) -> dict[
 
 
 def _artifact_upload_target(value: str) -> str:
-    target = normalize(value).lower()
+    target = _normalize_sink_name(value)
     if not target:
         return "elabftw"
-    if target in {"none", "disabled", "off"}:
+    if target == "none":
         return "none"
+    if target == "fleet_http":
+        return "fleet_http"
+    if target == "elabftw":
+        return "elabftw"
     return target
 
 
-def _artifact_upload_endpoint_and_limit() -> tuple[str, int] | None:
-    if not parse_bool(os.environ.get("ENABLE_ELAB_ARTIFACT_UPLOAD"), True):
+def _artifact_upload_endpoint_and_limit(override_env: dict[str, str] | None = None) -> tuple[str, int] | None:
+    env = override_env or {}
+    if not parse_bool(env.get("ENABLE_ELAB_ARTIFACT_UPLOAD") or os.environ.get("ENABLE_ELAB_ARTIFACT_UPLOAD"), True):
         return None
-    host = normalize(os.environ.get("FLEET_MANAGER_HOST"))
+    host = normalize(env.get("FLEET_MANAGER_HOST") or os.environ.get("FLEET_MANAGER_HOST"))
     if not host:
         return None
-    port = parse_int(os.environ.get("METRICS_PORT"), 9108)
-    endpoint = normalize(os.environ.get("FLEET_ARTIFACT_INGEST_URL")) or f"http://{host}:{max(1, port)}/ingest/v1/artifacts"
-    max_bytes = max(1024, parse_int(os.environ.get("ARTIFACT_UPLOAD_MAX_BYTES"), 20 * 1024 * 1024))
+    port = parse_int(env.get("METRICS_PORT") or os.environ.get("METRICS_PORT"), 9108)
+    endpoint = normalize(env.get("FLEET_ARTIFACT_INGEST_URL") or os.environ.get("FLEET_ARTIFACT_INGEST_URL")) or f"http://{host}:{max(1, port)}/ingest/v1/artifacts"
+    max_bytes = max(1024, parse_int(env.get("ARTIFACT_UPLOAD_MAX_BYTES") or os.environ.get("ARTIFACT_UPLOAD_MAX_BYTES"), 20 * 1024 * 1024))
     return endpoint, max_bytes
 
 
@@ -1579,6 +2114,7 @@ def _upload_spool_artifact_to_elab(
     endpoint: str,
     max_bytes: int,
     timeout_s: int,
+    ingest_token: str = "",
 ) -> str:
     if not normalize(artifact.uri).startswith("spool://"):
         return "skipped"
@@ -1613,7 +2149,12 @@ def _upload_spool_artifact_to_elab(
             "comment": f"fleet-v3 run={run_id} agent={agent_id} artifact={normalize(artifact.name)}",
             "content_b64": base64.b64encode(raw).decode("ascii"),
         }
-        response = _post_json(endpoint, payload, timeout=max(2, int(timeout_s)))
+        response = _post_json(
+            endpoint,
+            payload,
+            timeout=max(2, int(timeout_s)),
+            token=normalize(ingest_token),
+        )
         if not response.get("ok"):
             log.warning("artifact upload rejected run_id=%s name=%s response=%s", run_id, artifact.name, response)
             return "failed"
@@ -1646,7 +2187,7 @@ def opportunistic_upload_artifacts_to_elab(
 
     if not enabled or not artifacts:
         return (0, 0)
-    if _artifact_upload_target(target) != "elabftw":
+    if _artifact_upload_target(target) not in {"elabftw", "fleet_http"}:
         return (0, 0)
     experiment_numeric_id = parse_experiment_numeric_id(experiment_id)
     if experiment_numeric_id is None:
@@ -1662,6 +2203,7 @@ def opportunistic_upload_artifacts_to_elab(
 
     endpoint, max_bytes = config
     timeout_s = max(2, parse_int(os.environ.get("ARTIFACT_UPLOAD_DURING_MEASURE_TIMEOUT_S"), 3))
+    ingest_token = normalize(os.environ.get("INGEST_API_TOKEN"))
     uploaded = 0
     failed = 0
 
@@ -1676,6 +2218,7 @@ def opportunistic_upload_artifacts_to_elab(
             endpoint=endpoint,
             max_bytes=max_bytes,
             timeout_s=timeout_s,
+            ingest_token=ingest_token,
         )
         if status == "uploaded":
             uploaded += 1
@@ -1710,6 +2253,7 @@ def upload_report_artifacts_to_elab(
     failed = 0
     agent_id = normalize(report.agent_id) or normalize(fallback_agent_id)
     timeout_s = max(10, min(60, parse_int(os.environ.get("ARTIFACT_UPLOAD_TIMEOUT_S"), 30)))
+    ingest_token = normalize(os.environ.get("INGEST_API_TOKEN"))
 
     for artifact in report.artifacts:
         status = _upload_spool_artifact_to_elab(
@@ -1722,6 +2266,7 @@ def upload_report_artifacts_to_elab(
             endpoint=endpoint,
             max_bytes=max_bytes,
             timeout_s=timeout_s,
+            ingest_token=ingest_token,
         )
         if status == "uploaded":
             uploaded += 1
@@ -1729,6 +2274,399 @@ def upload_report_artifacts_to_elab(
             failed += 1
 
     return (uploaded, failed)
+
+
+def _resolve_command_sink_sets(cmd_env: dict[str, str]) -> dict[str, list[str]]:
+    shared_fallback = _resolve_sink_list(
+        cmd_env.get("DATA_SINKS"),
+        os.environ.get("DATA_SINKS") or os.environ.get("DEFAULT_DATA_SINKS"),
+    )
+    fallback_csv = ",".join(shared_fallback)
+    metrics = _resolve_sink_list(
+        cmd_env.get("METRICS_SINKS"),
+        os.environ.get("METRICS_SINKS") or os.environ.get("DEFAULT_METRICS_SINKS") or fallback_csv,
+    )
+    events = _resolve_sink_list(
+        cmd_env.get("EVENT_SINKS"),
+        os.environ.get("EVENT_SINKS") or os.environ.get("DEFAULT_EVENT_SINKS") or fallback_csv,
+    )
+    artifacts = _resolve_sink_list(
+        cmd_env.get("ARTIFACT_SINKS"),
+        os.environ.get("ARTIFACT_SINKS") or os.environ.get("DEFAULT_ARTIFACT_SINKS") or fallback_csv,
+    )
+    return {
+        "metrics": metrics,
+        "events": events,
+        "artifacts": artifacts,
+    }
+
+
+def _resolve_sink_config(cmd_env: dict[str, str], data_root: Path) -> dict[str, Any]:
+    def pick(name: str, *, fallback_env: str = "") -> str:
+        if normalize(cmd_env.get(name)):
+            return normalize(cmd_env.get(name))
+        if fallback_env and normalize(os.environ.get(fallback_env)):
+            return normalize(os.environ.get(fallback_env))
+        return normalize(os.environ.get(name))
+
+    sqlite_default = str(data_root / "sinks" / "agent_sink.db")
+    return {
+        "webhook_url": pick("WEBHOOK_URL", fallback_env="DATA_WEBHOOK_URL"),
+        "webhook_token": pick("WEBHOOK_TOKEN"),
+        "webhook_timeout_s": max(2, parse_int(pick("WEBHOOK_TIMEOUT_S"), 10)),
+        "webhook_artifact_inline_max_bytes": max(
+            0,
+            parse_int(pick("WEBHOOK_ARTIFACT_INLINE_MAX_BYTES"), 0),
+        ),
+        "ingest_token": pick("INGEST_API_TOKEN"),
+        "fleet_metrics_ingest_url": pick("FLEET_METRICS_INGEST_URL"),
+        "fleet_artifact_ingest_url": pick("FLEET_ARTIFACT_INGEST_URL"),
+        "sqlite_path": pick("SQLITE_SINK_PATH") or sqlite_default,
+        "artifact_upload_timeout_s": max(2, parse_int(pick("ARTIFACT_UPLOAD_TIMEOUT_S"), 15)),
+    }
+
+
+def _numeric_metrics_from_map(metrics: dict[str, str]) -> dict[str, float]:
+    numeric: dict[str, float] = {}
+    for key, value in metrics.items():
+        metric_key = normalize(key)
+        if not metric_key:
+            continue
+        parsed = _safe_float(value)
+        if parsed is None:
+            continue
+        numeric[metric_key] = float(parsed)
+    return numeric
+
+
+def _build_artifact_payload_rows(
+    run_id: str,
+    command_id: str,
+    artifacts: list[fleet_gateway_v2_pb2.ArtifactRef],
+    store: RunStore,
+    *,
+    inline_max_bytes: int = 0,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for artifact in artifacts:
+        row: dict[str, Any] = {
+            "command_id": normalize(command_id),
+            "name": normalize(artifact.name),
+            "uri": normalize(artifact.uri),
+            "size_bytes": int(artifact.size_bytes or 0),
+            "sha256": normalize(artifact.sha256),
+        }
+        path = store.artifact_path(run_id, artifact.name)
+        if path is not None:
+            row["local_path"] = str(path)
+            if inline_max_bytes > 0:
+                try:
+                    size_bytes = int(path.stat().st_size)
+                    if size_bytes <= inline_max_bytes:
+                        row["content_b64"] = base64.b64encode(path.read_bytes()).decode("ascii")
+                except Exception:
+                    pass
+        rows.append(row)
+    return rows
+
+
+def _write_command_payload_to_sqlite(
+    sqlite_path: str,
+    *,
+    envelope: dict[str, Any],
+    metric_values: dict[str, float],
+    artifact_rows: list[dict[str, Any]],
+) -> None:
+    db_text = normalize(sqlite_path)
+    if not db_text:
+        return
+    db_path = Path(db_text)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path), timeout=5)
+    try:
+        with conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS command_events ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "recorded_at TEXT NOT NULL,"
+                "run_id TEXT NOT NULL,"
+                "experiment_id TEXT,"
+                "policy_id TEXT,"
+                "agent_id TEXT,"
+                "group_id TEXT,"
+                "command_id TEXT,"
+                "command_type TEXT,"
+                "exit_code INTEGER,"
+                "duration_ms INTEGER,"
+                "message TEXT,"
+                "payload_json TEXT NOT NULL"
+                ")"
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS command_metrics ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "recorded_at TEXT NOT NULL,"
+                "run_id TEXT NOT NULL,"
+                "command_id TEXT NOT NULL,"
+                "metric TEXT NOT NULL,"
+                "value REAL NOT NULL"
+                ")"
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS command_artifacts ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "recorded_at TEXT NOT NULL,"
+                "run_id TEXT NOT NULL,"
+                "command_id TEXT NOT NULL,"
+                "name TEXT NOT NULL,"
+                "uri TEXT,"
+                "size_bytes INTEGER,"
+                "sha256 TEXT,"
+                "local_path TEXT"
+                ")"
+            )
+
+            recorded_at = normalize(envelope.get("timestamp"))
+            run_id = normalize(envelope.get("run_id"))
+            command_id = normalize(envelope.get("command_id"))
+
+            conn.execute(
+                "INSERT INTO command_events "
+                "(recorded_at, run_id, experiment_id, policy_id, agent_id, group_id, command_id, command_type, exit_code, duration_ms, message, payload_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    recorded_at,
+                    run_id,
+                    normalize(envelope.get("experiment_id")),
+                    normalize(envelope.get("policy_id")),
+                    normalize(envelope.get("agent_id")),
+                    normalize(envelope.get("group_id")),
+                    command_id,
+                    normalize(envelope.get("command_type")),
+                    int(envelope.get("exit_code", 0) or 0),
+                    max(0, int(envelope.get("duration_ms", 0) or 0)),
+                    normalize(envelope.get("message")),
+                    json.dumps(envelope, separators=(",", ":"), ensure_ascii=False),
+                ),
+            )
+            for key, value in metric_values.items():
+                conn.execute(
+                    "INSERT INTO command_metrics (recorded_at, run_id, command_id, metric, value) VALUES (?, ?, ?, ?, ?)",
+                    (recorded_at, run_id, command_id, normalize(key), float(value)),
+                )
+            for row in artifact_rows:
+                conn.execute(
+                    "INSERT INTO command_artifacts "
+                    "(recorded_at, run_id, command_id, name, uri, size_bytes, sha256, local_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        recorded_at,
+                        run_id,
+                        command_id,
+                        normalize(row.get("name")),
+                        normalize(row.get("uri")),
+                        max(0, int(row.get("size_bytes", 0) or 0)),
+                        normalize(row.get("sha256")),
+                        normalize(row.get("local_path")),
+                    ),
+                )
+    finally:
+        conn.close()
+
+
+def _post_webhook_payload(
+    webhook_url: str,
+    payload: dict[str, Any],
+    *,
+    timeout_s: int,
+    webhook_token: str = "",
+) -> None:
+    url = normalize(webhook_url)
+    if not url:
+        return
+    body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    token = normalize(webhook_token)
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("x-webhook-token", token)
+    with urllib.request.urlopen(req, timeout=max(2, int(timeout_s))) as resp:
+        if int(getattr(resp, "status", 200)) >= 300:
+            raise RuntimeError(f"webhook status={getattr(resp, 'status', 'unknown')}")
+
+
+def _upload_artifacts_for_command_sink(
+    *,
+    run_id: str,
+    experiment_id: str,
+    agent_id: str,
+    artifacts: list[fleet_gateway_v2_pb2.ArtifactRef],
+    store: RunStore,
+    override_env: dict[str, str],
+    upload_phase: str,
+    ingest_token: str,
+    timeout_s: int,
+) -> tuple[int, int]:
+    if not artifacts:
+        return (0, 0)
+    experiment_numeric_id = parse_experiment_numeric_id(experiment_id)
+    if experiment_numeric_id is None:
+        return (0, 0)
+    config = _artifact_upload_endpoint_and_limit(override_env=override_env)
+    if config is None:
+        return (0, 0)
+    endpoint, max_bytes = config
+    uploaded = 0
+    failed = 0
+    for artifact in artifacts:
+        status = _upload_spool_artifact_to_elab(
+            artifact,
+            store,
+            run_id=run_id,
+            experiment_numeric_id=experiment_numeric_id,
+            agent_id=agent_id,
+            upload_phase=upload_phase,
+            endpoint=endpoint,
+            max_bytes=max_bytes,
+            timeout_s=timeout_s,
+            ingest_token=ingest_token,
+        )
+        if status == "uploaded":
+            uploaded += 1
+        elif status == "failed":
+            failed += 1
+    return (uploaded, failed)
+
+
+def publish_command_data_to_sinks(
+    *,
+    cmd_env: dict[str, str],
+    run_id: str,
+    experiment_id: str,
+    policy_id: str,
+    group_id: str,
+    command_id: str,
+    command_type: str,
+    agent_id: str,
+    exit_code: int,
+    duration_ms: int,
+    message: str,
+    event_metrics: dict[str, str],
+    command_artifacts: list[fleet_gateway_v2_pb2.ArtifactRef],
+    store: RunStore,
+    data_root: Path,
+) -> dict[str, int]:
+    sink_sets = _resolve_command_sink_sets(cmd_env)
+    requested = sink_sets["metrics"] or sink_sets["events"] or sink_sets["artifacts"]
+    if not requested:
+        return {"metrics_sent": 0, "events_sent": 0, "artifacts_uploaded": 0, "artifacts_upload_failed": 0}
+
+    sink_cfg = _resolve_sink_config(cmd_env, data_root)
+    metrics_numeric = _numeric_metrics_from_map(event_metrics)
+    metrics_numeric["command_exit_code"] = float(int(exit_code))
+    metrics_numeric["command_duration_ms"] = float(max(0, int(duration_ms)))
+    artifact_rows = _build_artifact_payload_rows(
+        run_id,
+        command_id,
+        command_artifacts,
+        store,
+        inline_max_bytes=max(0, int(sink_cfg["webhook_artifact_inline_max_bytes"])),
+    )
+
+    envelope = {
+        "schema": "fleet.v2.command_result.v1",
+        "timestamp": now_utc().isoformat().replace("+00:00", "Z"),
+        "run_id": normalize(run_id),
+        "experiment_id": normalize(experiment_id),
+        "policy_id": normalize(policy_id),
+        "agent_id": normalize(agent_id),
+        "group_id": normalize(group_id),
+        "command_id": normalize(command_id),
+        "command_type": normalize(command_type),
+        "exit_code": int(exit_code),
+        "duration_ms": max(0, int(duration_ms)),
+        "message": normalize(message),
+        "metrics": {normalize(k): normalize(v) for k, v in event_metrics.items() if normalize(k)},
+        "artifacts": artifact_rows,
+    }
+
+    stats = {
+        "metrics_sent": 0,
+        "events_sent": 0,
+        "artifacts_uploaded": 0,
+        "artifacts_upload_failed": 0,
+    }
+
+    if "fleet_http" in sink_sets["metrics"] and metrics_numeric:
+        try:
+            _ingest_metrics_http(
+                agent_id,
+                metrics_numeric,
+                source=f"agent-command:{normalize(command_type).lower()}",
+                endpoint=normalize(sink_cfg["fleet_metrics_ingest_url"]),
+                ingest_token=normalize(sink_cfg["ingest_token"]),
+                timeout_s=3,
+            )
+            stats["metrics_sent"] += 1
+        except Exception:
+            log.debug("Command metrics ingest failed run_id=%s command_id=%s", run_id, command_id, exc_info=True)
+
+    needs_webhook = any("webhook" in sink_sets[k] for k in ("metrics", "events", "artifacts"))
+    if needs_webhook and normalize(sink_cfg["webhook_url"]):
+        try:
+            _post_webhook_payload(
+                normalize(sink_cfg["webhook_url"]),
+                envelope,
+                timeout_s=max(2, int(sink_cfg["webhook_timeout_s"])),
+                webhook_token=normalize(sink_cfg["webhook_token"]),
+            )
+            if "webhook" in sink_sets["metrics"]:
+                stats["metrics_sent"] += 1
+            if "webhook" in sink_sets["events"]:
+                stats["events_sent"] += 1
+            if "webhook" in sink_sets["artifacts"] and artifact_rows:
+                stats["artifacts_uploaded"] += len(artifact_rows)
+        except Exception:
+            log.debug("Webhook sink failed run_id=%s command_id=%s", run_id, command_id, exc_info=True)
+
+    needs_sqlite = any("sqlite" in sink_sets[k] for k in ("metrics", "events", "artifacts"))
+    if needs_sqlite and normalize(sink_cfg["sqlite_path"]):
+        try:
+            sqlite_metrics = metrics_numeric if "sqlite" in sink_sets["metrics"] else {}
+            sqlite_artifacts = artifact_rows if "sqlite" in sink_sets["artifacts"] else []
+            sqlite_envelope = envelope if "sqlite" in sink_sets["events"] else {**envelope, "metrics": {}, "artifacts": []}
+            _write_command_payload_to_sqlite(
+                normalize(sink_cfg["sqlite_path"]),
+                envelope=sqlite_envelope,
+                metric_values=sqlite_metrics,
+                artifact_rows=sqlite_artifacts,
+            )
+            if sqlite_metrics:
+                stats["metrics_sent"] += 1
+            if "sqlite" in sink_sets["events"]:
+                stats["events_sent"] += 1
+            if sqlite_artifacts:
+                stats["artifacts_uploaded"] += len(sqlite_artifacts)
+        except Exception:
+            log.debug("SQLite sink failed run_id=%s command_id=%s", run_id, command_id, exc_info=True)
+
+    artifact_upload_sinks = {sink for sink in sink_sets["artifacts"] if sink in {"elabftw", "fleet_http"}}
+    if artifact_upload_sinks and command_artifacts:
+        uploaded, failed = _upload_artifacts_for_command_sink(
+            run_id=run_id,
+            experiment_id=experiment_id,
+            agent_id=agent_id,
+            artifacts=command_artifacts,
+            store=store,
+            override_env=cmd_env,
+            upload_phase="command_sink",
+            ingest_token=normalize(sink_cfg["ingest_token"]),
+            timeout_s=max(2, int(sink_cfg["artifact_upload_timeout_s"])),
+        )
+        stats["artifacts_uploaded"] += uploaded
+        stats["artifacts_upload_failed"] += failed
+
+    return stats
 
 
 def _merge_text_artifacts_enabled() -> bool:
@@ -1796,9 +2734,10 @@ def merge_text_artifacts_for_run(
     stamp = int(time.time() * 1000)
     bundle_name = f"wifi-ble-csi-artifacts-bundle-{stamp}.tar.gz"
     bundle_path = artifacts_dir / bundle_name
+    bundle_tmp_path = artifacts_dir / f"{bundle_name}.tmp"
 
     try:
-        with tarfile.open(bundle_path, mode="w:gz") as archive:
+        with tarfile.open(bundle_tmp_path, mode="w:gz") as archive:
             for _, path in merge_candidates:
                 archive.add(path, arcname=f"entries/{path.name}", recursive=False)
             manifest_bytes = json.dumps(bundle_manifest, indent=2, sort_keys=True).encode("utf-8")
@@ -1806,9 +2745,12 @@ def merge_text_artifacts_for_run(
             info.size = len(manifest_bytes)
             info.mtime = int(time.time())
             archive.addfile(info, io.BytesIO(manifest_bytes))
+        bundle_tmp_path.replace(bundle_path)
     except Exception:
         log.exception("Failed to create merged artifact bundle for run_id=%s", run_id)
         try:
+            if bundle_tmp_path.exists():
+                bundle_tmp_path.unlink()
             if bundle_path.exists():
                 bundle_path.unlink()
         except Exception:
@@ -2140,9 +3082,38 @@ def collect_csi_capture(
         "csi_capture_evidence_ok": "0",
         "csi_collector_sudo_noninteractive": "0",
         "csi_collector_sudo_prompt": "0",
+        "csi_cleanup_kills": "0",
     }
     artifacts: list[fleet_gateway_v2_pb2.ArtifactRef] = []
     cfg = {normalize(k): normalize(v) for k, v in (env or {}).items() if normalize(k)}
+    csi_hard_timeout_s = max(0, parse_int(cfg.get("CSI_HARD_TIMEOUT_S") or os.environ.get("CSI_HARD_TIMEOUT_S"), 0))
+    csi_cleanup_before_capture = parse_bool(
+        cfg.get("CSI_CLEANUP_BEFORE_CAPTURE") or os.environ.get("CSI_CLEANUP_BEFORE_CAPTURE"),
+        True,
+    )
+    csi_cleanup_after_capture = parse_bool(
+        cfg.get("CSI_CLEANUP_AFTER_CAPTURE") or os.environ.get("CSI_CLEANUP_AFTER_CAPTURE"),
+        True,
+    )
+    csi_kill_patterns = normalize(cfg.get("CSI_KILL_PATTERNS") or os.environ.get("CSI_KILL_PATTERNS"))
+    csi_traffic_enable = parse_bool(
+        cfg.get("CSI_TRAFFIC_ENABLE") or os.environ.get("CSI_TRAFFIC_ENABLE"),
+        False,
+    )
+    csi_traffic_iface = normalize(
+        cfg.get("CSI_TRAFFIC_IFACE")
+        or os.environ.get("CSI_TRAFFIC_IFACE")
+        or os.environ.get("WIFI_SCAN_IFACE")
+        or os.environ.get("CONTROL_PLANE_IFACE")
+        or "wlan0"
+    )
+    csi_traffic_interval_ms = max(
+        20,
+        parse_int(
+            cfg.get("CSI_TRAFFIC_INTERVAL_MS") or os.environ.get("CSI_TRAFFIC_INTERVAL_MS"),
+            100,
+        ),
+    )
 
     if parse_bool(cfg.get("DISABLE_CSI_CAPTURE") or os.environ.get("DISABLE_CSI_CAPTURE"), False):
         metrics["csi_capture_disabled"] = "1"
@@ -2292,24 +3263,118 @@ def collect_csi_capture(
         max_files = max(1, parse_int(cfg.get("CSI_OUTPUT_MAX_FILES") or os.environ.get("CSI_OUTPUT_MAX_FILES"), 5))
         return results[:max_files]
 
+    def _collector_tokens(cmdline_text: str, argv_items: list[str]) -> list[str]:
+        clean_argv = [normalize(a) for a in (argv_items or []) if normalize(a)]
+        if clean_argv:
+            return clean_argv
+        try:
+            return [normalize(a) for a in shlex.split(normalize(cmdline_text)) if normalize(a)]
+        except Exception:
+            token = normalize(cmdline_text)
+            return [token] if token else []
+
+    def _looks_like_feitcsi(tokens: list[str]) -> bool:
+        for token in tokens:
+            base = os.path.basename(token).lower()
+            if base == "feitcsi":
+                return True
+        return False
+
+    def _has_timeout_wrapper(tokens: list[str]) -> bool:
+        for token in tokens:
+            base = os.path.basename(token).lower()
+            if base == "timeout":
+                return True
+        return False
+
     if collector_cmdline or collector_argv:
         metrics["csi_collector_configured"] = "1"
         if force_noninteractive_sudo:
             metrics["csi_collector_sudo_noninteractive"] = "1"
+        traffic_proc: subprocess.Popen[str] | None = None
+        traffic_target = normalize(cfg.get("CSI_TRAFFIC_TARGET") or os.environ.get("CSI_TRAFFIC_TARGET"))
+        if csi_traffic_enable and not traffic_target:
+            traffic_target = default_ipv4_gateway(iface=csi_traffic_iface)
+        if csi_traffic_enable:
+            metrics["csi_traffic_enabled"] = "1"
+            metrics["csi_traffic_iface"] = csi_traffic_iface
+            if traffic_target:
+                metrics["csi_traffic_target"] = traffic_target
+            else:
+                metrics["csi_traffic_target"] = "unresolved"
+        effective_timeout_ms = max(1, int(timeout_ms))
+        if csi_hard_timeout_s > 0:
+            effective_timeout_ms = min(effective_timeout_ms, csi_hard_timeout_s * 1000)
+            metrics["csi_hard_timeout_s"] = str(csi_hard_timeout_s)
+            metrics["csi_timeout_effective_ms"] = str(effective_timeout_ms)
+        collector_timeout_ms = effective_timeout_ms
+        collector_cmdline_effective = collector_cmdline
+        collector_argv_effective = list(collector_argv)
+        collector_tokens = _collector_tokens(collector_cmdline_effective, collector_argv_effective)
+        if _looks_like_feitcsi(collector_tokens) and not _has_timeout_wrapper(collector_tokens):
+            timeout_s = max(1, int((effective_timeout_ms + 999) / 1000))
+            timeout_prefix = ["timeout", "-s", "INT", "-k", "2s", f"{timeout_s}s"]
+            if collector_argv_effective:
+                collector_argv_effective = [*timeout_prefix, *collector_argv_effective]
+            else:
+                collector_cmdline_effective = (
+                    f"{' '.join(timeout_prefix)} {collector_cmdline_effective}".strip()
+                )
+            collector_timeout_ms = effective_timeout_ms + 5000
+            metrics["csi_collector_wrapped_timeout"] = "1"
+        if csi_cleanup_before_capture:
+            killed_pre, _ = cleanup_csi_collectors("pre-capture", patterns_csv=csi_kill_patterns)
+            if killed_pre > 0:
+                metrics["csi_cleanup_kills"] = str(max(0, parse_int(metrics.get("csi_cleanup_kills"), 0)) + killed_pre)
+        if csi_traffic_enable and traffic_target:
+            try:
+                interval_s = max(0.02, float(csi_traffic_interval_ms) / 1000.0)
+                ping_cmd = [
+                    "ping",
+                    "-I",
+                    csi_traffic_iface,
+                    "-i",
+                    f"{interval_s:.2f}",
+                    traffic_target,
+                ]
+                traffic_proc = subprocess.Popen(
+                    ping_cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                )
+                metrics["csi_traffic_started"] = "1"
+            except Exception:
+                metrics["csi_traffic_started"] = "0"
+                log.debug("Failed to start CSI traffic trigger", exc_info=True)
         exit_code, duration_ms, short, full = run_command_capture(
-            collector_cmdline,
-            collector_argv,
+            collector_cmdline_effective,
+            collector_argv_effective,
             cfg,
-            timeout_ms,
+            collector_timeout_ms,
             True,
             force_noninteractive_sudo=force_noninteractive_sudo,
         )
+        if traffic_proc is not None:
+            try:
+                traffic_proc.terminate()
+                traffic_proc.wait(timeout=2)
+            except Exception:
+                try:
+                    traffic_proc.kill()
+                except Exception:
+                    pass
+            metrics["csi_traffic_started"] = "1"
         metrics["csi_collector_exit_code"] = str(int(exit_code))
         metrics["csi_capture_ok"] = "1" if int(exit_code) == 0 else "0"
         metrics["csi_capture_timeout"] = "1" if int(exit_code) == 124 else "0"
         metrics["csi_supported"] = "1" if int(exit_code) != 127 else "0"
         if re.search(r"(a terminal is required|password is required|sudo: .*password)", full or "", flags=re.IGNORECASE):
             metrics["csi_collector_sudo_prompt"] = "1"
+        if csi_cleanup_after_capture:
+            killed_post, _ = cleanup_csi_collectors("post-capture", patterns_csv=csi_kill_patterns)
+            if killed_post > 0:
+                metrics["csi_cleanup_kills"] = str(max(0, parse_int(metrics.get("csi_cleanup_kills"), 0)) + killed_post)
 
         frames_found = parse_frames_from_text(full)
         imported_files = 0
@@ -2468,12 +3533,52 @@ def main() -> None:
     restart_control_plane_wait_s = max(0, parse_int(os.environ.get("CONTROL_PLANE_RESTART_WAIT_S"), 45))
     restart_control_plane_cmd = normalize(os.environ.get("CONTROL_PLANE_RESTART_CMD"))
     allow_wifi_control_plane_restart = parse_bool(os.environ.get("ALLOW_WIFI_CONTROL_PLANE_RESTART"), False)
+    single_radio_mode = parse_bool(os.environ.get("SINGLE_RADIO_MODE"), False)
+    single_radio_wifi_profile = normalize(os.environ.get("SINGLE_RADIO_WIFI_PROFILE") or "tplink24")
+    single_radio_recovery_retries = max(1, parse_int(os.environ.get("SINGLE_RADIO_RECOVERY_RETRIES"), 3))
+    single_radio_recovery_route_wait_s = max(
+        5,
+        parse_int(os.environ.get("SINGLE_RADIO_RECOVERY_ROUTE_WAIT_S"), restart_control_plane_wait_s),
+    )
+    single_radio_recovery_cmd = normalize(os.environ.get("SINGLE_RADIO_RECOVERY_CMD") or restart_control_plane_cmd)
+    single_radio_route_gate = parse_bool(os.environ.get("SINGLE_RADIO_ROUTE_GATE"), single_radio_mode)
+    single_radio_route_health_timeout_s = max(
+        1,
+        parse_int(os.environ.get("SINGLE_RADIO_ROUTE_HEALTH_TIMEOUT_S"), 5),
+    )
+    single_radio_reboot_on_recovery_fail = parse_bool(
+        os.environ.get("SINGLE_RADIO_REBOOT_ON_RECOVERY_FAIL"),
+        False,
+    )
+    single_radio_csi_kill_patterns = normalize(os.environ.get("CSI_KILL_PATTERNS"))
+    if single_radio_mode:
+        separate_measure_and_report = True
+        restart_control_plane_before_send = True
 
     fm_target_for_route = os.environ.get("FLEET_MANAGER_ROUTE_TARGET", fleet_host)
 
     store = RunStore(data_root, sent_retention_days=sent_retention_days)
     channel = grpc.insecure_channel(target)
     stub = fleet_gateway_v2_pb2_grpc.FleetManagerStub(channel)
+
+    def flush_pending_reports_guarded(reason: str) -> set[str]:
+        if single_radio_route_gate:
+            ready, route_iface = wait_for_route_ready(
+                fm_target_for_route,
+                expected_iface=restart_control_plane_iface if restart_control_plane_iface else "",
+                timeout_s=single_radio_route_health_timeout_s,
+                require_ipv4=True,
+            )
+            if not ready:
+                log.warning(
+                    "Skip flush_pending_reports (%s): route not ready target=%s expected_iface=%s last_iface=%s",
+                    reason,
+                    normalize(fm_target_for_route),
+                    normalize(restart_control_plane_iface),
+                    normalize(route_iface),
+                )
+                return set()
+        return flush_pending_reports(stub, agent_id, store)
 
     hello = stub.Hello(
         fleet_gateway_v2_pb2.HelloRequest(
@@ -2497,7 +3602,7 @@ def main() -> None:
     cycles = 0
 
     # Try to deliver any runs persisted from previous process/network interruptions.
-    flush_pending_reports(stub, agent_id, store)
+    flush_pending_reports_guarded("startup")
 
     while max_cycles <= 0 or cycles < max_cycles:
         cycles += 1
@@ -2508,7 +3613,7 @@ def main() -> None:
         )
         if assignment.status != fleet_gateway_v2_pb2.GetAssignmentResponse.ASSIGNED:
             log.info("No assignment")
-            flush_pending_reports(stub, agent_id, store)
+            flush_pending_reports_guarded("no-assignment")
             if reached_max_cycles(cycles, max_cycles):
                 break
             time.sleep(poll)
@@ -2531,14 +3636,14 @@ def main() -> None:
         )
         if policy_resp.status == fleet_gateway_v2_pb2.GetPolicyResponse.NOT_MODIFIED:
             log.info("Policy not modified: %s", last_policy_id)
-            flush_pending_reports(stub, agent_id, store)
+            flush_pending_reports_guarded("policy-not-modified")
             if reached_max_cycles(cycles, max_cycles):
                 break
             time.sleep(poll)
             continue
         if policy_resp.status != fleet_gateway_v2_pb2.GetPolicyResponse.OK:
             log.info("No policy available")
-            flush_pending_reports(stub, agent_id, store)
+            flush_pending_reports_guarded("policy-unavailable")
             if reached_max_cycles(cycles, max_cycles):
                 break
             time.sleep(poll)
@@ -2566,7 +3671,7 @@ def main() -> None:
         )
         if prep.status != fleet_gateway_v2_pb2.AckPreparedResponse.ACCEPTED:
             log.warning("AckPrepared rejected: %s", prep.reason)
-            flush_pending_reports(stub, agent_id, store)
+            flush_pending_reports_guarded("ack-prepared-rejected")
             if reached_max_cycles(cycles, max_cycles):
                 break
             time.sleep(poll)
@@ -2611,6 +3716,10 @@ def main() -> None:
         csi_frames_total = 0
         artifacts_uploaded_during_measure = 0
         artifacts_upload_failed_during_measure = 0
+        command_sink_metrics_sent = 0
+        command_sink_events_sent = 0
+        command_sink_artifacts_uploaded = 0
+        command_sink_artifacts_upload_failed = 0
         run_storage_pressure_hits = 0
         latest_observed_metrics: dict[str, str] = {}
         for group in policy.command_groups:
@@ -2836,6 +3945,28 @@ def main() -> None:
                     artifacts_uploaded_during_measure += uploaded_now
                     artifacts_upload_failed_during_measure += failed_now
 
+                sink_publish_stats = publish_command_data_to_sinks(
+                    cmd_env=cmd_env,
+                    run_id=run_id,
+                    experiment_id=policy.experiment_id,
+                    policy_id=policy.policy_id,
+                    group_id=normalize(group.id),
+                    command_id=cmd_id,
+                    command_type=cmd_type_name,
+                    agent_id=agent_id,
+                    exit_code=exit_code,
+                    duration_ms=max(0, int(duration_ms)),
+                    message=message,
+                    event_metrics=event_metrics,
+                    command_artifacts=command_artifacts,
+                    store=store,
+                    data_root=data_root,
+                )
+                command_sink_metrics_sent += max(0, int(sink_publish_stats.get("metrics_sent", 0)))
+                command_sink_events_sent += max(0, int(sink_publish_stats.get("events_sent", 0)))
+                command_sink_artifacts_uploaded += max(0, int(sink_publish_stats.get("artifacts_uploaded", 0)))
+                command_sink_artifacts_upload_failed += max(0, int(sink_publish_stats.get("artifacts_upload_failed", 0)))
+
                 if exit_code != 0 and group.failure_mode == fleet_gateway_v2_pb2.FAIL_FAST:
                     break
 
@@ -2878,6 +4009,10 @@ def main() -> None:
                     "csi_frames_total": csi_frames_total,
                     "artifacts_uploaded_during_measure": artifacts_uploaded_during_measure,
                     "artifacts_upload_failed_during_measure": artifacts_upload_failed_during_measure,
+                    "command_sink_metrics_sent": command_sink_metrics_sent,
+                    "command_sink_events_sent": command_sink_events_sent,
+                    "command_sink_artifacts_uploaded": command_sink_artifacts_uploaded,
+                    "command_sink_artifacts_upload_failed": command_sink_artifacts_upload_failed,
                     "merged_artifacts_count": merged_artifacts_count,
                     "run_storage_pressure_hits": run_storage_pressure_hits,
                     "latest_metrics": latest_observed_metrics,
@@ -2910,6 +4045,10 @@ def main() -> None:
             "artifacts_total": str(len(artifacts)),
             "artifacts_uploaded_during_measure": str(artifacts_uploaded_during_measure),
             "artifacts_upload_failed_during_measure": str(artifacts_upload_failed_during_measure),
+            "command_sink_metrics_sent": str(command_sink_metrics_sent),
+            "command_sink_events_sent": str(command_sink_events_sent),
+            "command_sink_artifacts_uploaded": str(command_sink_artifacts_uploaded),
+            "command_sink_artifacts_upload_failed": str(command_sink_artifacts_upload_failed),
             "merged_artifacts_count": str(merged_artifacts_count),
             "run_storage_pressure_hits": str(run_storage_pressure_hits),
             "wifi_ap_total": str(wifi_ap_total),
@@ -2918,6 +4057,8 @@ def main() -> None:
             "spool_state": "pending_upload",
             "measure_report_separated": "1" if separate_measure_and_report else "0",
             "reconnect_before_report": "1" if restart_control_plane_before_send else "0",
+            "single_radio_mode": "1" if single_radio_mode else "0",
+            "single_radio_route_gate": "1" if single_radio_route_gate else "0",
             "fleet_interface_version": "v3",
         }
         for key in (
@@ -2966,15 +4107,28 @@ def main() -> None:
         store.persist_report(report)
         last_policy_id = policy.policy_id
 
+        reconnect_ok = True
         if restart_control_plane_before_send:
-            reconnect_ok = restart_control_plane_before_report(
-                restart_control_plane_iface,
-                fm_target_for_route,
-                down_s=restart_control_plane_down_s,
-                wait_s=restart_control_plane_wait_s,
-                custom_cmd=restart_control_plane_cmd,
-                allow_wifi_restart=allow_wifi_control_plane_restart,
-            )
+            if single_radio_mode:
+                reconnect_ok = recover_single_radio_control_plane(
+                    restart_control_plane_iface,
+                    fm_target_for_route,
+                    wifi_profile=single_radio_wifi_profile,
+                    max_attempts=single_radio_recovery_retries,
+                    down_s=restart_control_plane_down_s,
+                    route_wait_s=single_radio_recovery_route_wait_s,
+                    custom_cmd=single_radio_recovery_cmd,
+                    csi_kill_patterns=single_radio_csi_kill_patterns,
+                )
+            else:
+                reconnect_ok = restart_control_plane_before_report(
+                    restart_control_plane_iface,
+                    fm_target_for_route,
+                    down_s=restart_control_plane_down_s,
+                    wait_s=restart_control_plane_wait_s,
+                    custom_cmd=restart_control_plane_cmd,
+                    allow_wifi_restart=allow_wifi_control_plane_restart,
+                )
             if reconnect_ok:
                 try:
                     channel.close()
@@ -2982,12 +4136,27 @@ def main() -> None:
                     pass
                 channel = grpc.insecure_channel(target)
                 stub = fleet_gateway_v2_pb2_grpc.FleetManagerStub(channel)
+            elif single_radio_mode and single_radio_reboot_on_recovery_fail:
+                reboot_msg = (
+                    f"single-radio recovery failed run_id={run_id} "
+                    f"iface={restart_control_plane_iface} target={normalize(fm_target_for_route)}"
+                )
+                if request_controlled_reboot(reboot_msg):
+                    # Give reboot command a small head-start and stop local loop.
+                    time.sleep(2)
+                    return
 
-        sent_ids = flush_pending_reports(stub, agent_id, store)
+        sent_ids = flush_pending_reports_guarded("post-run")
         if run_id in sent_ids:
             log.info("Run %s stored and reported", run_id)
         else:
-            log.warning("Run %s stored locally and queued for later upload", run_id)
+            if restart_control_plane_before_send and not reconnect_ok:
+                log.warning(
+                    "Run %s stored locally (reconnect failed) and queued for later upload",
+                    run_id,
+                )
+            else:
+                log.warning("Run %s stored locally and queued for later upload", run_id)
 
         if reached_max_cycles(cycles, max_cycles):
             break
