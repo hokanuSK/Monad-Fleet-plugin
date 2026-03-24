@@ -20,7 +20,7 @@ flowchart TB
 
     subgraph Runtime["Runtime Evidence Layer"]
         Smoke["scripts/smoke/* results"]
-        OpsJSON["output/ops/*.json fallback"]
+        OpsJSON["artifacts/output/ops/*.json fallback"]
         Notion["Notion Ops DB (runs/incidents/tasks/decisions)"]
     end
 

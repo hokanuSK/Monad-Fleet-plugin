@@ -2,7 +2,7 @@
 
 This folder contains Playwright-driven browser automations for the local FleetManager dev stack.
 
-Artifacts (screenshots, traces, extracted values) are written under `output/playwright/`.
+Artifacts (screenshots, traces, extracted values) are written under `artifacts/output/playwright/`.
 
 ## Prereqs
 
@@ -54,10 +54,9 @@ scripts/playwright/elabftw_generate_rest_api_key.sh
 
 Output:
 
-- A per-run folder under `output/playwright/elabftw_api_key/<timestamp>/`
-- The generated key is in `output/playwright/elabftw_api_key/<timestamp>/elabftw_rest_api_key.txt`
+- A per-run folder under `artifacts/output/playwright/elabftw_api_key/<timestamp>/`
+- The generated key is in `artifacts/output/playwright/elabftw_api_key/<timestamp>/elabftw_rest_api_key.txt`
 
 Next:
 
 - Update `ELAB_API_KEY` in `/Users/admin/FleetManager/docker-compose.yml` for the `monad-fleet-service` container (do not commit real secrets).
-

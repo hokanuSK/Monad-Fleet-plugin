@@ -1,6 +1,7 @@
 
-data/
-output/playwright/
+artifacts/data/
+artifacts/tmp/
+artifacts/output/
 
 # macOS
 .DS_Store
@@ -14,6 +15,7 @@ src/
 
 # Nested git checkouts inside the workspace (never commit these internals)
 **/.git/
+**/.codex_mount_probe
 
 # Python
 __pycache__/

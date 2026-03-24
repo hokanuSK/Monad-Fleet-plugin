@@ -86,7 +86,6 @@ RSSI_INTERVAL_S=5 \
 scripts/smoke/v3_end_to_end_smoke.sh
 
 # 3) Fallback artifacts if API sync fails
-ls -la output/ops/
-cat output/ops/latest_run_context.json
+ls -la artifacts/output/ops/
+cat artifacts/output/ops/latest_run_context.json
 ```
-

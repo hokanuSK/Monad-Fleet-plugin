@@ -4,7 +4,7 @@ set -euo pipefail
 # Generate an eLabFTW REST API key via the browser UI using Playwright CLI.
 #
 # Output:
-# - A per-run folder under output/playwright/ containing screenshots + the API key file.
+# - A per-run folder under artifacts/output/playwright/ containing screenshots + the API key file.
 
 umask 077
 
@@ -64,7 +64,7 @@ if [[ "${ELAB_KEY_CANWRITE}" != "0" && "${ELAB_KEY_CANWRITE}" != "1" ]]; then
 fi
 
 run_id="$(date +%Y%m%d_%H%M%S)"
-out_dir="${repo_root}/output/playwright/elabftw_api_key/${run_id}"
+out_dir="${repo_root}/artifacts/output/playwright/elabftw_api_key/${run_id}"
 mkdir -p "${out_dir}"
 
 session="elabftw-${run_id}"

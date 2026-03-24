@@ -34,7 +34,7 @@ services:
     ports:
       - "127.0.0.1:8443:443"      # v prehliadači choď na https://localhost:8443
     volumes:
-      - ./data/web:/elabftw/uploads
+      - ./artifacts/data/web:/elabftw/uploads
     networks:
       - elabftw-net
 
@@ -64,14 +64,14 @@ services:
       - MYSQL_PASSWORD=OfSeuXOmu1WrjIcKaD6zi7KBnernjKH
       - TZ=Europe/Bratislava
     volumes:
-      - ./data/mysql:/var/lib/mysql
+      - ./artifacts/data/mysql:/var/lib/mysql
     expose:
       - "3306"
     networks:
       - elabftw-net
 
   monad-fleet-service:
-    build: ./monad-fleet-service
+    build: ./apps/fleet-service
     container_name: monad-fleet-service
     restart: always
     depends_on:
@@ -95,7 +95,7 @@ services:
       # TU DOSAĎ SVOJ REST API KEY (celý reťazec z My Profile → API Keys → REST API key)
       - ELAB_API_KEY=apiKey4Test
     volumes:
-      - ./data/fleet:/data
+      - ./artifacts/data/fleet:/data
     networks:
       - elabftw-net
     ports:
@@ -121,7 +121,7 @@ services:
       - "FLEET_EXPERIMENT_TAG=fleet"
       - "RESOURCE_TAG_PREFIX=device:"
       - "POLICY_METADATA_KEYS=fleet.policy,policy,fleet_policy,policy_json"
-      - "ELAB_MCP_ARTIFACT_JOURNAL_PATH=/workspace/data/fleet/ingest-artifacts.ndjson"
+      - "ELAB_MCP_ARTIFACT_JOURNAL_PATH=/workspace/artifacts/data/fleet/ingest-artifacts.ndjson"
       - "ELAB_MCP_ENABLE_WRITE=false"
     volumes:
       - ./:/workspace:ro
@@ -129,7 +129,7 @@ services:
       - elabftw-net
 
   model-device:
-    build: ./device-sim
+    build: ./apps/device-sim
     container_name: model-device
     restart: always
     depends_on:
@@ -153,7 +153,7 @@ services:
       - "-config.file=/etc/mimir/mimir.yml"
       - "-target=all"
     volumes:
-      - ./observability/mimir/mimir.yml:/etc/mimir/mimir.yml:ro
+      - ./infra/observability/mimir/mimir.yml:/etc/mimir/mimir.yml:ro
       - mimir-data:/data
     ports:
       - "9009:9009"
@@ -172,7 +172,7 @@ services:
       - "--storage.tsdb.path=/prometheus"
       - "--web.enable-lifecycle"
     volumes:
-      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prom-data:/prometheus
     ports:
       - "9090:9090"
@@ -190,7 +190,7 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
-      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - grafana-data:/var/lib/grafana
     ports:
       - "3000:3000"

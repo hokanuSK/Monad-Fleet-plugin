@@ -83,10 +83,10 @@ Sensitivity for metadata assumption:
 ### Measurement basis
 
 - Same Fleet v2 message model for all variants.
-- Protobuf + JSON derived from `monad-fleet-service/proto/fleet_gateway_v2.proto`.
+- Protobuf + JSON derived from `proto/fleet_gateway_v2.proto`.
 - CPU benchmark: medium payload, 5 runs x 8,000 iterations.
 
-Raw artifact: `output/research/protocol_transport_benchmark_2026-03-24_http2_modeled.json`.
+Raw artifact: `artifacts/output/research/protocol_transport_benchmark_2026-03-24_http2_modeled.json`.
 
 ## Payload Results
 
@@ -144,7 +144,7 @@ Model-based (HTTP/2 estimate) for medium profile:
 
 ## Executed Unidirectional Wire Benchmark (Measured)
 
-Measured artifact (executed): `output/research/unidirectional_grpc_wire_benchmark_2026-03-24.json`.
+Measured artifact (executed): `artifacts/output/research/unidirectional_grpc_wire_benchmark_2026-03-24.json`.
 
 Method:
 

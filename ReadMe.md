@@ -1,12 +1,13 @@
 # Monad Fleet as eLabFTW plugin service
 This repository has 4 parts and can be run with `docker-compose`:
 1. eLabFTW platform (`web` + `mysql`)
-2. Monad Fleet service (`monad-fleet-service` folder)
-3. Device simulator (`device-sim` folder)
+2. Monad Fleet service (`apps/fleet-service` folder)
+3. Device simulator (`apps/device-sim` folder)
 4. Observability stack (`prometheus` + `mimir` + `grafana`)
 
 ## Folder naming conventions
-- Repo folders use lowercase kebab-case for multi-word names (for example `monad-fleet-service`).
+- Applications are grouped under `apps/`, infrastructure under `infra/`, runtime artifacts under `artifacts/`.
+- Legacy top-level paths (`monad-fleet-service`, `device-sim`, `observability`, `elabimg`, `data`, `tmp`, `output`) are symlink compatibility aliases.
 - Script domains are grouped by purpose under `scripts/` (for example `scripts/rpi/`, `scripts/smoke/`, `scripts/arduino/`).
 - Device run spool folders are state-oriented:
   - `DATA_ROOT/pending/<run_id>/` for runs waiting to publish/replay
@@ -67,7 +68,7 @@ This smoke test:
 
 ## Current Pi single-radio status (2026-02-23)
 
-- Handoff document for next agent windows: `docs/agent_handoff_single_radio_2026-02-23.md`.
+- Handoff document for next agent windows: `docs/ops/agent_handoff_single_radio_2026-02-23.md`.
 - Validated:
   - run/report flow is stable enough for repeated runs without mandatory manual reboot each cycle,
   - local spool replay and pending corruption quarantine are active,
@@ -177,7 +178,7 @@ Upload behavior:
 - set `MERGE_TEXT_ARTIFACTS=false` to keep/upload all text artifacts separately
 - set `MERGE_TEXT_ARTIFACTS_DELETE_SOURCES=false` to keep source text files on Pi after bundle creation
 
-See `docs/pi_artifacts_reference.md` for artifact naming and bundle inspection details.
+See `docs/ops/pi_artifacts_reference.md` for artifact naming and bundle inspection details.
 
 ## Run v2 agent on Raspberry Pi (Wi-Fi only mode)
 Automated from this repo host:

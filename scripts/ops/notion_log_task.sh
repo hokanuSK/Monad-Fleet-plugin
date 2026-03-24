@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CONTEXT_PATH="${1:-output/ops/latest_task_context.json}"
+CONTEXT_PATH="${1:-artifacts/output/ops/latest_task_context.json}"
 NOTION_API_TOKEN="${NOTION_API_TOKEN:-}"
 NOTION_TASKS_DB_ID="${NOTION_TASKS_DB_ID:-4a5936bb0baa4614bb61bc8daed18cee}"
 

@@ -70,10 +70,10 @@ The words \textbf{MUST}, \textbf{SHOULD}, and \textbf{MAY} are used in the RFC-s
 
 \section{Source of Truth}
 \begin{itemize}
-  \item v2 protobuf: \texttt{monad-fleet-service/proto/fleet\_gateway\_v2.proto}
-  \item server implementation: \texttt{monad-fleet-service/gateway\_server.py}
-  \item reference client: \texttt{device-sim/agent\_v2\_client.py}
-  \item legacy v1 protobuf (still served): \texttt{monad-fleet-service/proto/fleet\_gateway.proto}
+  \item v2 protobuf: \texttt{proto/fleet\_gateway\_v2.proto}
+  \item server implementation: \texttt{apps/fleet-service/gateway\_server.py}
+  \item reference client: \texttt{apps/device-sim/agent\_v2\_client.py}
+  \item legacy v1 protobuf (still served): \texttt{proto/fleet\_gateway.proto}
 \end{itemize}
 
 \section{Quick Start for New Device Integrators}
@@ -969,9 +969,9 @@ It resets fleet runtime and metrics storage state only.
 
 \textbf{Does reset:}
 \begin{itemize}
-  \item \texttt{./data/fleet/state.json}
-  \item \texttt{./data/fleet/ingest-metrics.ndjson}
-  \item \texttt{./data/fleet/ingest-artifacts.ndjson}
+  \item \texttt{./artifacts/data/fleet/state.json}
+  \item \texttt{./artifacts/data/fleet/ingest-metrics.ndjson}
+  \item \texttt{./artifacts/data/fleet/ingest-artifacts.ndjson}
   \item Prometheus local TSDB volume
   \item Mimir local TSDB volume
 \end{itemize}
@@ -1228,8 +1228,8 @@ This repository provisions a Grafana dashboard focused on Raspberry Pi wireless 
   \item dashboard URL path: \texttt{/d/monad-fleet-wireless-v3/monad-fleet-wireless-sensing-pi-smoke-v3}
   \item provisioning files:
   \begin{itemize}
-    \item \texttt{observability/grafana/provisioning/dashboards/monad-fleet.yml}
-    \item \texttt{observability/grafana/provisioning/dashboards/monad-fleet-wireless-sensing-v3.json}
+    \item \texttt{infra/observability/grafana/provisioning/dashboards/monad-fleet.yml}
+    \item \texttt{infra/observability/grafana/provisioning/dashboards/monad-fleet-wireless-sensing-v3.json}
   \end{itemize}
 \end{itemize}
 

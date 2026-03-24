@@ -15,6 +15,14 @@ Operational runbooks, handoffs, and execution workflow:
 - `pi_artifacts_reference.md` - Raspberry Pi artifact semantics
 - `agent_handoff_*.md` / `csi_future_work_*.md` - handoffs and forward plans
 
+### `adr/`
+Architecture Decision Records:
+- `0001-repo-layout-normalization-2026-03-24.md` - repository normalization decision
+
+### `runbooks/`
+Cross-cutting operational runbooks:
+- `repo-layout.md` - canonical repository path conventions and migration compatibility
+
 ### `research/`
 Research and analysis drafts:
 - `RFSensingPaper.tex`
@@ -34,6 +42,7 @@ Visual documentation:
 - **Operational Playbook**: `ops/monad_fleet_v2_phase1_playbook.md`
 - **Notion Workflow**: `ops/notion_ops_workflow.md`
 - **Diagram Guide**: `diagrams/README.md`
+- **Layout ADR**: `adr/0001-repo-layout-normalization-2026-03-24.md`
 
 ## Build Commands
 

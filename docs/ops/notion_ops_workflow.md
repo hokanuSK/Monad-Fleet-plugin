@@ -23,10 +23,10 @@ Smoke script supports optional Notion sync:
 
 Ops export files:
 
-- `OPS_OUTPUT_DIR` (default `output/ops`)
-- `OPS_RUN_CONTEXT_PATH` (default `output/ops/latest_run_context.json`)
-- `OPS_INCIDENT_CONTEXT_PATH` (default `output/ops/latest_incident_context.json`)
-- `OPS_TASK_CONTEXT_PATH` (default `output/ops/latest_task_context.json`)
+- `OPS_OUTPUT_DIR` (default `artifacts/output/ops`)
+- `OPS_RUN_CONTEXT_PATH` (default `artifacts/output/ops/latest_run_context.json`)
+- `OPS_INCIDENT_CONTEXT_PATH` (default `artifacts/output/ops/latest_incident_context.json`)
+- `OPS_TASK_CONTEXT_PATH` (default `artifacts/output/ops/latest_task_context.json`)
 
 ## Runtime Behavior
 
@@ -49,16 +49,16 @@ If `NOTION_SYNC_STRICT=true`, successful smoke exits can be turned into failure 
 Run hooks directly:
 
 ```bash
-scripts/ops/notion_log_run.sh output/ops/latest_run_context.json
-scripts/ops/notion_log_incident.sh output/ops/latest_incident_context.json
-scripts/ops/notion_log_task.sh output/ops/latest_task_context.json
+scripts/ops/notion_log_run.sh artifacts/output/ops/latest_run_context.json
+scripts/ops/notion_log_incident.sh artifacts/output/ops/latest_incident_context.json
+scripts/ops/notion_log_task.sh artifacts/output/ops/latest_task_context.json
 ```
 
 ## Fallback Mode
 
 If Notion API is unavailable or token is missing:
 
-- smoke still writes `output/ops/*.json`
+- smoke still writes `artifacts/output/ops/*.json`
 - hooks return warning/error
 - these JSON files are the canonical fallback handoff for manual Notion entry
 
