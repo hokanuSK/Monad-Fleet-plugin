@@ -1,0 +1,799 @@
+% ============================================================
+% Bakalarska praca - analyza komunikacnych protokolov (standalone)
+% Datum benchmarku: 2026-03-23
+% ============================================================
+
+\documentclass[12pt,a4paper]{report}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[slovak]{babel}
+\usepackage{lmodern}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric}
+
+\definecolor{protoColor}{RGB}{35,88,153}
+\definecolor{grpcColor}{RGB}{30,136,94}
+\definecolor{restColor}{RGB}{200,113,42}
+\definecolor{jsonrpcColor}{RGB}{156,66,66}
+
+\begin{document}
+
+\chapter{Kvantitativna analyza prenosovej a vypoctovej efektivity komunikacnych metod vo Fleet v2}
+\label{chap:analyza-protokolov-fleet-v2}
+
+\section{Vyskumny ciel, otazka a hodnotene varianty}
+
+Cielom tejto kapitoly je kvantitativne porovnat komunikacne metody
+pouzitelne pre protokol Fleet v2:
+\begin{itemize}
+  \item \texttt{protobuf-only} (unidirectional, t.~j. unary prenos),
+  \item \texttt{gRPC protobuf},
+  \item \texttt{REST/JSON},
+  \item \texttt{JSON-RPC}.
+\end{itemize}
+
+Vyskumna otazka je formulovana nasledovne:
+\textit{O kolko sa zmeni prenosova a vypoctova efektivita pri prechode
+medzi binarnym protobuf-only prenosom, gRPC protobuf a JSON metodami
+v rovnakom workloade?}
+
+Pre jednoznacnu interpretaciu je odpoved v kapitole rozdelena na dve casti:
+\begin{itemize}
+  \item \textbf{prenosova efektivita}: objem prenesenych dat [B] a z neho odvodeny cas prenosu,
+  \item \textbf{vypoctova efektivita}: CPU cas serializacie a parsovania payloadu.
+\end{itemize}
+
+\section{Metodika experimentu}
+
+\subsection{Definicia meraneho scenara}
+
+Meranie bolo realizovane pre jednu standardnu synchronizacnu sekvenciu
+\texttt{PREPARE+REPORT}, ktora obsahuje 10 unidirectional sprav:
+\texttt{Hello}, \texttt{GetPolicy},
+\texttt{AckPrepared}, \texttt{PublishReport} (request/response).
+
+Pouzite boli tri profilove velkosti workloadu podla poctu eventov v reporte:
+\begin{itemize}
+  \item \textbf{small}: 10 eventov,
+  \item \textbf{medium}: 50 eventov,
+  \item \textbf{large}: 200 eventov.
+\end{itemize}
+
+\subsection{Vyhodnocovacie metriky}
+
+Vyhodnotenie bolo realizovane oddelene pre prenosovu a vypoctovu cast:
+\begin{itemize}
+  \item \textbf{Prenosova cast}: celkovy objem dat [B], relativna zmena [\%] a
+  z nej odvodene zrychlenie prenosu pri rovnakom bitrate.
+  \item \textbf{Vypoctova cast}: CPU cas serializacie a parsovania [s]
+  pre protobuf, JSON a JSON-RPC.
+\end{itemize}
+
+Relativna zmena prenosoveho objemu je definovana vztahom:
+\begin{equation}
+\Delta_{A \rightarrow B} [\%] = \frac{A - B}{B} \cdot 100
+\end{equation}
+kde kladna hodnota znamena, ze varianta $A$ je vacsia ako $B$.
+
+Priemery v kapitole su uvadzane ako aritmeticky priemer percentualnych
+hodnot cez profily small/medium/large (bez vahovania podla velkosti profilu).
+Percenta aj nasobky su zaokruhlene na dve desatinne miesta.
+
+\subsection{Definicia symbolov a skratiek}
+
+Pre lepsiu citatelnost su vsetky premenne a skratky pouzite v kapitole
+zhrnute na jednom mieste:
+\begin{itemize}
+  \item $A$, $B$ [B]: porovnavane hodnoty objemu dat (v bytoch) pre dve metody,
+  \item $\Delta_{A \rightarrow B}$ [\%]: relativna zmena hodnoty $A$ voci $B$,
+  \item $r_{A<B}$ [\%]: percentualne skratenie casu prenosu metody $A$ voci $B$,
+  \item $s_{A/B}$ [x]: nasobok rychlosti metody $A$ voci $B$ pri rovnakom bitrate,
+  \item $t$ [s]: cas prenosu; pri rovnakom bitrate plati $t \propto \text{bytes}$,
+  \item $N_{\text{msg}}$ [-]: pocet sprav v jednej sekvencii PREPARE+REPORT (tu 10),
+  \item $N_{\text{rpc}}$ [-]: pocet unidirectional RPC volani v sekvencii (tu 5),
+  \item $H_{\text{meta}}$ [B/RPC]: odhad velkosti HTTP/2 metadata na jedno RPC,
+  \item $O_{\text{gRPC/H2}}$ [B]: modelovany overhead gRPC/HTTP2 na celu sekvenciu,
+  \item $k$ [-]: pocet behov (opakovani) celej sekvencie PREPARE+REPORT,
+  \item $\text{bytes}_{\text{proto-only}}$ [B]: celkovy objem dat
+  pre \texttt{protobuf-only} v danom profile alebo scenari,
+  \item $\Delta_{\text{gRPC-proto}}(k)$ [B]: rozdiel prenesenych dat
+  (\texttt{gRPC wire} -- \texttt{protobuf-only}) pri $k$ behoch,
+  \item $O_{\text{setup}}$ [B]: fixny overhead na zaciatku scenara
+  (napr. inicializacia spojenia/kanala),
+  \item $O_{\text{cycle}}$ [B/cycle]: prirastkovy overhead na jeden dalsi beh sekvencie.
+\end{itemize}
+
+Pouzite skratky:
+\begin{itemize}
+  \item RPC: Remote Procedure Call,
+  \item RTT: Round-Trip Time,
+  \item TLS: Transport Layer Security,
+  \item HPACK: kompresia HTTP/2 hlaviciek,
+  \item CPU: Central Processing Unit.
+\end{itemize}
+
+\subsection{Ukazkove vypocty}
+
+V celej kapitole sa pouzivaju tri zakladne vztahy:
+\begin{enumerate}
+  \item \textbf{Relativna zmena velkosti} (so znamienkom):
+  \begin{equation}
+  \Delta_{A \rightarrow B} [\%] = \frac{A - B}{B} \cdot 100
+  \end{equation}
+  \item \textbf{Skratenie casu prenosu} (alebo zrychlenie):
+  \begin{equation}
+  r_{A<B} [\%] = \left(1 - \frac{A}{B}\right) \cdot 100
+  \end{equation}
+  \item \textbf{Nasobok rychlosti} (pri rovnakom bitrate):
+  \begin{equation}
+  s_{A/B} [x] = \frac{B}{A}
+  \end{equation}
+\end{enumerate}
+
+\paragraph{Priklad 1: \texttt{protobuf-only} vs \texttt{REST/JSON} (medium).}
+Z tabulky plati:
+\texttt{protobuf-only}=10909~B a \texttt{REST/JSON}=23346~B.
+\begin{equation}
+\Delta = \frac{10909 - 23346}{23346} \cdot 100 = -53.27\%
+\end{equation}
+Znamienko minus znamena, ze \texttt{protobuf-only} je mensi.
+Ak hodnotu interpretujeme ako skratenie casu prenosu:
+\begin{equation}
+r = \left(1-\frac{10909}{23346}\right)\cdot100 = 53.27\%
+\end{equation}
+Nasobok rychlosti:
+\begin{equation}
+s = \frac{23346}{10909} = 2.14x
+\end{equation}
+Teda \texttt{protobuf-only} je v profile medium o 53.27\% rychlejsi
+na prenos (priblizne 2.14x) ako \texttt{REST/JSON}.
+
+\paragraph{Priklad 2: overhead \texttt{gRPC/HTTP2} voci \texttt{protobuf-only} (small).}
+Z tabulky plati:
+\texttt{gRPC}=5384~B a \texttt{protobuf-only}=4509~B.
+\begin{equation}
+\Delta = \frac{5384 - 4509}{4509}\cdot100 = 19.41\%
+\end{equation}
+Ide o modelovany overhead \texttt{gRPC/HTTP2} voci \texttt{protobuf-only}.
+
+\paragraph{Priklad 3: CPU zrychlenie protobuf serialize vs JSON.}
+Z CPU tabulky plati:
+\texttt{protobuf}=0.1438~s a \texttt{JSON}=1.1904~s.
+\begin{equation}
+r = \left(1-\frac{0.1438}{1.1904}\right)\cdot100 = 87.92\%
+\end{equation}
+To zodpoveda tvrdeniu, ze protobuf serializacia je o 87.92\% rychlejsia.
+
+\subsection{Postup realizacie merania}
+
+Aby bola metodika reprodukovatelna a auditovatelna, experiment bol realizovany
+v tychto krokoch:
+\begin{enumerate}
+  \item Benchmark skript bol spusteny v kontajneri
+  \texttt{monad-fleet-service}
+  (\texttt{docker compose exec -T monad-fleet-service python ...}),
+  teda v rovnakom prostredi, v akom bezi sluzba Fleet.
+  \item Skript programovo vytvoril schema-validne spravy podla
+  \texttt{fleet\_gateway\_v2.proto}:
+  \texttt{Hello}, \texttt{GetPolicy},
+  \texttt{AckPrepared}, \texttt{PublishReport} (request/response).
+  \item Profil workloadu sa menil poctom eventov v sprave
+  \texttt{PublishReport}: 10 (small), 50 (medium), 200 (large).
+  \item Pre kazdu spravu sa vypocitala velkost payloadu:
+  \begin{itemize}
+    \item protobuf bytes cez \texttt{SerializeToString()},
+    \item JSON bytes cez \texttt{MessageToDict()} a
+    \texttt{json.dumps(..., sort\_keys=True, separators=(',', ':'))}.
+  \end{itemize}
+  \item Transportne varianty boli modelovane nasledovne:
+  \begin{itemize}
+    \item \texttt{protobuf-only}: suma protobuf bytes,
+    \item \texttt{gRPC protobuf (HTTP/2 model)}:
+    \begin{equation}
+    O_{\text{gRPC/H2}} =
+    N_{\text{msg}}\cdot5 +
+    N_{\text{rpc}}\cdot5\cdot9 +
+    N_{\text{rpc}}\cdot H_{\text{meta}}
+    \end{equation}
+    kde $N_{\text{msg}}=10$, $N_{\text{rpc}}=5$ a
+    $H_{\text{meta}}=120$~B na unidirectional RPC (modelovany odhad
+    komprimovanych HTTP/2 metadata pre request/response/trailers),
+    \item \texttt{REST/JSON}: suma JSON bytes,
+    \item \texttt{JSON-RPC}: JSON-RPC envelope
+    (\texttt{jsonrpc}, \texttt{id}, \texttt{method}, \texttt{params/result})
+    + JSON payload.
+  \end{itemize}
+  \item CPU cast bola merana pre profil medium:
+  5 behov x 8000 iteracii na kazdu operaciu
+  (\texttt{protobuf serialize/parse}, \texttt{json serialize/parse},
+  \texttt{json-rpc serialize/parse}).
+  \item Vysledne hodnoty (payload aj CPU) boli ulozene do suboru
+  \texttt{output/research/protocol\_transport\_benchmark\_2026-03-24\_http2\_modeled.json}
+  (modelovana cast) a do suboru
+  \texttt{output/research/unidirectional\_grpc\_wire\_benchmark\_2026-03-24.json}
+  (realne unidirectional wire meranie), z ktorych su odvodene tabulky v tejto kapitole.
+\end{enumerate}
+
+\subsection{Diagram benchmark pipeline}
+
+Obrazok~\ref{fig:benchmark-pipeline} sumarizuje krokovy tok benchmarku
+od pripravy workloadu az po finalne metriky.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  node distance=7mm,
+  box/.style={
+    rectangle, rounded corners, draw=black!70, fill=gray!8,
+    minimum width=3.8cm, minimum height=0.95cm, align=center, font=\small
+  },
+  arrow/.style={-Latex, thick, black!70}
+]
+\node[box] (s1) {1) Generovanie\\schema-validnych sprav};
+\node[box, below=of s1] (s2) {2) Vypocet payload\\protobuf vs JSON};
+\node[box, below=of s2] (s3) {3) Model transportu\\protobuf-only / gRPC / REST / JSON-RPC};
+\node[box, below=of s3] (s4) {4) CPU benchmark\\serialize + parse};
+\node[box, below=of s4] (s5) {5) Export artefaktov\\JSON + tabulky};
+
+\draw[arrow] (s1) -- (s2);
+\draw[arrow] (s2) -- (s3);
+\draw[arrow] (s3) -- (s4);
+\draw[arrow] (s4) -- (s5);
+\end{tikzpicture}
+\caption{Diagram postupu benchmarku PREPARE+REPORT}
+\label{fig:benchmark-pipeline}
+\end{figure}
+
+\subsection{Ako bol urceny HTTP/2 overhead}
+
+Pouzity overhead pre \texttt{gRPC/HTTP2} nebol zvoleny nahodne, ale bol
+zostaveny z troch casti:
+\begin{itemize}
+  \item \textbf{gRPC message frame:} 5~B na spravu (1~B compression flag +
+  4~B dlzka payloadu),
+  \item \textbf{HTTP/2 frame header:} 9~B na frame; pre unidirectional RPC bol
+  modelovany tok 5 framov
+  (request HEADERS, request DATA, response HEADERS, response DATA, trailers),
+  \item \textbf{HTTP/2 metadata:} odhad $H_{\text{meta}}=120$~B na unidirectional RPC
+  po HPACK kompresii (request/response/trailers metadata).
+\end{itemize}
+
+Pre sekvenciu PREPARE+REPORT (10 sprav, 5 unidirectional RPC) to dava:
+\begin{equation}
+O_{\text{gRPC/H2}} = 10\cdot5 + 5\cdot5\cdot9 + 5\cdot120 = 875~\text{B}
+\end{equation}
+
+Keze presna metadata velkost zavisi od implementacie a stavu HPACK tabuliek,
+bola doplnena citlivostna analyza:
+\begin{table}[htbp]
+\centering
+\caption{Citlivost overheadu na predpokladanu metadata velkost}
+\label{tab:grpc-http2-metadata-sensitivity}
+\begin{tabular}{|r|r|r|r|r|}
+\hline
+$H_{\text{meta}}$ [B/RPC] & $O_{\text{gRPC/H2}}$ [B] & small [\%] & medium [\%] & large [\%] \\
+\hline
+60  & 575  & 12.75\% & 5.27\% & 1.65\% \\
+120 & 875  & 19.41\% & 8.02\% & 2.51\% \\
+180 & 1175 & 26.06\% & 10.77\% & 3.37\% \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Limity metodiky}
+
+Tento experiment predstavuje payload/codec benchmark, nie packet-level
+sietove meranie. To znamena, ze:
+\begin{itemize}
+  \item meria sa velkost tela sprav a CPU cena kodovania/dekodovania,
+  \item nemeraju sa realne RTT, packet loss, TCP retransmisie, TLS handshake,
+  HTTP/2 connection management ani spravanie siete pod zatazou,
+  \item pri \texttt{gRPC} je HTTP/2 rezia modelovana odhadom
+  $H_{\text{meta}}=120$~B na unidirectional RPC; nejde o packet-level meranie
+  skutocnej siete.
+\end{itemize}
+
+Pre \texttt{protobuf-only} baseline sa v tejto kapitole predpoklada
+priamy binarny prenos protobuf payloadu bez gRPC/HTTP2 obalenia.
+To znamena, ze HTTP/2 connection management sa do \texttt{protobuf-only}
+vysledkov nezapocitava. Ak by bol protobuf preneseny cez HTTP/2 kanal,
+treba k nemu analogicky priratat aj HTTP/2/TLS rezijnu cast.
+
+Vysledky su preto urcene predovsetkym na porovnanie relativnej efektivity
+formatov a transportneho obalenia, nie na absolutnu predikciu end-to-end
+latencie v produkcnej sieti.
+
+Pre produkcnu predikciu je vhodne doplnit samostatne packet-level meranie:
+\begin{itemize}
+  \item connection reuse vs reconnect (vplyv TCP/TLS/HTTP2 setupu),
+  \item paralelne klienty a vyssia zataz (head-of-line/blocking efekty),
+  \item sietove podmienky (RTT, packet loss, retransmisie, jitter).
+\end{itemize}
+
+\subsection{Vplyv typu komunikacneho toku}
+
+Aktualny Fleet v2 tok je unidirectional (v gRPC terminologii unary),
+preto benchmark cieli na realny rezim aktualneho nasadenia.
+V tejto kapitole pojem \textit{unidirectional} znamena samostatne unary
+request/response volania (nie bidirectional stream).
+Ak by bol tok navrhnuty ako dlhodoby bidirectional stream, vysledky by sa
+pravdepodobne zmenili, pretoze by sa inak rozlozila transportna rezia
+a inac by sa uplatnilo riadenie toku.
+
+\section{Vysledky merania prenosoveho objemu}
+
+\begin{table}[htbp]
+\centering
+\caption{Celkovy objem prenesenych dat na jednu sekvenciu PREPARE+REPORT}
+\label{tab:transport-bytes-profile}
+\begin{tabular}{|l|r|r|r|r|}
+\hline
+Profil & protobuf-only [B] & gRPC protobuf (HTTP/2 model) [B] & REST/JSON [B] & JSON-RPC [B] \\
+\hline
+small  & 4509  & 5384  & 9796  & 10313 \\
+medium & 10909 & 11784 & 23346 & 23863 \\
+large  & 34910 & 35785 & 74159 & 74676 \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=\textwidth,
+  height=7.2cm,
+  ybar,
+  bar width=8pt,
+  ymin=0,
+  enlarge x limits=0.2,
+  ylabel={Prenesene data [B]},
+  symbolic x coords={small,medium,large},
+  xtick=data,
+  ymajorgrids=true,
+  grid style={dashed,gray!30},
+  legend style={at={(0.5,1.03)}, anchor=south, legend columns=2, font=\small}
+]
+\addplot[fill=protoColor!80, draw=protoColor] coordinates {(small,4509) (medium,10909) (large,34910)};
+\addplot[fill=grpcColor!80, draw=grpcColor] coordinates {(small,5384) (medium,11784) (large,35785)};
+\addplot[fill=restColor!80, draw=restColor] coordinates {(small,9796) (medium,23346) (large,74159)};
+\addplot[fill=jsonrpcColor!80, draw=jsonrpcColor] coordinates {(small,10313) (medium,23863) (large,74676)};
+\legend{protobuf-only,gRPC protobuf,REST/JSON,JSON-RPC}
+\end{axis}
+\end{tikzpicture}
+\caption{Chart porovnania celkoveho objemu prenesenych dat}
+\label{fig:transport-bytes-chart}
+\end{figure}
+
+Z nameranych dat vyplyva:
+\begin{itemize}
+  \item \texttt{gRPC protobuf} je voci \texttt{protobuf-only} vacsi
+  v priemere o \textbf{9.98\%},
+  \item \texttt{protobuf-only} je v priemere o \textbf{53.39\% mensi}
+  ako \texttt{REST/JSON},
+  \item \texttt{protobuf-only} je v priemere o \textbf{54.60\% mensi}
+  ako \texttt{JSON-RPC},
+  \item \texttt{JSON-RPC} je v priemere o \textbf{2.73\% vacsi}
+  ako \texttt{REST/JSON}.
+\end{itemize}
+
+\section{Interpretacia prenosovej casti (cas prenosu)}
+
+Pri rovnakom bitrate je cas prenosu priamo umerny velkosti payloadu
+($t \propto \text{bytes}$). Zo zmeranych bytov je preto mozne odvodit,
+o kolko je jednotliva metoda rychlejsia alebo pomalsia na prenos.
+
+\subsection{Porovnanie rychlosti voci \texttt{REST/JSON} a \texttt{JSON-RPC}}
+
+Tabulka~\ref{tab:transfer-faster-vs-rest} uvadza skratenie casu prenosu
+voci \texttt{REST/JSON}. Kladna hodnota znamena kratsi cas prenosu
+(rychlejsie), zaporna hodnota znamena dlhsi cas (pomalsie).
+
+\begin{table}[htbp]
+\centering
+\caption{Skratenie casu prenosu voci REST/JSON [\%]}
+\label{tab:transfer-faster-vs-rest}
+\begin{tabular}{|l|r|r|r|}
+\hline
+Profil & protobuf-only & gRPC protobuf (HTTP/2 model) & JSON-RPC \\
+\hline
+small  & +53.97\% & +45.04\% & -5.28\% \\
+medium & +53.27\% & +49.52\% & -2.21\% \\
+large  & +52.93\% & +51.75\% & -0.70\% \\
+\hline
+\end{tabular}
+\end{table}
+
+Ekvivalentne vyjadrenie v nasobku rychlosti (voci \texttt{REST/JSON}):
+\begin{itemize}
+  \item \texttt{protobuf-only}: \textbf{2.12x az 2.17x} rychlejsi prenos,
+  \item \texttt{gRPC protobuf}: \textbf{1.82x az 2.07x} rychlejsi prenos,
+  \item \texttt{JSON-RPC}: \textbf{0.95x az 0.99x}, teda mierne pomalsi
+  prenos ako \texttt{REST/JSON}.
+\end{itemize}
+
+\paragraph{Priame porovnanie \texttt{gRPC protobuf} vs \texttt{JSON-RPC}.}
+
+Pre priamu odpoved na volbu medzi \texttt{gRPC protobuf} a \texttt{JSON-RPC}
+bol vypocitany pomer:
+\begin{equation}
+\text{rychlejsie}_{\text{gRPC vs JSON-RPC}}[\%] =
+\left(1-\frac{\text{bytes}_{\text{gRPC}}}{\text{bytes}_{\text{JSON-RPC}}}\right)\cdot100
+\end{equation}
+
+\begin{table}[htbp]
+\centering
+\caption{Skratenie casu prenosu gRPC protobuf voci JSON-RPC [\%]}
+\label{tab:grpc-vs-jsonrpc}
+\begin{tabular}{|l|r|r|r|}
+\hline
+Profil & gRPC protobuf [B] & JSON-RPC [B] & gRPC rychlejsie [\%] \\
+\hline
+small  & 5384  & 10313 & 47.79\% \\
+medium & 11784 & 23863 & 50.62\% \\
+large  & 35785 & 74676 & 52.08\% \\
+\hline
+\end{tabular}
+\end{table}
+
+Z toho vyplyva, ze \texttt{gRPC protobuf} je v tomto workloade
+objemovo aj casovo (pri rovnakom bitrate) priblizne \textbf{1.91x az 2.09x}
+rychlejsi ako \texttt{JSON-RPC}.
+
+\subsection{Preco je rozdiel medzi \texttt{protobuf-only} a \texttt{gRPC} meratelny}
+
+Rozdiel medzi \texttt{protobuf-only} a \texttt{gRPC protobuf} je po zapocitani
+HTTP/2 rezie vyraznejsi:
+\begin{itemize}
+  \item \texttt{protobuf-only} je rychlejsi o \textbf{2.51\% az 19.41\%}
+  (podla velkosti profilu),
+  \item priemerna hodnota je \textbf{9.98\%}.
+\end{itemize}
+
+Rozdiel vyplyva z modelu \texttt{gRPC/HTTP2}, ktory obsahuje:
+\begin{equation}
+O_{\text{gRPC/H2}} =
+N_{\text{msg}}\cdot5 +
+N_{\text{rpc}}\cdot5\cdot9 +
+N_{\text{rpc}}\cdot H_{\text{meta}}
+\end{equation}
+\begin{equation}
+= 10\cdot5 + 5\cdot5\cdot9 + 5\cdot120 = 875~\text{B}
+\end{equation}
+\begin{equation}
+\Delta_{\text{gRPC vs proto}} [\%] =
+\frac{875}{\text{bytes}_{\text{proto-only}}}\cdot 100
+\end{equation}
+
+Po dosadeni:
+\begin{itemize}
+  \item small: $\frac{875}{4509}\cdot100 = 19.41\%$,
+  \item medium: $\frac{875}{10909}\cdot100 = 8.02\%$,
+  \item large: $\frac{875}{34910}\cdot100 = 2.51\%$.
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.86\textwidth,
+  height=6.2cm,
+  ymin=0,
+  ymax=21,
+  ylabel={Overhead gRPC vs protobuf-only [\%]},
+  xlabel={Profil workloadu},
+  symbolic x coords={small,medium,large},
+  xtick=data,
+  ymajorgrids=true,
+  grid style={dashed,gray!30},
+  mark size=3pt
+]
+\addplot[
+  color=grpcColor,
+  line width=1.2pt,
+  mark=*,
+  mark options={fill=grpcColor}
+] coordinates {(small,19.41) (medium,8.02) (large,2.51)};
+\end{axis}
+\end{tikzpicture}
+\caption{Chart poklesu percentualneho overheadu gRPC pri rastu payloadu}
+\label{fig:grpc-overhead-profile-chart}
+\end{figure}
+
+Absolutny rozdiel je v modeli rovnaky (875~B), ale relativny podiel klesa
+s rastucou velkostou payloadu.
+
+\subsection{Preco pri large profile nevznika velky rozdiel}
+
+Pri large profile sa casto objavi dojem, ze by \texttt{gRPC} malo byt
+vyrazne pomalsie, lebo nesie HTTP/2. Dolezite je vsak oddelit
+\textbf{pocet RPC volani} od \textbf{velkosti payloadu}:
+\begin{itemize}
+  \item sekvencia PREPARE+REPORT ma stale 5 unidirectional RPC volani,
+  \item \texttt{PublishReport} je jedno RPC, aj ked obsahuje 200 eventov,
+  \item vyssi pocet eventov teda zvacsuje hlavne telo spravy, nie pocet
+  HTTP request/response parov.
+\end{itemize}
+
+Preto fixna HTTP/2 rezia tvori pri large profile len malu cast celku
+(v realnom wire merani pri $k=1000$ je rozdiel 2.12\%).
+Ak sa v niektorej sade behov objavi opacne poradie v latencii,
+ide typicky o vplyv serverovej biznis logiky, scheduler jitteru,
+GC a inych runtime efektov, nie o zmenu efektivity samotneho codec-u.
+
+\subsection{Porovnanie pri roznych poctoch behov (realne unidirectional meranie)}
+
+Pre tuto cast bol vykonany samostatny realny unidirectional benchmark na wire urovni:
+\begin{itemize}
+  \item serverova strana bola realizovana ako lightweight
+  \texttt{mock FleetManager} (rovnake \texttt{fleet.v2} protobuf spravy),
+  \item \texttt{protobuf-only} je suma serializovanych request/response payloadov [B],
+  \item \texttt{gRPC} je merane ako realne TCP payload byty [B] cez counting proxy
+  medzi unidirectional klientom a serverom,
+  \item artefakt merania:
+  \texttt{output/research/unidirectional\_grpc\_wire\_benchmark\_2026-03-24.json}.
+\end{itemize}
+
+Tato cast je urcena na izolaciu transportneho overheadu.
+Preto namerane latencie z tohto benchmarku netreba interpretovat
+ako absolutnu latenciu produkcneho servera s plnou business logikou.
+
+Z nameranych dat vyplyva, ze rozdiel je dobre aproximovany vztahom:
+\begin{equation}
+\Delta_{\text{gRPC-proto}}(k) [\text{B}] \approx O_{\text{setup}} + k \cdot O_{\text{cycle}}
+\end{equation}
+kde:
+\begin{itemize}
+  \item $k$ je pocet behov (opakovani) celej sekvencie PREPARE+REPORT,
+  \item $O_{\text{setup}}$ je fixny overhead na zaciatku scenara,
+  \item $O_{\text{cycle}}$ je prirastkovy overhead na jeden beh sekvencie.
+\end{itemize}
+
+Pre tento benchmark vyslo:
+\begin{equation}
+O_{\text{setup}} \approx 700~\text{B}, \quad O_{\text{cycle}} \approx 605~\text{B}
+\end{equation}
+
+Teda absolutny rozdiel rastie priblizne linearne s poctom behov $k$, ale
+percentualny rozdiel klesa s rastom workloadu (amortizacia setup overheadu).
+
+Pre medium profil:
+\begin{table}[htbp]
+\centering
+\caption{gRPC vs protobuf-only pri roznych poctoch behov (medium, realne meranie)}
+\label{tab:grpc-proto-runs-medium}
+\begin{tabular}{|r|r|r|r|r|}
+\hline
+Pocet behov $k$ & protobuf-only [B] & gRPC wire [B] & Rozdiel [B] & Rozdiel [\%] \\
+\hline
+1    & 7400    & 8683    & 1283    & 17.34\% \\
+5    & 37000   & 40703   & 3703    & 10.01\% \\
+10   & 74000   & 80775   & 6775    & 9.16\% \\
+50   & 370000  & 400996  & 30996   & 8.38\% \\
+100  & 740000  & 801246  & 61246   & 8.28\% \\
+1000 & 7400000 & 8006146 & 606146  & 8.19\% \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.9\textwidth,
+  height=6.6cm,
+  xmode=log,
+  log basis x=10,
+  xlabel={Pocet behov $k$},
+  ylabel={Rozdiel gRPC vs protobuf-only [\%]},
+  ymin=7.5,
+  ymax=18,
+  ymajorgrids=true,
+  grid style={dashed,gray!30},
+  xtick={1,5,10,50,100,1000},
+  xticklabels={1,5,10,50,100,1000}
+]
+\addplot[
+  color=grpcColor,
+  line width=1.2pt,
+  mark=square*,
+  mark options={fill=grpcColor}
+] coordinates {
+  (1,17.34)
+  (5,10.01)
+  (10,9.16)
+  (50,8.38)
+  (100,8.28)
+  (1000,8.19)
+};
+\end{axis}
+\end{tikzpicture}
+\caption{Chart amortizacie transportneho overheadu pri opakovani sekvencie (medium)}
+\label{fig:grpc-overhead-runs-chart}
+\end{figure}
+
+Pre uplnost, celkovy prenos dat pri $k=1000$ behoch:
+\begin{table}[htbp]
+\centering
+\caption{Prenesene data pri 1000 behoch PREPARE+REPORT (realne unidirectional meranie)}
+\label{tab:transfer-1000-runs-all-profiles}
+\begin{tabular}{|l|r|r|r|r|}
+\hline
+Profil & protobuf-only [B] & gRPC wire [B] & Rozdiel [B] & Rozdiel [\%] \\
+\hline
+small  & 1858000  & 2464120  & 606120 & 32.62\% \\
+medium & 7400000  & 8006146  & 606146 & 8.19\% \\
+large  & 28558000 & 29164099 & 606099 & 2.12\% \\
+\hline
+\end{tabular}
+\end{table}
+
+\section{Vysledky CPU analyzy}
+
+CPU benchmark bol vykonany pre profil medium, 5 behov, 8000 iteracii na beh.
+
+\subsection{Rozsah merania CPU}
+
+Meranie hodnoti iba serializaciu a parsovanie payloadu
+na aplikacnej vrstve (Python):
+\begin{itemize}
+  \item \texttt{protobuf}: \texttt{SerializeToString()} a \texttt{ParseFromString()},
+  \item \texttt{JSON}/\texttt{JSON-RPC}: \texttt{json.dumps()} a \texttt{json.loads()}.
+\end{itemize}
+
+Benchmark \textbf{nemeria} sietovu latenciu, TLS handshake, kernel/network stack
+ani retry logiku. Cielom je izolovat cistu CPU cenu kodovania dat.
+
+\begin{table}[htbp]
+\centering
+\caption{Priemerne casy serializacie a parsovania}
+\label{tab:cpu-serialize-parse}
+\begin{tabular}{|l|r|r|r|}
+\hline
+Operacia & protobuf [s] & JSON [s] & JSON-RPC [s] \\
+\hline
+Serialize & 0.1438 & 1.1904 & 1.1827 \\
+Parse     & 0.1355 & 0.7879 & 0.8300 \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.92\textwidth,
+  height=7cm,
+  ybar,
+  bar width=12pt,
+  ymin=0,
+  enlarge x limits=0.3,
+  ylabel={Cas [s]},
+  symbolic x coords={Serialize,Parse},
+  xtick=data,
+  ymajorgrids=true,
+  grid style={dashed,gray!30},
+  legend style={at={(0.5,1.03)}, anchor=south, legend columns=3, font=\small}
+]
+\addplot[fill=protoColor!80, draw=protoColor] coordinates {(Serialize,0.1438) (Parse,0.1355)};
+\addplot[fill=restColor!80, draw=restColor] coordinates {(Serialize,1.1904) (Parse,0.7879)};
+\addplot[fill=jsonrpcColor!80, draw=jsonrpcColor] coordinates {(Serialize,1.1827) (Parse,0.8300)};
+\legend{protobuf,JSON,JSON-RPC}
+\end{axis}
+\end{tikzpicture}
+\caption{Chart CPU casov serializacie a parsovania}
+\label{fig:cpu-serialize-parse-chart}
+\end{figure}
+
+Odvodene percentualne zrychlenie protobuf:
+\begin{itemize}
+  \item serialize: \textbf{87.92\%} rychlejsie ako JSON,
+  \item parse: \textbf{82.81\%} rychlejsie ako JSON,
+  \item serialize: \textbf{87.84\%} rychlejsie ako JSON-RPC,
+  \item parse: \textbf{83.68\%} rychlejsie ako JSON-RPC.
+\end{itemize}
+
+Ekvivalentne to znamena, ze JSON encode je priblizne \textbf{8.28x} pomalsi
+a JSON parse priblizne \textbf{5.82x} pomalsi ako protobuf.
+
+\subsection{Vztah CPU vysledkov k rozdielu \texttt{protobuf-only} vs \texttt{gRPC}}
+
+Pri interpretacii je potrebne oddelit codec vrstvu od transportnej vrstvy:
+\begin{itemize}
+  \item \texttt{protobuf-only} aj \texttt{gRPC protobuf} pouzivaju rovnaky
+  binarny protobuf codec, preto je CPU cena serializacie a parsovania
+  prakticky rovnaka,
+  \item rozdiel medzi nimi v tejto kapitole sposobuje najma transportne
+  obalenie HTTP/2 (framing + metadata model), nie odlisny format payloadu.
+\end{itemize}
+
+Z tohto dovodu je rozdiel medzi \texttt{protobuf-only} a \texttt{gRPC}
+v CPU rovine maly (rovnaky codec), ale v prenosovej rovine uz meratelny
+v dosledku HTTP/2 rezie; rozdiel oproti JSON metodam vsak zostava vyrazny.
+
+\section{Diskusia}
+
+Vysledky je mozne zhrnut do troch hlavnych bodov:
+\begin{enumerate}
+  \item Pre objemovo narocnu telemetriu je binarny protobuf prenos
+  vyrazne efektivnejsi ako JSON varianty.
+  \item Rozdiel medzi \texttt{gRPC protobuf} a \texttt{protobuf-only}
+  je sposobeny najma HTTP/2 reziou; po jej zapocitani je v benchmarku
+  \texttt{protobuf-only} rychlejsi o 2.51\% az 19.41\%.
+  \item \texttt{JSON-RPC} pridava oproti \texttt{REST/JSON}
+  metadatovy envelope, co zvysuje celkovy objem prenesenych dat.
+\end{enumerate}
+
+\subsection{Predpokladany vplyv bidirectional toku}
+
+Uvedene vysledky platia pre sekvenciu samostatnych unidirectional volani.
+Pri bidirectional rezime by sa mohli percenta odlisovat z tychto dovodov:
+\begin{itemize}
+  \item \textbf{Amortizacia overheadu:} pri jednom dlhodobom streame sa
+  fixna rezia rozlozi medzi vacsi pocet sprav.
+  \item \textbf{Iny pomer payload a riadiacej signalizacie:} pri castych
+  malych spravach moze byt relativny podiel metadat odlisny od unidirectional modelu.
+  \item \textbf{Flow-control a backpressure:} streamovacie protokoly menia
+  spravanie throughputu pri burstoch a pri pomalsom prijimaci.
+  \item \textbf{Interakcny model:} bidirectional tok vie znizit latenciu
+  priebeznych eventov, ale moze mat iny profil vyuzitia CPU a siete.
+\end{itemize}
+
+Prakticky dosledok je, ze poradie metod
+(binarne protobuf varianty vs JSON varianty) pravdepodobne zostane rovnake,
+avsak konkretne percentualne hodnoty sa mozu pri bidirectional scenari posunut.
+
+\section{Zaver}
+
+Na vyskumnu otazku mozno odpovedat priamo:
+\begin{enumerate}
+  \item \textbf{Prenosova efektivita (protobuf-only vs gRPC protobuf):}
+  \texttt{gRPC protobuf} je vacsi o 2.51\% az 19.41\% (model)
+  a pri realnom wire merani sa pri vyssom pocte behov stabilizuje
+  priblizne na 2.12\% (large), 8.19\% (medium), 32.62\% (small pri $k=1000$).
+  \item \textbf{Prenosova efektivita (gRPC protobuf vs JSON metody):}
+  \texttt{gRPC protobuf} je voci \texttt{JSON-RPC} rychlejsi na prenos
+  o 47.79\% az 52.08\% a voci \texttt{REST/JSON} o 45.04\% az 51.75\%.
+  \item \textbf{Vypoctova efektivita:}
+  protobuf serializacia/parsovanie je voci JSON a JSON-RPC
+  rychlejsie priblizne o 82.81\% az 87.92\%.
+\end{enumerate}
+
+Pre Fleet v2 v aktualnom unidirectional rezime je teda najefektivnejsi
+\texttt{protobuf-only} prenos. Ak je poziadovana standardna RPC vrstva,
+\texttt{gRPC protobuf} ostava vyrazne efektivnejsi ako JSON metody,
+ale s meratelnou HTTP/2 reziou voci \texttt{protobuf-only}.
+
+Rozdiel medzi \texttt{protobuf-only} a \texttt{gRPC} je sposobeny tym,
+ze obe varianty pouzivaju rovnaky binarny protobuf codec, ale \texttt{gRPC}
+zaroven vyuziva HTTP/2 transport. V pouzitom modeli to predstavuje overhead
+875~B na celu sekvenciu PREPARE+REPORT (framing + metadata odhad),
+t.~j. 2.51\% az 19.41\% podla profilu.
+
+Realne unidirectional wire meranie navyse ukazalo, ze pri viacnasobnych behoch
+sa overhead sprava ako
+$\Delta_{\text{gRPC-proto}}(k) \approx O_{\text{setup}} + k\cdot O_{\text{cycle}}$,
+kde v tomto experimente vyslo priblizne
+$O_{\text{setup}}\approx700$~B a $O_{\text{cycle}}\approx605$~B.
+Pri $k=1000$ bolo namerane:
+small 32.62\%, medium 8.19\%, large 2.12\%.
+
+V realnom nasadeni sa k tomu priratava dalsia gRPC/HTTP/2 rezia
+(najma dynamika headers/trailers, HPACK, TLS a riadenie streamu), preto sa
+konkretne percenta mozu odlisovat od modelovanych hodnot.
+
+Pri prechode na bidirectional tok by sa konkretne percenta mohli zmenit,
+najma v dosledku odlisnej amortizacie overheadu a dynamiky riadenia toku.
+Z pohladu architektonickeho rozhodovania vsak benchmark konzistentne ukazuje,
+ze hlavny rozdiel vznikne medzi binarnymi protobuf variantmi a JSON metodami,
+nie medzi \texttt{protobuf-only} a \texttt{gRPC}.
+
+\end{document}

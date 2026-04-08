@@ -1,0 +1,165 @@
+%% NOTE: Keep this diagram updated with any protocol or flow changes!
+%% Last updated: 2026-03-28
+sequenceDiagram
+    title: Fleet v2 Lifecycle with Execution + Maintenance Windows
+    autonumber
+
+    box Device Agent
+        participant Agent as Agent v2
+        participant CmdExec as Command Runner
+        participant Uploader as Upload Worker
+        participant LocalTSDB as Local TSDB
+        participant RunStore as Local Run Store
+    end
+    box Backend Services
+        participant Fleet as Fleet Manager
+        participant ELab as eLabFTW
+        participant Mimir as Mimir
+    end
+    Note over Agent,Mimir: Canonical runtime source of truth for active diagrams
+
+    rect rgb(232,245,233)
+        Note over Agent,Mimir: PREPARE
+        Agent->>Fleet: GetPolicy(agent_id, last_policy_id)
+        Fleet->>ELab: GET /items?search=agent_id
+        alt resource item missing
+            Fleet->>ELab: POST /items (create device resource)
+        end
+        Fleet->>ELab: PATCH /items/{id} metadata(<br/>last_seen, interfaces, mode,<br/>fleet_v2_runtime.device_state=ONLINE)
+        Fleet->>ELab: GET /experiments?tags[]=fleet
+        Fleet->>Fleet: Apply tags + selectors + time-window filtering
+        Fleet->>Fleet: Select experiment_id + policy_id
+
+        alt status = OK
+            Fleet-->>Agent: GetPolicyResponse(OK + policy_json from selected experiment metadata)
+            Fleet->>ELab: PATCH /items/{id} metadata(state=POLICY_SENT, policy_id)
+        else status = NOT_MODIFIED
+            Fleet->>ELab: PATCH /items/{id} metadata(state=POLICY_CACHED)
+            Fleet-->>Agent: GetPolicyResponse(NOT_MODIFIED)
+        else status = NO_WORK
+            Fleet->>ELab: PATCH /items/{id} metadata(state=IDLE)
+            Fleet-->>Agent: GetPolicyResponse(NO_WORK)
+        end
+    end
+
+    rect rgb(227,242,253)
+        Note over Agent,Mimir: EXECUTION
+        Note over Agent,Mimir: High-level view of Process B
+        Agent->>Agent: Parse policy_json.command_groups
+        loop each command from policy JSON
+            alt command = hello
+                rect rgb(220,252,231)
+                    CmdExec->>RunStore: Append HELLO ping event
+                    Agent->>Fleet: ReportCommandStatus(COMMAND_STARTED/FINISHED, command_type=hello)
+                    Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>hello command state
+                end
+            else command = upload
+                rect rgb(255,228,230)
+                    CmdExec->>RunStore: Stage maintenance window + upload params
+                    CmdExec->>Mimir: Probe Mimir connectivity (health/ping)
+                    alt Mimir reachable
+                        Mimir-->>CmdExec: reachable
+                        Agent->>Fleet: ReportCommandStatus(COMMAND_STARTED/FINISHED, command_type=upload, mimir=UP)
+                    else Mimir unreachable
+                        Mimir-->>CmdExec: timeout/err
+                        Agent->>Fleet: ReportCommandStatus(COMMAND_STARTED/FINISHED, command_type=upload, mimir=DOWN)
+                    end
+                    Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>upload window, flags, mimir status
+                end
+            else command = Metrics
+                rect rgb(254,249,195)
+                    CmdExec->>CmdExec: Run Metrics command
+                    loop async Metrics sampling
+                        CmdExec-)LocalTSDB: Collect/store metrics snapshots
+                    end
+                    CmdExec->>RunStore: Append Metrics outputs
+                    Agent->>Fleet: ReportCommandStatus(<br/>COMMAND_STARTED/FINISHED/FAILED,<br/>command_type=Metrics)
+                    Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>command state + last exit
+                end
+            else command = Log
+                rect rgb(237,233,254)
+                    CmdExec->>CmdExec: Run Log command
+                    loop async Log sampling
+                        CmdExec-)RunStore: Collect log snapshots
+                    end
+                    CmdExec->>RunStore: Append Log outputs
+                    Agent->>Fleet: ReportCommandStatus(<br/>COMMAND_STARTED/FINISHED/FAILED,<br/>command_type=Log)
+                    Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>command state + last exit
+                end
+            else command = measure (WIFI/BLE/CSI)
+                rect rgb(255,237,213)
+                    alt measure.type = WIFI
+                        CmdExec->>CmdExec: Set WIFI measurements
+                    else measure.type = BLE
+                        CmdExec->>CmdExec: Set BLE measurements
+                    else measure.type = CSI
+                        CmdExec->>CmdExec: Set CSI measurements
+                    end
+                    loop async Measurements sampling
+                        CmdExec-)RunStore: Collect measurement snapshot
+                        CmdExec-)RunStore: Save iteration measurement data in artifacts for MAINTENANCE upload
+                    end
+                    Agent->>Fleet: ReportCommandStatus(<br/>COMMAND_STARTED/FINISHED/FAILED,<br/>command_type=measure, measure_type)
+                    Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>measure type + command state
+                end
+            else command = ExecuteShell
+                rect rgb(226,232,240)
+                    CmdExec->>RunStore: Record stdout/stderr/exit_code
+                    Agent->>Fleet: ReportCommandStatus(<br/>COMMAND_STARTED/FINISHED/FAILED,<br/>command_type=ExecuteShell)
+                    Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>command state + last exit
+                end
+            end
+            Agent->>Agent: Dispatch next command from policy
+        end
+    end
+
+    rect rgb(255,243,224)
+        Note over Agent,Mimir: MAINTENANCE
+        Agent->>Uploader: Check maintenance window + slot/jitter
+        alt outside maintenance window/slot
+            Uploader->>RunStore: Keep runs in pending spool
+            Agent-)Uploader: Set cron wake-up to re-check<br/>maintenance window + slot/jitter
+        else inside maintenance window+slot
+            Agent-)Uploader: Set cron wake-up to re-check<br/>maintenance window + slot/jitter
+            loop while window+slot is open
+                Uploader->>RunStore: Read staged upload params
+                Uploader->>RunStore: Check pending upload queues<br/>(metrics/logs, artifacts)
+                alt no pending upload data
+                    Uploader->>Uploader: Skip upload for this maintenance tick
+                else pending upload data
+                    alt pending metrics/logs
+                        Uploader->>LocalTSDB: Read pending metrics/logs batch
+                        Uploader->>Mimir: Upload pending metrics + logs from local TSDB
+                        Mimir-->>Uploader: metrics/logs upload ACK/err
+                        Uploader->>Fleet: ReportUploadStatus(metrics/logs ACK/err)
+                        Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>metrics/logs upload state
+                    else no pending metrics/logs
+                        Uploader->>Uploader: Skip metrics/logs upload
+                    end
+                    alt pending artifacts
+                        Uploader->>RunStore: Read next artifact
+                        Uploader->>Fleet: Upload artifact from local spool
+                        Fleet-->>Uploader: artifact ACK/err
+                        Uploader->>Fleet: ReportArtifactUploadStatus(artifact_id, ACK/err)
+                        Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>artifacts state + last uploaded ptr
+                    else no pending artifacts
+                        Uploader->>Uploader: Skip artifacts upload
+                    end
+                    Uploader->>Fleet: PublishReport(report with run_id)
+                    Fleet->>Fleet: Map upload/report status
+                    Fleet->>ELab: PATCH /items/{id} metadata:<br/>last report upload state + run_id
+                    alt ACCEPTED path
+                        Fleet-->>Uploader: ACCEPTED
+                        Uploader->>RunStore: Mark run local state = sent
+                    else DUPLICATE path
+                        Fleet-->>Uploader: DUPLICATE
+                        Uploader->>RunStore: Mark run local state = sent
+                    else RPC fail
+                        Fleet-->>Uploader: RPC error/timeout
+                        Uploader->>RunStore: Keep run local state = pending
+                    end
+                end
+                Uploader->>Uploader: Check maintenance window + slot/jitter
+            end
+        end
+    end

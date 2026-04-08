@@ -1,0 +1,49 @@
+%% NOTE: Keep this diagram updated with any protocol or flow changes!
+%% Last updated: 2026-03-27
+sequenceDiagram
+    title: Event Write Flow (Create + Update) - Maintenance Window
+    autonumber
+    box Device Agent
+        participant Agent as Agent v2
+    end
+    box Fleet
+        participant Fleet as Fleet Manager
+    end
+    box eLabFTW
+        participant ELab as eLabFTW
+    end
+    Note over Agent,ELab: Derived diagram. Source of truth: lifecycle-v2-normalized.mmd
+
+    rect rgb(255,243,224)
+        Note over Agent,ELab: Report replay is gated by maintenance_window(from/to) + slot+jitter.
+        Agent->>Agent: Evaluate maintenance window + device slot
+        alt outside maintenance window/slot
+            Agent->>Agent: Keep run in pending spool\nskip PublishReport
+        else inside maintenance window+slot
+            Agent->>Agent: Load next local pending run/report
+            Agent->>Fleet: PublishReport(report with first run events)
+            Fleet->>ELab: PATCH /event/{run_event_id} metadata(state=REPORT_RECEIVED)
+        end
+    end
+
+    rect rgb(227,242,253)
+        Note over Agent,ELab: report dedupe + run mapping handled internally
+        alt create event
+            Fleet->>ELab: POST /events/{item}\n(title, start, end, metadata)
+            ELab-->>Fleet: 201 Created (event/{id})
+        else update event
+            Fleet->>ELab: GET /event/{id}
+            ELab-->>Fleet: current metadata
+            Fleet->>ELab: PATCH /event/{id}\n(events[], last_event, summary, status)
+            ELab-->>Fleet: 200 OK
+        end
+    end
+
+    rect rgb(227,242,253)
+        Note over Agent,ELab: event state projection after publish
+        Fleet->>Fleet: map event/run state
+        Fleet->>ELab: PATCH /event/{id} metadata\n(events[], last_event, summary, status)
+        ELab-->>Fleet: 200 OK
+        Fleet-->>Agent: PublishReportResponse(ACCEPTED)
+        Agent->>Agent: Mark run local state = sent
+    end

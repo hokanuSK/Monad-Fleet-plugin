@@ -1,0 +1,15 @@
+minimum_pre_commit_version: "3.0.0"
+default_stages: [pre-commit]
+repos:
+  - repo: local
+    hooks:
+      - id: fleet-lint
+        name: Fleet lint
+        entry: scripts/dev/lint.sh
+        language: system
+        pass_filenames: false
+      - id: fleet-layout
+        name: Fleet layout contract
+        entry: scripts/dev/verify_layout.sh
+        language: system
+        pass_filenames: false

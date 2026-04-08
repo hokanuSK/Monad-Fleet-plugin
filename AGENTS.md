@@ -2,29 +2,85 @@
 
 This repo runs a local eLabFTW instance plus a Python gRPC "fleet manager" service and a simulated/real device agent.
 
+## Current Handoff (2026-03-19)
+
+- Primary operational handoff for next Codex windows/agents:
+  - `docs/ops/agent_handoff_notion_ops_2026-03-19.md`
+- Previous CSI-focused handoff (still relevant for real Pi CSI stabilization):
+  - `docs/ops/agent_handoff_single_radio_2026-02-23.md`
+- Confirmed:
+  - smoke flow now emits Notion ops context JSON on exit (run/incident/task as applicable),
+  - strict sync mode (`NOTION_SYNC_STRICT=true`) was runtime-verified.
+- Open blockers:
+  - live Notion API write path is not validated in this environment (missing token during verification),
+  - CSI evidence blocker from previous handoff remains open for real Pi runs.
+
 ## Repo Layout
 
 - `docker-compose.yml`: brings up eLabFTW (web + mysql) + Monad Fleet service + device simulator + observability.
-- `monad-fleet-service/`: Python gRPC server + HTTP `/metrics` + HTTP JSON ingest (`/ingest/v1/metrics`).
-- `device-sim/`: simulator clients:
+- `apps/fleet-service/`: Python gRPC server + HTTP `/metrics` + HTTP JSON ingest (`/ingest/v1/metrics`).
+- `apps/device-sim/`: simulator clients:
   - `sim_device_client.py`: legacy `fleet.v1` flow.
   - `agent_v2_client.py`: v2 PREPARE/REPORT agent with local spooling (`DATA_ROOT`).
 - `scripts/smoke/`: end-to-end smoke tests for WiFi/BLE/CSI + Prometheus/Mimir.
 - `scripts/rpi/`: deploy/run the v2 agent on a Raspberry Pi via SSH + systemd.
-- `observability/`: Prometheus/Mimir/Grafana config/provisioning.
-- `elabimg/`: Docker build context for the custom `elabftw/elabimg` image used by `docker-compose.yml`.
+- `infra/observability/`: Prometheus/Mimir/Grafana config/provisioning.
+- `infra/docker/elabimg/`: Docker build context for the custom `elabftw/elabimg` image used by `docker-compose.yml`.
+- `proto/`: canonical protobuf source-of-truth (shared by service + simulator).
+- `artifacts/`: runtime artifacts (`data/`, `tmp/`, `output/`).
+
+Compatibility note:
+
+- Legacy paths (`monad-fleet-service/`, `device-sim/`, `observability/`, `elabimg/`, `data/`, `tmp/`, `output/`) are symlinked for backward compatibility.
+
+## Notion Ops Workflow (For Agents)
+
+Use the Notion layer as the execution memory for this project.
+
+- Main project page:
+  - `https://www.notion.so/30ffc7f91bce81be9586e12521811a25`
+- Ops hub:
+  - `https://www.notion.so/310fc7f91bce81c9b36cdbbc6c13ddde`
+- Ops databases:
+  - Runs DB: `https://www.notion.so/8dc731920bf34966bb711472100c7057`
+  - Decisions DB: `https://www.notion.so/0912fe3c3c6b4aa2ba1d67e867665d4c`
+  - Incidents DB: `https://www.notion.so/da72692b8106430bb1e3892866d41d20`
+  - Tasks DB: `https://www.notion.so/4a5936bb0baa4614bb61bc8daed18cee`
+
+Required behavior for agents:
+
+1. After each smoke/real run, add or update one entry in Runs DB.
+2. If a run fails or is flaky, create an Incident entry with root cause, fix, and prevention.
+3. If implementation/process direction changes, create a Decision entry with rationale and impact.
+4. Convert every non-trivial follow-up into a Task entry with owner and due date.
+5. Cross-link entries by run id / experiment id / issue or PR links in page content.
+6. Do not store secrets in Notion (API keys, tokens, passwords).
+7. Definition of Done for smoke execution includes Notion ops capture (or fallback JSON in `artifacts/output/ops/*.json` when API sync is unavailable).
+
+Source-of-truth boundaries:
+
+- Git repo: code, proto contracts, scripts, implementation docs.
+- eLabFTW: experiment metadata and uploaded artifacts.
+- Prometheus/Grafana: time-series metrics.
+- Notion: operational log, decisions, incidents, and execution tasks.
+
+Naming requirements for ops records:
+
+- Use stable `run_id` when available.
+- Always include `experiment_id` (smoke experiment id).
+- Include `device_id` or target device list context.
 
 ## Quick Start (Docker Compose)
 
 1) Ensure the `web` image exists locally.
 
-`docker-compose.yml` references `elabftw/elabimg:custom`. If you do not have this image, build it from `./elabimg`:
+`docker-compose.yml` references `elabftw/elabimg:custom`. If you do not have this image, build it from `./infra/docker/elabimg`:
 
 ```bash
 docker build \
   --build-arg ELABFTW_VERSION=<X.Y.Z-or-branch> \
   -t elabftw/elabimg:custom \
-  ./elabimg
+  ./infra/docker/elabimg
 ```
 
 2) Bring up the stack:
@@ -47,7 +103,7 @@ HEADLESS=false TRACE=true ELAB_KEY_NAME="monad-fleet-service" scripts/playwright
 
 The generated key is saved to:
 
-- `output/playwright/elabftw_api_key/<timestamp>/elabftw_rest_api_key.txt`
+- `artifacts/output/playwright/elabftw_api_key/<timestamp>/elabftw_rest_api_key.txt`
 
 Web endpoints:
 
@@ -63,6 +119,24 @@ Logs:
 ```bash
 docker compose logs -f monad-fleet-service
 docker compose logs -f model-device
+```
+
+## eLab MCP (Compose on-demand)
+
+MCP server for eLab diagnostics is available as Compose service `elab-mcp` under profile `mcp`.
+It is intentionally on-demand (not started by default in `docker compose up`).
+
+Run MCP server over stdio:
+
+```bash
+docker compose run --rm -T elab-mcp
+```
+
+Quick MCP handshake smoke:
+
+```bash
+MODE=local scripts/smoke/mcp_elab_smoke.sh
+MODE=compose scripts/smoke/mcp_elab_smoke.sh
 ```
 
 ## Smoke Test (v3 WiFi/BLE/CSI + Metrics)
@@ -174,10 +248,11 @@ sudo journalctl -u monad-fleet-agent.service -n 100 --no-pager
 
 ## Protobuf Workflow (Keep In Sync)
 
-There are two copies of the protos (service + simulator). When editing proto definitions, update both:
+Canonical proto source-of-truth is now:
 
-- `monad-fleet-service/proto/`
-- `device-sim/proto/`
+- `proto/`
+
+Service and simulator consume this through symlinked `proto/` directories under app roots.
 
 Then rebuild containers so stubs are regenerated during Docker build:
 
@@ -189,31 +264,31 @@ docker compose build monad-fleet-service model-device
 
 Source:
 
-- `docs/monad_fleet_grpc_interface_v2.tex`
-- CI: `.github/workflows/docs_pdf.yml` builds `docs/monad_fleet_grpc_interface_v2.pdf` and uploads it as a workflow artifact (it also attempts to commit the PDF on `main`, if branch rules allow).
+- `docs/specs/monad_fleet_grpc_interface_v2.tex`
+- CI: `.github/workflows/docs_pdf.yml` builds `docs/specs/monad_fleet_grpc_interface_v2.pdf` and uploads it as a workflow artifact (it also attempts to commit the PDF on `main`, if branch rules allow).
 
 Build (preferred):
 
 ```bash
-cd docs
+cd docs/specs
 latexmk -pdf -interaction=nonstopmode -halt-on-error monad_fleet_grpc_interface_v2.tex
 ```
 
 Output:
 
-- `docs/monad_fleet_grpc_interface_v2.pdf`
+- `docs/specs/monad_fleet_grpc_interface_v2.pdf`
 
 Clean:
 
 ```bash
-cd docs
+cd docs/specs
 latexmk -c monad_fleet_grpc_interface_v2.tex
 ```
 
 Fallback (if `latexmk` is unavailable):
 
 ```bash
-cd docs
+cd docs/specs
 pdflatex -interaction=nonstopmode -halt-on-error monad_fleet_grpc_interface_v2.tex
 pdflatex -interaction=nonstopmode -halt-on-error monad_fleet_grpc_interface_v2.tex
 ```
@@ -225,10 +300,10 @@ Run the Fleet service locally:
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-pip install -r monad-fleet-service/requirements.txt
-python -m grpc_tools.protoc -I monad-fleet-service/proto --python_out=monad-fleet-service --grpc_python_out=monad-fleet-service \
-  monad-fleet-service/proto/fleet_gateway.proto monad-fleet-service/proto/fleet_gateway_v2.proto
-ELAB_BASE_URL=https://localhost:8443/api/v2 ELAB_API_KEY=<key> python -u monad-fleet-service/gateway_server.py
+pip install -r apps/fleet-service/requirements.txt
+python -m grpc_tools.protoc -I proto --python_out=apps/fleet-service --grpc_python_out=apps/fleet-service \
+  proto/fleet_gateway.proto proto/fleet_gateway_v2.proto
+ELAB_BASE_URL=https://localhost:8443/api/v2 ELAB_API_KEY=<key> python -u apps/fleet-service/gateway_server.py
 ```
 
 Run the v2 agent locally:
@@ -236,8 +311,8 @@ Run the v2 agent locally:
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-pip install -r device-sim/requirements.txt
-python -m grpc_tools.protoc -I device-sim/proto --python_out=device-sim --grpc_python_out=device-sim \
-  device-sim/proto/fleet_gateway.proto device-sim/proto/fleet_gateway_v2.proto
-FLEET_MANAGER_HOST=127.0.0.1 FLEET_MANAGER_PORT=50060 MAX_SYNC_CYCLES=1 EXECUTE_POLICY=false python -u device-sim/agent_v2_client.py
+pip install -r apps/device-sim/requirements.txt
+python -m grpc_tools.protoc -I proto --python_out=apps/device-sim --grpc_python_out=apps/device-sim \
+  proto/fleet_gateway.proto proto/fleet_gateway_v2.proto
+FLEET_MANAGER_HOST=127.0.0.1 FLEET_MANAGER_PORT=50060 MAX_SYNC_CYCLES=1 EXECUTE_POLICY=false python -u apps/device-sim/agent_v2_client.py
 ```

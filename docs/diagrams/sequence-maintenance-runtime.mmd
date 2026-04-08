@@ -1,0 +1,63 @@
+%% NOTE: Keep this diagram updated with any protocol or flow changes!
+%% Last updated: 2026-03-28
+sequenceDiagram
+    title: Process B2 - Detailed Maintenance Runtime
+    autonumber
+    box Device Agent
+        participant Agent as Agent v2
+        participant Uploader as Upload Worker
+        participant LocalTSDB as Local TSDB
+        participant RunStore as Local Run Store
+    end
+    box Backend Services
+        participant Fleet as Fleet Manager
+        participant ELab as eLabFTW
+        participant Mimir as Mimir
+    end
+    Note over Agent,Mimir: Derived from sequence-lifecycle-v2-normalized.mmd
+    
+    rect rgb(255,243,224)
+        Note over Agent,Mimir: MAINTENANCE
+        Agent->>Uploader: Check maintenance window + slot/jitter
+        Agent-)Uploader: Set cron wake-up to re-check<br/>maintenance window + slot/jitter
+
+        loop while window+slot is open
+            Uploader->>RunStore: Read staged upload params
+            Uploader->>RunStore: Check pending upload queues
+            Uploader->>Uploader: Drain queued uploads<br/>using staged upload params
+            alt no pending upload data
+                Uploader->>Uploader: No pending upload data,<br/>skip this maintenance tick
+            else pending upload data
+                alt pending metrics/logs
+                    Uploader->>LocalTSDB: Read pending metrics/logs batch
+                    Uploader->>Mimir: Upload pending metrics + logs
+                    Mimir-->>Uploader: metrics/logs ACK/err
+                    Uploader->>Fleet: Report metrics/logs upload status
+                    Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>metrics/logs upload state
+                else no pending metrics/logs
+                    Uploader->>Uploader: Skip metrics/logs upload
+                end
+                alt pending artifacts
+                    Uploader->>RunStore: Read next artifact
+                    Uploader->>Fleet: Upload artifact from local spool
+                    Fleet-->>Uploader: artifact ACK/err
+                    Uploader->>Fleet: Report artifact upload status
+                    Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>artifacts state + last uploaded ptr
+                else no pending artifacts
+                    Uploader->>Uploader: Skip artifacts upload
+                end
+                Uploader->>Fleet: PublishReport(report with run_id)
+                Fleet->>Fleet: Map upload/report status
+                Fleet->>ELab: PATCH /items/{id} metadata:<br/>last report upload state + run_id
+                Fleet-->>Uploader: report upload ACK/err
+                alt report upload ACK
+                    Uploader->>RunStore: Mark run local state = sent
+                else report upload err
+                    Uploader->>RunStore: Keep run pending for next maintenance tick
+                end
+            end
+            Uploader->>Uploader: Check maintenance window + slot/jitter
+        end
+    end
+
+    Note over Agent,Mimir: No data-loss path.<br/>Unsent runs stay local until a later maintenance window

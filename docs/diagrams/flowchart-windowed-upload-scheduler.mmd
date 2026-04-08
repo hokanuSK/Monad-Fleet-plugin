@@ -1,0 +1,83 @@
+%% NOTE: Keep this diagram updated with any protocol or flow changes!
+%% Last updated: 2026-03-30
+flowchart TB
+    subgraph PREP[Prepare + Policy Resolution]
+        direction TB
+        P0[Agent tick] --> P1[GetPolicy from Fleet] --> P2{Policy status}
+        subgraph PREP_ROW[" "]
+            direction LR
+            P5[No execution commands]
+            P3[Cache selected policy_id]
+            P4[Keep cached policy]
+        end
+        P2 -- OK --> P3
+        P2 -- NOT_MODIFIED --> P4
+        P2 -- NO_WORK --> P5
+        P3 --> PM
+        P4 --> PM
+    end
+
+    subgraph START[Execution]
+        direction TB
+        PM[ ]:::ghost --> EX0[Parse policy command_groups] --> EXE[Execute command loop + collect outputs<br/>ReportCommandStatus + PATCH event metadata]
+    end
+
+    subgraph MW[Maintenance Window Upload Loop]
+        direction TB
+        subgraph MW_ROW1[" "]
+            direction LR
+            E{Maintenance window?}
+            S{Inside my slot now?}
+            U{Pending upload data?}
+            E -- Yes --> S
+            S -- Yes --> U
+        end
+        subgraph MW_ROW2[" "]
+            direction LR
+            UL[Drain queue + upload metrics/logs + upload artifacts + PATCH event metadata]
+            R[PublishReport + PATCH item metadata]
+            X{Result}
+            UL --> R --> X
+        end
+        subgraph MW_ROW3[" "]
+            direction LR
+            Y[Mark run local state = sent]
+            Z[Keep run local state = pending]
+            OPEN{Window + slot still open?}
+            Y --> OPEN
+            Z --> OPEN
+        end
+        subgraph MW_ROW4[" "]
+            direction LR
+            CRON[Set cron wake-up for window + slot re-check]
+            F[Sleep/poll]
+            CRON --> F
+        end
+
+        U -- Yes --> UL
+        X -- ACCEPTED --> Y
+        X -- DUPLICATE or REJECTED --> Y
+        X -- RPC fail --> Z
+        U -- No --> OPEN
+        OPEN -- Yes --> U
+        E -- No --> CRON
+        OPEN -- No --> CRON
+        F --> P0
+    end
+
+    P5 --> E
+    EXE --> E
+
+    style PREP_ROW fill:transparent,stroke:transparent
+    style MW_ROW1 fill:transparent,stroke:transparent
+    style MW_ROW2 fill:transparent,stroke:transparent
+    style MW_ROW3 fill:transparent,stroke:transparent
+    style MW_ROW4 fill:transparent,stroke:transparent
+
+    classDef prepWindow fill:#DCFCE7,stroke:#16A34A,color:#111827,stroke-width:1.5px
+    classDef execWindow fill:#DBEAFE,stroke:#2563EB,color:#111827,stroke-width:1.5px
+    classDef maintWindow fill:#FFE8CC,stroke:#EA580C,color:#111827,stroke-width:1.5px
+    classDef ghost fill:transparent,stroke:transparent,color:transparent
+    class P0,P1,P2,P3,P4,P5 prepWindow
+    class EX0,EXE execWindow
+    class E,S,U,UL,R,OPEN,CRON maintWindow

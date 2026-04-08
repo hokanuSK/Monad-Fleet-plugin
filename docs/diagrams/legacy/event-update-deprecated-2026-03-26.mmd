@@ -1,0 +1,36 @@
+%% NOTE: Keep this diagram updated with any protocol or flow changes!
+%% Last updated: 2026-03-26
+sequenceDiagram
+    title: Event Update Flow (Maintenance Window Backlog Drain) (DEPRECATED)
+    autonumber
+    box Device Agent
+        participant Agent as Agent v2
+    end
+    box Fleet
+        participant Fleet as Fleet Manager
+    end
+    box eLabFTW
+        participant Event as /event/{id}
+    end
+    Note over Agent,Event: Derived diagram. Source of truth: lifecycle-v2-normalized.mmd
+
+    Note over Agent,Fleet: DEPRECATED diagram. Use event-write-flow.mmd as canonical flow.
+    Note over Agent,Fleet: Report replay is gated by maintenance_window(from/to) + slot+jitter.
+    Agent->>Agent: Evaluate maintenance window + device slot
+    alt outside maintenance window/slot
+        Agent->>Agent: Keep runs in pending spool\nskip PublishReport
+    else inside maintenance window+slot
+        Agent->>Agent: Select next local pending run
+        Agent->>Fleet: PublishReport(next event batch)
+        Fleet->>Event: PATCH metadata(state=REPORT_RECEIVED)
+        Note over Fleet: run mapping + dedupe handled internally
+        Fleet->>Event: GET /event/{id}
+        Event-->>Fleet: current metadata
+        Fleet->>Event: PATCH metadata\n(events[], last_event, summary, status)
+        Event-->>Fleet: 200 + updated event
+
+        opt terminal state
+            Fleet->>Event: set completed_at
+        end
+        Fleet-->>Agent: ACCEPTED / DUPLICATE / REJECTED
+    end

@@ -1,0 +1,243 @@
+syntax = "proto3";
+
+package fleet.v2;
+
+import "google/protobuf/timestamp.proto";
+
+service FleetManager {
+  rpc Hello(HelloRequest) returns (HelloResponse);
+
+  // PREPARE
+  rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse);
+  rpc AckPrepared(AckPreparedRequest) returns (AckPreparedResponse);
+
+  // REPORT
+  rpc PublishReport(PublishReportRequest) returns (PublishReportResponse);
+
+  // OPTIONAL (DUAL_NIC only)
+  rpc PublishEvents(PublishEventsRequest) returns (PublishEventsResponse);
+}
+
+enum ControlPlaneMode {
+  CONTROL_PLANE_MODE_UNSPECIFIED = 0;
+  RF_SHARING = 1;
+  DUAL_NIC = 2;
+}
+
+message HelloRequest {
+  AgentDescriptor agent = 1;
+}
+
+message HelloResponse {
+  string server_version = 1;
+  google.protobuf.Timestamp server_time = 2;
+  uint32 recommended_prepare_poll_sec = 3;
+  uint32 max_batch_size = 4;
+  ControlPlaneMode allowed_mode = 5;
+  string mode_reason = 6;
+}
+
+message AgentDescriptor {
+  string agent_id = 1;
+  string hostname = 2;
+  string agent_version = 3;
+  repeated NetworkInterface interfaces = 4;
+  ControlPlaneMode requested_mode = 5;
+  string control_plane_iface = 6;
+  string fleet_manager_target = 7;
+  repeated string capabilities = 8;
+}
+
+message NetworkInterface {
+  string name = 1;
+  string mac = 2;
+  string kind = 3;
+  string driver = 4;
+  string firmware = 5;
+}
+
+message GetPolicyRequest {
+  string agent_id = 1;
+  // Optional client hint for compatibility with older loops.
+  string experiment_id = 2;
+  string last_policy_id = 3;
+}
+
+message GetPolicyResponse {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    OK = 1;
+    NOT_MODIFIED = 2;
+    NO_WORK = 3;
+  }
+  Status status = 1;
+  // Present when status == OK.
+  Policy policy = 2;
+  // Assignment context returned for OK/NOT_MODIFIED (and optionally NO_WORK).
+  string experiment_id = 3;
+  string policy_id = 4;
+  google.protobuf.Timestamp measurement_from = 5;
+  google.protobuf.Timestamp measurement_to = 6;
+}
+
+message Policy {
+  string experiment_id = 1;
+  string policy_id = 2;
+  google.protobuf.Timestamp issued_at = 3;
+  google.protobuf.Timestamp measurement_from = 4;
+  google.protobuf.Timestamp measurement_to = 5;
+  repeated CommandGroup command_groups = 6;
+  ControlPlaneMode allowed_mode = 7;
+  string control_plane_iface = 8;
+}
+
+message AckPreparedRequest {
+  string agent_id = 1;
+  string experiment_id = 2;
+  string policy_id = 3;
+  string preparation_id = 4;
+  ControlPlaneMode mode = 5;
+  string control_plane_iface = 6;
+  bool route_verified = 7;
+  repeated string checks_ok = 8;
+  repeated string warnings = 9;
+}
+
+message AckPreparedResponse {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    ACCEPTED = 1;
+    REJECTED = 2;
+  }
+  Status status = 1;
+  string reason = 2;
+}
+
+message PublishReportRequest {
+  string agent_id = 1;
+  Report report = 2;
+}
+
+message PublishReportResponse {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    ACCEPTED = 1;
+    DUPLICATE = 2;
+    REJECTED = 3;
+  }
+  Status status = 1;
+  string reason = 2;
+}
+
+message PublishEventsRequest {
+  string agent_id = 1;
+  repeated Event events = 2;
+}
+
+message PublishEventsResponse {
+  repeated EventAck acks = 1;
+}
+
+message EventAck {
+  string event_id = 1;
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    ACCEPTED = 1;
+    DUPLICATE = 2;
+    REJECTED = 3;
+  }
+  Status status = 2;
+  string reason = 3;
+}
+
+message Report {
+  string run_id = 1;
+  string experiment_id = 2;
+  string policy_id = 3;
+  string agent_id = 4;
+  google.protobuf.Timestamp started_at = 5;
+  google.protobuf.Timestamp finished_at = 6;
+  string status = 7;
+  repeated Event events = 8;
+  repeated ArtifactRef artifacts = 9;
+  map<string, string> summary_metrics = 10;
+}
+
+message Event {
+  string event_id = 1;
+  string run_id = 2;
+  string experiment_id = 3;
+  string policy_id = 4;
+  string agent_id = 5;
+  google.protobuf.Timestamp timestamp = 6;
+  EventType type = 7;
+  string group_id = 8;
+  string command_id = 9;
+  int32 exit_code = 10;
+  uint64 duration_ms = 11;
+  string message = 12;
+  map<string, string> metrics = 13;
+}
+
+enum EventType {
+  EVENT_TYPE_UNSPECIFIED = 0;
+  RUN_STARTED = 1;
+  RUN_FINISHED = 2;
+  COMMAND_STARTED = 3;
+  COMMAND_FINISHED = 4;
+  COMMAND_FAILED = 5;
+  ARTIFACT_UPLOADED = 6;
+  ERROR = 7;
+}
+
+message CommandGroup {
+  string id = 1;
+  string name = 2;
+  google.protobuf.Timestamp from = 3;
+  google.protobuf.Timestamp to = 4;
+  FailureMode failure_mode = 5;
+  repeated Command commands = 6;
+}
+
+enum FailureMode {
+  FAILURE_MODE_UNSPECIFIED = 0;
+  FAIL_FAST = 1;
+  CONTINUE_ON_ERROR = 2;
+}
+
+message Command {
+  string id = 1;
+  CommandType type = 2;
+  string cmdline = 3;
+  repeated string argv = 4;
+  map<string, string> env = 5;
+  uint32 timeout_ms = 6;
+  RetryPolicy retry = 7;
+  repeated ArtifactSpec expected_artifacts = 8;
+}
+
+enum CommandType {
+  COMMAND_TYPE_UNSPECIFIED = 0;
+  SHELL = 1;
+  CAPTURE_CSI = 2;
+  BLE_SCAN = 3;
+  WIFI_SCAN = 4;
+}
+
+message RetryPolicy {
+  uint32 max_attempts = 1;
+  uint32 backoff_ms = 2;
+}
+
+message ArtifactSpec {
+  string name = 1;
+  string path_or_glob = 2;
+  string mime = 3;
+}
+
+message ArtifactRef {
+  string name = 1;
+  string uri = 2;
+  uint64 size_bytes = 3;
+  string sha256 = 4;
+}

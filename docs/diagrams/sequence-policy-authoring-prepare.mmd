@@ -1,0 +1,53 @@
+%% NOTE: Keep this diagram updated with any protocol or flow changes!
+%% Last updated: 2026-03-27
+sequenceDiagram
+    title: Process A - Detailed Experiment Creation and PREPARE
+    autonumber
+    actor Researcher
+    box Device Agent
+        participant Agent as Agent v2
+    end
+    box Monad Fleet
+        participant Fleet as Fleet Manager
+        participant Selector as Policy Selector
+    end
+    box Backend Services
+        participant ELab as eLabFTW
+    end
+    Note over Researcher,ELab: Derived diagram. Source of truth: sequence-lifecycle-v2-normalized.mmd
+    rect rgb(255,243,224)
+        Note over Researcher,ELab: DETAILED EXPERIMENT CREATION
+        Researcher->>ELab: Create or update experiment
+        Researcher->>ELab: POST/PATCH /experiments/{id}
+        Researcher->>ELab: PATCH metadata.policy.command_groups (hello, upload, Metrics, Log, measure(WIFI,BLE,CSI), ExecuteShell)
+        Researcher->>ELab: PATCH metadata.policy.windows (execution_window, maintenance_window, slot+jitter)
+        Researcher->>ELab: PATCH metadata.policy.metrics_sink (upload_in_maintenance_window)
+        Researcher->>ELab: PATCH metadata.execution_tracking (command_state, last_command, last_command_type, last_exit_code)
+        Researcher->>ELab: POST /experiments/{id}/tags (fleet, device:...)
+        ELab-->>Researcher: 200/201 OK
+    end
+
+    rect rgb(232,245,233)
+        Note over Researcher,ELab: DETAILED PREPARE
+        Agent->>Fleet: GetPolicy(agent_id, last_policy_id)
+        Fleet->>ELab: GET /items?search=agent_id
+        alt resource item missing
+            Fleet->>ELab: POST /items (create device resource)
+        else resource exists
+            Fleet->>ELab: PATCH /items/{id} metadata(last_seen, interfaces, mode)
+        end
+
+        Fleet->>ELab: GET /experiments?tags[]=fleet
+        Fleet->>Selector: Apply tags + selectors + time-window filtering
+        Selector-->>Fleet: Selected experiment_id + policy_id
+        alt status = OK
+            Fleet-->>Agent: GetPolicyResponse(OK + policy_json from experiment metadata)
+            Fleet->>ELab: PATCH /items/{id} metadata(state=POLICY_SENT, policy_id)
+        else status = NOT_MODIFIED
+            Fleet->>ELab: PATCH /items/{id} metadata(state=POLICY_CACHED)
+            Fleet-->>Agent: GetPolicyResponse(NOT_MODIFIED)
+        else status = NO_WORK
+            Fleet->>ELab: PATCH /items/{id} metadata(state=IDLE)
+            Fleet-->>Agent: GetPolicyResponse(NO_WORK)
+        end
+    end
