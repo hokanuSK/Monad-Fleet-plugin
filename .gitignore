@@ -1,2 +1,37 @@
 
-data/
+artifacts/data/
+artifacts/tmp/
+artifacts/output/
+
+# macOS
+.DS_Store
+
+# Local scratch / secrets
+tmp/
+scripts/rpi/keys/
+
+# Vendored upstream clones (too large for this repo; keep as separate submodule or external checkout)
+src/
+
+# Nested git checkouts inside the workspace (never commit these internals)
+**/.git/
+**/.codex_mount_probe
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# LaTeX
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+*.toc
+.aider*

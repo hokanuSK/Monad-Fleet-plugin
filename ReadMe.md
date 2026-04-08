@@ -1,2 +1,83 @@
-# Monad Fleet as ElabFTW plugin service
-This repository consist of 3 parts and can be runned using docker-compose. First part is Elabftw platform, second is plugin in gateway-plugin folder and third is simulator of devices connecting to GRPC server that is our plugin. Device simulator is in device-sim folder
+# FleetManager
+
+FleetManager runs a local eLabFTW stack plus a Python gRPC fleet service, a device simulator/agent, and observability services.
+
+## Canonical Development Entry Points
+
+1. Copy config template:
+   ```bash
+   cp .env.example .env
+   ```
+2. Start the stack:
+   ```bash
+   make up
+   ```
+3. Run smoke:
+   ```bash
+   make smoke
+   ```
+4. Reset non-DB runtime state:
+   ```bash
+   make reset
+   ```
+5. Run repo checks:
+   ```bash
+   make check
+   ```
+
+`Makefile` is the canonical local entrypoint for day-to-day operations.
+
+## Repository Layout (Canonical)
+
+- `apps/`: deployable/runtime app code
+- `infra/`: infrastructure and observability definitions
+- `proto/`: protobuf source-of-truth
+- `artifacts/`: runtime data, temp files, outputs
+- `scripts/`: operational scripts grouped by domain (`smoke/`, `rpi/`, `reset/`, `ops/`, `dev/`)
+
+## Legacy Compatibility Paths
+
+The following root aliases are kept for compatibility during migration:
+
+- `device-sim -> apps/device-sim`
+- `monad-fleet-service -> apps/fleet-service`
+- `observability -> infra/observability`
+- `data -> artifacts/data`
+- `tmp -> artifacts/tmp`
+- `output -> artifacts/output`
+
+Use canonical paths in new code and docs. Migration details are in `docs/runbooks/repo-layout.md`.
+
+## Quality Workflow
+
+Unified commands:
+
+- `make lint`: shell + python + yaml + docker compose sanity checks
+- `make format`: optional local formatters (`shfmt`, `ruff`) when installed
+- `make test`: layout contract + discovered Python unit tests
+- `make check`: lint + test
+
+Optional pre-commit setup:
+
+```bash
+pip install -r requirements-dev.txt
+pre-commit install
+```
+
+CI runs the same contract via `.github/workflows/repo_checks.yml`.
+
+## Core Endpoints
+
+- eLabFTW: `https://localhost:8443`
+- Grafana: `http://localhost:3000`
+- Prometheus: `http://localhost:9090`
+- Mimir: `http://localhost:9009`
+- Fleet gRPC: `localhost:50060`
+- Fleet metrics/ingest: `http://localhost:9108/metrics`, `http://localhost:9108/ingest/v1/metrics`
+
+## Useful Docs
+
+- Operational handoff: `docs/ops/agent_handoff_notion_ops_2026-03-19.md`
+- Layout runbook: `docs/runbooks/repo-layout.md`
+- Docs index: `docs/DOCS_MAP.md`
+- gRPC spec source: `docs/specs/monad_fleet_grpc_interface_v2.tex`

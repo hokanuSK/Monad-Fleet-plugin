@@ -1,0 +1,83 @@
+%% NOTE: Keep this diagram updated with any protocol or flow changes!
+%% Last updated: 2026-03-27
+sequenceDiagram
+    title: Process B1 - Detailed Execution Runtime
+    autonumber
+    box Device Agent
+        participant Agent as Agent v2
+        participant CmdExec as Command Runner
+        participant LocalTSDB as Local TSDB
+        participant RunStore as Local Run Store
+    end
+    box Backend Services
+        participant Fleet as Fleet Manager
+        participant ELab as eLabFTW
+        participant Mimir as Mimir
+    end
+    Note over Agent,Mimir: Derived diagram. Source of truth: sequence-lifecycle-v2-normalized.mmd
+
+    rect rgb(227,242,253)
+        Note over Agent,Mimir: EXECUTION
+        Agent->>Agent: Parse policy_json.command_groups
+        loop each execution command
+            alt command = hello
+                rect rgb(220,252,231)
+                    CmdExec->>RunStore: Append HELLO ping event
+                    Agent->>Fleet: ReportCommandStatus(hello STARTED/FINISHED)
+                    Fleet->>ELab: PATCH /event/{run_event_id} metadata: hello command state
+                end
+            else command = upload
+                rect rgb(255,228,230)
+                    CmdExec->>RunStore: Stage maintenance window + upload params
+                    CmdExec->>Mimir: Probe Mimir connectivity (health/ping)
+                    alt Mimir reachable
+                        Mimir-->>CmdExec: reachable
+                        Agent->>Fleet: ReportCommandStatus(upload STARTED/FINISHED, mimir=UP)
+                    else Mimir unreachable
+                        Mimir-->>CmdExec: timeout/err
+                        Agent->>Fleet: ReportCommandStatus(upload STARTED/FINISHED, mimir=DOWN)
+                    end
+                    Fleet->>ELab: PATCH /event/{run_event_id} metadata: upload window, flags, mimir status
+                end
+            else command = Metrics
+                rect rgb(254,249,195)
+                    CmdExec->>CmdExec: Run Metrics command
+                    loop async Metrics sampling
+                        CmdExec-)LocalTSDB: Collect/store metrics snapshots
+                    end
+                    CmdExec->>RunStore: Append Metrics outputs
+                    Agent->>Fleet: ReportCommandStatus(Metrics STARTED/FINISHED/FAILED)
+                    Fleet->>ELab: PATCH /event/{run_event_id} metadata: command state + last exit
+                end
+            else command = Log
+                rect rgb(237,233,254)
+                    CmdExec->>CmdExec: Run Log command
+                    loop async Log sampling
+                        CmdExec-)RunStore: Collect log snapshots
+                    end
+                    CmdExec->>RunStore: Append Log outputs
+                    Agent->>Fleet: ReportCommandStatus(Log STARTED/FINISHED/FAILED)
+                    Fleet->>ELab: PATCH /event/{run_event_id} metadata: command state + last exit
+                end
+            else command = measure (WIFI/BLE/CSI)
+                rect rgb(255,237,213)
+                    CmdExec->>CmdExec: Configure measurement mode
+                    loop async Measurements sampling
+                        CmdExec-)RunStore: Collect measurement snapshot
+                        CmdExec-)RunStore: Save measurement to artifacts for MAINTENANCE
+                    end
+                    Agent->>Fleet: ReportCommandStatus(measure STARTED/FINISHED/FAILED)
+                    Fleet->>ELab: PATCH /event/{run_event_id} metadata: measure type + command state
+                end
+            else command = ExecuteShell
+                rect rgb(226,232,240)
+                    CmdExec->>RunStore: Record stdout/stderr/exit_code
+                    Agent->>Fleet: ReportCommandStatus(ExecuteShell STARTED/FINISHED/FAILED)
+                    Fleet->>ELab: PATCH /event/{run_event_id} metadata: command state + last exit
+                end
+            end
+            Fleet->>Fleet: Map command status to event metadata
+            Fleet->>ELab: PATCH /event/{run_event_id} metadata: command state projection
+            Agent->>Agent: Dispatch next command from policy
+        end
+    end

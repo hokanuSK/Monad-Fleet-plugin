@@ -1,0 +1,168 @@
+% ============================================================
+% core_updated_v3.tex
+% - Analysis and Implementation proposal as SECTIONS
+% - Reduced number of subsubsections by merging into \paragraph blocks
+% - Fixed citations (no numeric keys like \cite{2}; use bib keys)
+% ============================================================
+
+\section{Introduction}
+\label{sec:introduction}
+
+Bezdrôtové siete Wi‑Fi predstavujú jednu z najpoužívanejších komunikačných technológií a zároveň môžu slúžiť
+ako zdroj informácií o priestore a dianí v ňom (tienenie signálu, zmeny úrovne prijímaného signálu, zmeny
+aktivity zariadení). Pri opakovaných alebo dlhodobých meraniach však ad‑hoc prístup rýchlo naráža na limity:
+nejednotná konfigurácia medzi uzlami, slabá synchronizácia času, náročná správa a archivácia dát a riziko,
+že samotné meranie bude nežiaducim spôsobom ovplyvňovať Wi‑Fi prostredie. Z toho vyplýva potreba
+centralizovaného riadenia meracích uzlov a automatizácie experimentálneho procesu.
+
+\section{Analysis}
+\label{sec:analysis}
+
+\subsection{WiFi Sensing / Wireless Sensing (BLE + WiFi)}
+\label{subsec:wifi-sensing}
+
+Táto časť popisuje wireless sensing čisto teoreticky: čo sa meria, aké metriky existujú, ako vyzerajú dáta
+a čo z toho vyplýva pre návrh experimentu (bez implementácie).
+
+\paragraph{Čo je „wireless sensing“ a na čo je dobré.}
+Wireless sensing využíva rádiové signály (Wi‑Fi, BLE, prípadne UWB) na nepriamu inferenciu stavu prostredia:
+prítomnosť/pohyb osôb, hrubú lokalizáciu, rozpoznávanie aktivít, odhad vzdialenosti alebo zmeny prostredia.
+Pre Wi‑Fi sensing sa často uvádza delenie úloh na \textit{detekciu, rozpoznávanie a odhad} \cite{ma2019wifisense_survey}.
+
+\paragraph{Metriky a tvar dát.}
+Metrika je číselná veličina (alebo vektor/matica veličín), ktorá kvantifikuje vlastnosť signálu/kanála v čase.
+Typické dáta v sensing sú: (i) časové rady (napr. RSSI), (ii) vektory/matice na rámec (napr. CSI), a (iii) udalosti
+(napr. BLE advertisementy s časovou pečiatkou).
+
+\paragraph{BLE: advertisements (sending / collection).}
+V BLE režime \textit{advertising} zariadenie vysiela broadcast rámce a v režime \textit{scanning} ich druhá strana zbiera
+\cite{bluetooth_core_ll}. K typickému záznamu sa viaže čas prijatia, identifikátor vysielača, RSSI a voliteľne doplnkové polia payloadu.
+BLE používa dedikované advertising kanály (37/38/39) \cite{ble_channels_mathworks}. Prakticky to umožňuje jednoduché sensing úlohy ako proximity,
+hrubú trianguláciu pri viacerých receiveroch alebo nepriamu detekciu pohybu cez zmeny RSSI/počtu prijatých rámcov.
+
+\paragraph{Wi‑Fi: CSI sensing (Channel State Information).}
+CSI popisuje stav kanála na úrovni OFDM subnosičov (komplexné hodnoty amplitúdy a fázy, často pre MIMO).
+Ide o vysokodimenzionálnu metriku citlivú na multipath zmeny spôsobené pohybom \cite{ma2019wifisense_survey}.
+Podľa platformy je možné získať aj doplnkové PHY indikátory (napr. SNR) \cite{espressif_esp_csi_doc}.
+CSI je dostupné aj na komoditnom HW cez špecifické nástroje/firmvér \cite{nexmon_csi_repo,gringoli2019_free_your_csi}
+a používa sa napr. pri rozpoznávaní aktivít (HAR) \cite{zhuravchak2022_wifi_csi_har}.
+Dôsledkom CSI je výrazne vyšší objem dát (stovky až tisíce hodnôt na rámec), čo priamo vplýva na metodiku (vzorkovanie, dávkovanie, synchronizácia).
+
+\paragraph{Pohyb ľudí v miestnosti a triangulácia (teória).}
+Pri viacerých uzloch v miestnosti je možné uvažovať BLE proximity/trianguláciu (viac receiverov zbiera RSSI tej istej reklamy)
+a Wi‑Fi CSI priestorové vzory (multipath sa mení podľa pozície a pohybu). Pre porovnateľnosť dát je kritická synchronizácia času,
+konzistentná konfigurácia uzlov a kontrolované scenáre.
+
+\subsection{Existujúce riešenia a odvodenie požiadaviek (eLabFTW ako riešenie)}
+\label{subsec:existing-solutions}
+
+\paragraph{Experiment control v testbedoch.}
+Frameworky pre opakovateľné experimenty a zber meraní (napr. OMF/OML) a testbedy typu Emulab/CloudLab
+\cite{omf_home,emulab_docs,cloudlab_technology} poskytujú infraštruktúru a orchestrace, no typicky neriešia
+laboratórnu evidenciu protokolov a metaúdajov spôsobom ELN.
+
+\paragraph{Fleet management / device management v IoT a IT praxi.}
+Pre správu flotíl sa používajú OTA/device management platformy (balena, Mender), správa endpointov (FleetDM) a
+konfiguračný manažment (Ansible, Salt) \cite{balena_site,mender_fleet,fleetdm_site,ansible_intro,salt_intro}.
+Tieto nástroje riešia deployment/aktualizácie/monitoring, ale samé osebe nenahrádzajú experimentálny denník.
+
+\paragraph{Odvodené požiadavky na softvér a voľba eLabFTW.}
+Riešenie musí podporovať evidenciu experimentu (protokol, parametre, topológia, uzly, verzie), jednoznačné identifikovanie behov (run ID),
+reprodukovateľnosť (konfigurácia + časové značky), robustný zber dát pri dlhých behoch a export metadát aj raw dát.
+ELN systémy slúžia na evidenciu experimentov, protokolov, konfigurácií a výsledkov; eLabFTW je open‑source ELN s web UI a REST API
+\cite{elabftw_site,elabftw_github,elabftw_api_pdf}, preto v tomto projekte tvorí evidenčnú vrstvu metadát a integračný bod.
+
+\section{Implementation proposal}
+\label{sec:implementation-proposal}
+
+\subsection{Funkčné a nefunkčné požiadavky}
+\label{subsec:req}
+
+\paragraph{Funkčné požiadavky.}
+Evidencia experimentu (cieľ, protokol, parametre, topológia, uzly), štart/stop merania s run ID, zber dát z uzlov (BLE/Wi‑Fi metriky),
+synchronizácia času a konfigurácií (verzionovanie) a export dát/metadát.
+
+\paragraph{Nefunkčné požiadavky.}
+Systém musí zvládnuť vysoký objem dát (najmä pri CSI), dlhé behy, škálovanie na viac miestností/uzlov, reprodukovateľnosť,
+robustnosť pri výpadkoch a bezpečnosť (auth, šifrovanie). Pri lokálnom ukladaní dát je potrebné počítať s limitmi flash/SD
+a minimalizovať zbytočné zápisy (buffering, batching, rotácia) \cite{flash_wear_note}.
+
+\paragraph{Rozsah prostredia a typy uzlov.}
+Uvažujú sa meracie uzly rôznych tried: ESP32 (BLE a prípadne CSI) \cite{espressif_esp_csi_doc}, Raspberry Pi (agent, Wi‑Fi adaptér, aj dual‑band),
+a Particle Proton~2 (jednoduchšia telemetria/zber podľa zadania).
+
+\subsection{Koncepcia a metodika experimentu}
+\label{subsec:experiment-concept}
+
+\paragraph{„Filozofia“ experimentu: cieľ, validita, rušenie, realizovateľnosť.}
+Koncepcia experimentu musí definovať cieľ merania, kritériá validity (kompletné dáta, konzistentná konfigurácia, správne časové značky),
+minimalizáciu rušenia a realizovateľnosť z pohľadu objemu dát a správy (automatizácia, prenos, retry).
+
+\paragraph{Synchronizácia (čas a prenos dát).}
+Časové značky musia byť porovnateľné medzi uzlami; odporúčaný základ je NTP (synchronizácia pri štarte a následne periodicky)
+\cite{ntp_rfc5905}. Druhá rovina je synchronizácia dát: definovať, kedy a ako často uzol odosiela dáta do centrálneho úložiska
+(dávkovanie, lokálny buffer pri výpadku siete, potvrdenia prijatia).
+
+\paragraph{Vzorkovanie merania a odhad objemu dát.}
+Pri dlhých behoch je vhodné explicitne zvoliť režim (fixný interval, dvojúrovňové meranie, adaptívny režim).
+Pri odhade objemu dát pre 24 hodín, kde $T$ je interval a $S$ veľkosť záznamu:
+\begin{equation}
+D = \frac{86400}{T} \cdot S
+\end{equation}
+Kratší interval zvyšuje objem dát aj počet zápisov; preto je potrebné navrhnúť buffering/rotáciu a prenos tak, aby bol udržateľný \cite{flash_wear_note}.
+
+\paragraph{Umiestnenie zariadení (poloha meracích bodov).}
+Umiestnenie uzlov ovplyvňuje interpretáciu dát; zohľadňuje sa geometria priestoru, prekážky, zdroje rušenia, reprezentatívnosť bodov
+a praktické aspekty (napájanie, bezpečnosť, stabilná orientácia antény). Výstupom má byť pôdorysný náčrt s bodmi a zdôvodnením.
+
+\subsection{Integrácia eLabFTW a návrh implementácie (externý plugin + gRPC)}
+\label{subsec:integration-grpc}
+
+\paragraph{Model rozšírenia: externá služba namiesto interného pluginu.}
+eLabFTW typicky rozširovanie realizuje cez REST API a doplnkové kontajnery/služby (nie „in‑process“ plugin systém).
+Preto je integračná vrstva navrhnutá ako externá služba (Monad Fleet plugin), ktorá polluje eLabFTW API, udržiava stav behov a komunikuje so zariadeniami cez gRPC.
+
+\paragraph{Mapovanie entít eLabFTW na fleet use‑case.}
+\textbf{Items/Resources} reprezentujú fyzické zariadenia flotily (1 item = 1 zariadenie), \textbf{Experiments} nesú politiku/konfiguráciu (vrátane príkazových skupín),
+\textbf{Events} reprezentujú konkrétny plánovaný alebo vykonaný beh pre konkrétne zariadenie a \textbf{Tags} slúžia na párovanie experimentov a zariadení do logických skupín.
+
+\paragraph{Custom JSON fields (Resource/Experiment/Event).}
+JSON polia tvoria štruktúrované rozhranie pre integračnú vrstvu:
+\begin{itemize}
+  \item Resource: \texttt{mac\_address}, \texttt{last\_seen\_at} (aktualizované pri gRPC \texttt{Hello}).
+  \item Experiment: \texttt{command\_groups} (zoznam skupín; príkazy v liste; poradie podľa indexu; JSON ako zdroj pravdy).
+  \item Event: \texttt{status} $\in \{\texttt{PLANNED}, \texttt{RUNNING}, \texttt{COMPLETED}, \texttt{FAILED}, \texttt{PARTIAL}\}$ a \texttt{command\_group\_id};
+        stav spravuje integračná vrstva.
+\end{itemize}
+
+\begin{figure}[!htbp]
+  \centering
+  \includegraphics[width=0.95\linewidth]{img/1.png}
+  \caption{Class diagram -- Resource (Item) metadáta + Experiment politiky.}
+  \label{fig:class-resource-experiment-policies}
+\end{figure}
+
+\begin{figure}[!htbp]
+  \centering
+  \includegraphics[width=0.95\linewidth]{img/2.png}
+  \caption{Class diagram -- Event + stav behu politiky.}
+  \label{fig:class-event-policy-state}
+\end{figure}
+
+\paragraph{Procesy (sekvenčné diagramy).}
+Z návrhu vyplývajú dva hlavné scenáre: (A) zmena experimentu v GUI vedie k vytváraniu/aktualizácii eventov pre zariadenia v rovnakej tag skupine,
+a (B) registrácia zariadenia cez gRPC vedie k aktualizácii metadát a vykonaniu plánovaných príkazov s priebežným zápisom stavu do eLabFTW.
+
+\begin{figure}[!htbp]
+  \centering
+  \includegraphics[width=0.95\linewidth]{img/sequence_experiment_events.png}
+  \caption{Sequence – Experiment vytvorený v GUI $\rightarrow$ generovanie Events.}
+  \label{fig:seq-experiment-events}
+\end{figure}
+
+\begin{figure}[!htbp]
+  \centering
+  \includegraphics[width=0.95\linewidth]{img/sequence_device_config.png}
+  \caption{Sequence – Registrácia zariadenia $\rightarrow$ odoslanie konfigurácie.}
+  \label{fig:seq-device-config}
+\end{figure}

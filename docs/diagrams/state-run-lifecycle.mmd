@@ -1,0 +1,36 @@
+%% NOTE: Keep this diagram updated with any protocol or flow changes!
+%% Last updated: 2026-03-30
+stateDiagram-v2
+    direction TB
+    title: Run Lifecycle State Machine
+
+    [*] --> PREPARING
+
+    state "PREPARING" as PREPARING
+    state "EXECUTING" as EXECUTING
+    state "UPLOADING" as UPLOADING
+    state "MAINTAINING" as MAINTAINING
+    state "SLEEPING" as SLEEPING
+
+    PREPARING --> EXECUTING: GetPolicy = OK / NOT_MODIFIED
+    EXECUTING --> MAINTAINING: command loop done<br/>run persisted locally
+    MAINTAINING --> UPLOADING: maintenance window open<br/>pending data
+    UPLOADING --> SLEEPING: upload fail / timeout<br/>or window closes
+
+    PREPARING --> SLEEPING: GetPolicy = NO_WORK
+    SLEEPING --> PREPARING: next prepare poll
+    UPLOADING --> MAINTAINING: next pending run<br/>window still open
+    UPLOADING --> UPLOADING: queue drained<br/>(ACCEPTED / DUPLICATE)
+
+    classDef prepare fill:#dcfce7,stroke:#16a34a,color:#052e16,stroke-width:1.5px
+    classDef executing fill:#eef2ff,stroke:#4f46e5,color:#1e1b4b,stroke-width:1.5px
+    classDef maintenance fill:#fff3e0,stroke:#d97706,color:#422006,stroke-width:1.5px
+    class PREPARING prepare
+    class EXECUTING executing
+    class MAINTAINING,UPLOADING,SLEEPING maintenance
+
+    note right of MAINTAINING
+      No data-loss path:
+      unsent runs stay pending
+      until a later maintenance window.
+    end note

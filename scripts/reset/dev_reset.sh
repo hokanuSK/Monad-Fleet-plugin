@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Resets only Monad Fleet state and observability data.
+# Does NOT touch MySQL/eLabFTW database volumes.
+
+RESET_STATE="${RESET_STATE:-true}"
+RESET_METRICS="${RESET_METRICS:-true}"
+RESET_GRAFANA="${RESET_GRAFANA:-false}"
+
+if [[ "${RESET_STATE}" == "true" ]]; then
+  echo "[1/3] Reset Fleet service state"
+  docker compose exec -T monad-fleet-service sh -lc "rm -f /data/state.json /data/ingest-metrics.ndjson || true"
+  docker compose restart monad-fleet-service >/dev/null
+else
+  echo "[1/3] Skip Fleet state reset (RESET_STATE=${RESET_STATE})"
+fi
+
+if [[ "${RESET_METRICS}" == "true" ]]; then
+  echo "[2/3] Reset Prometheus+Mimir data"
+  docker compose exec -T prometheus sh -lc "rm -rf /prometheus/* || true"
+  docker compose exec -T mimir sh -lc "rm -rf /data/* || true"
+  docker compose restart prometheus mimir >/dev/null
+else
+  echo "[2/3] Skip metrics reset (RESET_METRICS=${RESET_METRICS})"
+fi
+
+if [[ "${RESET_GRAFANA}" == "true" ]]; then
+  echo "[3/3] Reset Grafana local data"
+  docker compose exec -T grafana sh -lc "rm -rf /var/lib/grafana/* || true"
+  docker compose restart grafana >/dev/null
+else
+  echo "[3/3] Skip Grafana reset (RESET_GRAFANA=${RESET_GRAFANA})"
+fi
+
+echo "Reset complete."
+
