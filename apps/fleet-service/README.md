@@ -16,7 +16,7 @@ Python gRPC service that integrates devices with eLabFTW for Wi-Fi sensing autom
   - `POST /ingest/v1/artifacts` (JSON+base64 artifact ingest; uploads to eLabFTW experiment attachments)
 - Device resource discovery/creation in eLabFTW Items/Resources.
 - Device `last_seen_at` and capabilities updates on `Hello`.
-- Device runtime state updates in item metadata (`fleet_v2_runtime`) across `GetAssignment`, `GetPolicy`, `AckPrepared`, and `PublishReport`.
+- Device runtime state updates in item metadata (`fleet_v2_runtime`) across `GetPolicy`, `AckPrepared`, and `PublishReport`.
 - Policy fetch from fleet-tagged experiments (`fleet` by default), using experiment metadata from JSON editor/custom fields.
   - Default metadata keys checked in order: `fleet.policy`, `policy`, `fleet_policy`, `policy_json`.
 - Canonical policy hashing (`policy_revision = sha256:<hash>`).

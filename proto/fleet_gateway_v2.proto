@@ -8,7 +8,6 @@ service FleetManager {
   rpc Hello(HelloRequest) returns (HelloResponse);
 
   // PREPARE
-  rpc GetAssignment(GetAssignmentRequest) returns (GetAssignmentResponse);
   rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse);
   rpc AckPrepared(AckPreparedRequest) returns (AckPreparedResponse);
 
@@ -57,25 +56,9 @@ message NetworkInterface {
   string firmware = 5;
 }
 
-message GetAssignmentRequest {
-  string agent_id = 1;
-}
-
-message GetAssignmentResponse {
-  enum Status {
-    STATUS_UNSPECIFIED = 0;
-    ASSIGNED = 1;
-    NO_WORK = 2;
-  }
-  Status status = 1;
-  string experiment_id = 2;
-  string policy_id = 3;
-  google.protobuf.Timestamp measurement_from = 4;
-  google.protobuf.Timestamp measurement_to = 5;
-}
-
 message GetPolicyRequest {
   string agent_id = 1;
+  // Optional client hint for compatibility with older loops.
   string experiment_id = 2;
   string last_policy_id = 3;
 }
@@ -85,10 +68,16 @@ message GetPolicyResponse {
     STATUS_UNSPECIFIED = 0;
     OK = 1;
     NOT_MODIFIED = 2;
-    NO_POLICY = 3;
+    NO_WORK = 3;
   }
   Status status = 1;
+  // Present when status == OK.
   Policy policy = 2;
+  // Assignment context returned for OK/NOT_MODIFIED (and optionally NO_WORK).
+  string experiment_id = 3;
+  string policy_id = 4;
+  google.protobuf.Timestamp measurement_from = 5;
+  google.protobuf.Timestamp measurement_to = 6;
 }
 
 message Policy {

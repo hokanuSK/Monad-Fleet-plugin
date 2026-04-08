@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY proto ./proto
 COPY gateway_server.py ./gateway_server.py
+COPY monad_fleet_service ./monad_fleet_service
 
 RUN python -m grpc_tools.protoc \
     -I./proto \

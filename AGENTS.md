@@ -22,7 +22,6 @@ This repo runs a local eLabFTW instance plus a Python gRPC "fleet manager" servi
 - `apps/device-sim/`: simulator clients:
   - `sim_device_client.py`: legacy `fleet.v1` flow.
   - `agent_v2_client.py`: v2 PREPARE/REPORT agent with local spooling (`DATA_ROOT`).
-- `apps/gateway-plugin/`: legacy gateway plugin prototype.
 - `scripts/smoke/`: end-to-end smoke tests for WiFi/BLE/CSI + Prometheus/Mimir.
 - `scripts/rpi/`: deploy/run the v2 agent on a Raspberry Pi via SSH + systemd.
 - `infra/observability/`: Prometheus/Mimir/Grafana config/provisioning.
@@ -32,7 +31,7 @@ This repo runs a local eLabFTW instance plus a Python gRPC "fleet manager" servi
 
 Compatibility note:
 
-- Legacy paths (`monad-fleet-service/`, `device-sim/`, `gateway-plugin/`, `observability/`, `elabimg/`, `data/`, `tmp/`, `output/`) are symlinked for backward compatibility.
+- Legacy paths (`monad-fleet-service/`, `device-sim/`, `observability/`, `elabimg/`, `data/`, `tmp/`, `output/`) are symlinked for backward compatibility.
 
 ## Notion Ops Workflow (For Agents)
 

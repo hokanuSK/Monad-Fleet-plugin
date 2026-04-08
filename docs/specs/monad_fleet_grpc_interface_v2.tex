@@ -84,7 +84,7 @@ Use this path to bring a new device implementation online with predictable inter
   \item \textbf{Implement required identity behavior.}
   Persist a stable \texttt{agent\_id}. Do not generate a new identifier on every reboot.
   \item \textbf{Implement PREPARE loop.}
-  \texttt{Hello} $\rightarrow$ \texttt{GetAssignment} $\rightarrow$ \texttt{GetPolicy} $\rightarrow$ \texttt{AckPrepared}.
+  \texttt{Hello} $\rightarrow$ \texttt{GetPolicy} $\rightarrow$ \texttt{AckPrepared}.
   Cache \texttt{policy\_id}; handle \texttt{NO\_WORK} and \texttt{NOT\_MODIFIED}.
   \item \textbf{Implement MEASURE execution.}
   Execute \texttt{CommandGroup.commands} in order with timeout/retry semantics.
@@ -184,7 +184,6 @@ Served package: \texttt{fleet.v2}. Service: \texttt{FleetManager}.
 
 \begin{verbatim}
 rpc Hello(HelloRequest) returns (HelloResponse);
-rpc GetAssignment(GetAssignmentRequest) returns (GetAssignmentResponse);
 rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse);
 rpc AckPrepared(AckPreparedRequest) returns (AckPreparedResponse);
 rpc PublishReport(PublishReportRequest) returns (PublishReportResponse);
@@ -200,18 +199,14 @@ rpc PublishEvents(PublishEventsRequest) returns (PublishEventsResponse); // opti
 \texttt{agent.agent\_id} &
 gRPC success with \texttt{allowed\_mode}, poll hint, server metadata &
 Call on startup and periodically on reconnect; refresh local control-plane assumptions from response. \\
-\texttt{GetAssignment} &
-\texttt{agent\_id} &
-\texttt{ASSIGNED} or \texttt{NO\_WORK} &
-If \texttt{NO\_WORK}, sleep using \texttt{recommended\_prepare\_poll\_sec}. \\
 \texttt{GetPolicy} &
 \texttt{agent\_id} &
-\texttt{OK}, \texttt{NOT\_MODIFIED}, or \texttt{NO\_POLICY} &
+\texttt{OK}, \texttt{NOT\_MODIFIED}, or \texttt{NO\_WORK} &
 Cache by \texttt{policy\_id}. Reuse cached policy on \texttt{NOT\_MODIFIED}. \\
 \texttt{AckPrepared} &
 \texttt{agent\_id}, \texttt{preparation\_id}, \texttt{policy\_id} &
 \texttt{ACCEPTED} (including duplicate \texttt{preparation\_id}) &
-Treat \texttt{REJECTED} as a control-plane failure; reacquire assignment/policy before measure. \\
+Treat \texttt{REJECTED} as a control-plane failure; reacquire policy before measure. \\
 \texttt{PublishReport} &
 \texttt{report.run\_id} and agent identity &
 \texttt{ACCEPTED} or \texttt{DUPLICATE} &
@@ -226,7 +221,7 @@ Optional in this profile; currently disabled by default and returns \texttt{REJE
 \section{Run Lifecycle}
 \subsection{Operational phases}
 \begin{itemize}
-  \item \textbf{PREPARE}: \texttt{Hello}, \texttt{GetAssignment}, \texttt{GetPolicy}, \texttt{AckPrepared}
+  \item \textbf{PREPARE}: \texttt{Hello}, \texttt{GetPolicy}, \texttt{AckPrepared}
   \item \textbf{MEASURE}: local policy command execution on agent
   \item \textbf{REPORT}: \texttt{PublishReport}; optional \texttt{PublishEvents}
 \end{itemize}
@@ -235,14 +230,13 @@ Optional in this profile; currently disabled by default and returns \texttt{REJE
 \begin{verbatim}
 1) Hello(agent descriptor)
 2) repeat:
-   a) GetAssignment(agent_id)
+   a) GetPolicy(agent_id, last_policy_id)
    b) if NO_WORK: sleep(recommended_prepare_poll_sec)
-   c) GetPolicy(agent_id, experiment_id, last_policy_id)
-   d) if NOT_MODIFIED: sleep(recommended_prepare_poll_sec)
-   e) AckPrepared(...)
-   f) execute command_groups
-   g) PublishReport(run_id, events, artifacts, summary)
-   h) on ACCEPTED or DUPLICATE: cache policy_id and continue
+   c) if NOT_MODIFIED: sleep(recommended_prepare_poll_sec)
+   d) AckPrepared(...)
+   e) execute command_groups
+   f) PublishReport(run_id, events, artifacts, summary)
+   g) on ACCEPTED or DUPLICATE: cache policy_id and continue
 \end{verbatim}
 
 \section{Process Flow Diagrams}
@@ -255,9 +249,9 @@ The following diagram illustrates the complete flow of experiment creation and e
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=\textwidth]{process-a.svg}
+\includegraphics[width=\textwidth]{sequence-policy-authoring-prepare.svg}
 \caption{Process A - Complete flow from experiment creation through event generation. The researcher creates or updates experiments via the web interface, which triggers the Monad Fleet plugin to poll for changes and generate appropriate events for device execution.}
-\label{fig:process-a}
+\label{fig:sequence-policy-authoring-prepare}
 \end{figure}
 
 \textbf{Key activities in Process A:}
@@ -268,15 +262,22 @@ The following diagram illustrates the complete flow of experiment creation and e
   \item \textbf{Monad Fleet plugin:} Monitors for experiment changes and generates events for device execution
 \end{itemize}
 
-\subsection{Process B: Report Publishing and Event Management}
+\subsection{Process B: Runtime (Split Views)}
 
-The following diagram shows the report publishing flow and how events are managed within the system:
+The runtime flow is maintained as two diagrams: execution and maintenance.
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=\textwidth]{process-b.svg}
-\caption{Process B - Report publishing flow showing device execution, report submission, and event management. Devices execute policies, publish reports, and the system manages event creation and updates.}
-\label{fig:process-b}
+\includegraphics[width=\textwidth]{sequence-execution-runtime.svg}
+\caption{Process B1 - Execution runtime flow. Devices execute policy command groups, report command status, and publish run reports.}
+\label{fig:sequence-execution-runtime}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{sequence-maintenance-runtime.svg}
+\caption{Process B2 - Maintenance runtime flow. The agent wakes on cron, checks maintenance window plus slot, and drains pending uploads while the window remains open.}
+\label{fig:sequence-maintenance-runtime}
 \end{figure}
 
 \textbf{Key activities in Process B:}
@@ -360,23 +361,14 @@ This diagram shows how existing events are updated with additional report data:
   \item \texttt{server\_version}, \texttt{server\_time}, \texttt{max\_batch\_size}
 \end{itemize}
 
-\subsection{\texttt{GetAssignment}}
-\textbf{Required:} \texttt{agent\_id}
-
-\textbf{Responses:}
-\begin{itemize}
-  \item \texttt{ASSIGNED}: returns \texttt{experiment\_id}, \texttt{policy\_id}, measurement window.
-  \item \texttt{NO\_WORK}: no currently selected policy for this agent.
-\end{itemize}
-
 \subsection{\texttt{GetPolicy}}
 \textbf{Required:} \texttt{agent\_id}. Optional: \texttt{experiment\_id}, \texttt{last\_policy\_id}.
 
 \textbf{Responses:}
 \begin{itemize}
-  \item \texttt{OK}: full \texttt{Policy}.
-  \item \texttt{NOT\_MODIFIED}: \texttt{last\_policy\_id} still current.
-  \item \texttt{NO\_POLICY}: no policy found or mismatch.
+  \item \texttt{OK}: full \texttt{Policy} plus assignment context.
+  \item \texttt{NOT\_MODIFIED}: \texttt{last\_policy\_id} still current, assignment context returned.
+  \item \texttt{NO\_WORK}: no currently selected policy for this agent.
 \end{itemize}
 
 \subsection{\texttt{AckPrepared}}
@@ -439,7 +431,7 @@ Stop and raise operator-visible configuration/security error. \\
 
 \subsection{Application-level response status handling}
 \begin{itemize}
-  \item \texttt{AckPrepared.REJECTED}: reacquire assignment/policy and do not execute stale policy.
+  \item \texttt{AckPrepared.REJECTED}: reacquire policy and do not execute stale policy.
   \item \texttt{PublishReport.REJECTED}: keep run in pending spool and retry after backoff.
   \item \texttt{PublishReport.DUPLICATE}: treat as successful delivery outcome.
   \item \texttt{PublishEvents.EventAck.REJECTED}: do not fail the run lifecycle in this profile (live events are optional).
@@ -447,7 +439,7 @@ Stop and raise operator-visible configuration/security error. \\
 
 \subsection{Retry timing guidance}
 \begin{itemize}
-  \item Control-plane RPCs (\texttt{Hello/GetAssignment/GetPolicy/AckPrepared}): start with 1-2s base delay and cap at 30-60s with jitter.
+  \item Control-plane RPCs (\texttt{Hello/GetPolicy/AckPrepared}): start with 1-2s base delay and cap at 30-60s with jitter.
   \item Report replay (\texttt{PublishReport}): keep retrying until \texttt{ACCEPTED} or \texttt{DUPLICATE}; never drop unsent runs silently.
   \item Preserve the same idempotency identifiers across retries (\texttt{preparation\_id}, \texttt{run\_id}, \texttt{event\_id}).
 \end{itemize}
@@ -837,7 +829,7 @@ CSI remains artifact-first (run artifacts and optional eLabFTW uploads).
 
 \subsection{Device resources}
 On first \texttt{Hello}, server ensures resource item exists for \texttt{Device <agent\_id>} and updates metadata.
-During \texttt{GetAssignment} and later prepare/report RPCs, the server reuses that resource and patches runtime status metadata (\texttt{fleet\_v2\_runtime}) for operational visibility.
+During \texttt{GetPolicy} and later prepare/report RPCs, the server reuses that resource and patches runtime status metadata (\texttt{fleet\_v2\_runtime}) for operational visibility.
 Bookable defaults are enforced in current deployment:
 \begin{itemize}
   \item \texttt{is\_bookable=1}
@@ -1016,7 +1008,6 @@ FULL_CSI_TIMEOUT_S=10
 REPORT_RPC_TIMEOUT_S=120
 CONTROL_RPC_TIMEOUT_S=30
 HELLO_RPC_TIMEOUT_S=<optional; defaults to CONTROL_RPC_TIMEOUT_S>
-ASSIGNMENT_RPC_TIMEOUT_S=<optional; defaults to CONTROL_RPC_TIMEOUT_S>
 POLICY_RPC_TIMEOUT_S=<optional; defaults to CONTROL_RPC_TIMEOUT_S>
 ACK_PREPARED_RPC_TIMEOUT_S=<optional; defaults to CONTROL_RPC_TIMEOUT_S>
 
@@ -1357,7 +1348,7 @@ Before onboarding a non-reference device agent, run at least the following tests
 \begin{enumerate}
   \item \textbf{Identity stability test}: reboot device and confirm \texttt{agent\_id} is unchanged.
   \item \textbf{Required field validation}: verify no control-plane call is sent with missing required IDs.
-  \item \textbf{No-work polling}: verify \texttt{GetAssignment.NO\_WORK} respects poll interval backoff.
+  \item \textbf{No-work polling}: verify \texttt{GetPolicy.NO\_WORK} respects poll interval backoff.
   \item \textbf{Policy cache test}: verify \texttt{GetPolicy.NOT\_MODIFIED} reuses cached policy.
   \item \textbf{Ack idempotency}: replay same \texttt{preparation\_id}; ensure server keeps \texttt{ACCEPTED}.
   \item \textbf{Report idempotency}: replay same \texttt{run\_id|agent\_id|policy\_id}; ensure \texttt{DUPLICATE}.

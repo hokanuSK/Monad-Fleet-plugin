@@ -1,6 +1,6 @@
 # Fleet v2 Protocol Transport Comparison
 
-**Date:** 2026-03-24  
+**Date:** 2026-03-26  
 **Scope:** Compare `protobuf-only` (unidirectional), `gRPC protobuf (HTTP/2 modeled)`, `REST/JSON`, and `JSON-RPC` for the Fleet v2 PREPARE/REPORT cycle.
 
 ## Executive Summary
@@ -21,25 +21,23 @@ Key percentages (arithmetic mean of per-profile percentages across small/medium/
 
 ## Important Context About Bidirectional Communication
 
-Current `fleet.v2` usage here is unidirectional RPC only (`Hello`, `GetAssignment`, `GetPolicy`, `AckPrepared`, `PublishReport`, optional unidirectional `PublishEvents`).
+Current `fleet.v2` usage here is unidirectional RPC only (`Hello`, `GetPolicy`, `AckPrepared`, `PublishReport`, optional unidirectional `PublishEvents`).
 With bidirectional streaming, percentages would likely shift because overhead amortization and flow-control behavior are different.
 
 ## Methodology
 
 ### Workload model
 
-One PREPARE+REPORT cycle = 10 unidirectional messages:
+One PREPARE+REPORT cycle = 8 unidirectional messages:
 
 1. `HelloRequest`
 2. `HelloResponse`
-3. `GetAssignmentRequest`
-4. `GetAssignmentResponse`
-5. `GetPolicyRequest`
-6. `GetPolicyResponse`
-7. `AckPreparedRequest`
-8. `AckPreparedResponse`
-9. `PublishReportRequest`
-10. `PublishReportResponse`
+3. `GetPolicyRequest`
+4. `GetPolicyResponse`
+5. `AckPreparedRequest`
+6. `AckPreparedResponse`
+7. `PublishReportRequest`
+8. `PublishReportResponse`
 
 Profiles:
 
@@ -51,10 +49,10 @@ Profiles:
 
 - `protobuf-only`: raw protobuf body
 - `gRPC protobuf (HTTP/2 modeled)`:
-  - gRPC message frame: `10 * 5 B = 50 B`
-  - HTTP/2 frame headers (modeled 5 frames per unidirectional RPC): `5 RPC * 5 * 9 B = 225 B`
-  - HTTP/2 metadata (assumed): `5 RPC * 120 B = 600 B`
-  - total modeled gRPC overhead per sequence: `875 B`
+  - gRPC message frame: `8 * 5 B = 40 B`
+  - HTTP/2 frame headers (modeled 5 frames per unidirectional RPC): `4 RPC * 5 * 9 B = 180 B`
+  - HTTP/2 metadata (assumed): `4 RPC * 120 B = 480 B`
+  - total modeled gRPC overhead per sequence: `700 B`
 - `REST/JSON`: raw JSON body
 - `JSON-RPC`: JSON-RPC envelope (`jsonrpc`, `id`, `method`, `params/result`) + JSON payload
 
@@ -69,15 +67,15 @@ The modeled gRPC overhead is built from protocol structure, not guessed:
 
 For one PREPARE+REPORT sequence:
 
-- `10 * 5 B` gRPC frames + `5 * 5 * 9 B` HTTP/2 frame headers + `5 * 120 B` metadata
-- total = `875 B`
+- `8 * 5 B` gRPC frames + `4 * 5 * 9 B` HTTP/2 frame headers + `4 * 120 B` metadata
+- total = `700 B`
 
 Sensitivity for metadata assumption:
 
 | `H_meta` per RPC | Total overhead per sequence | small overhead | medium overhead | large overhead |
 | ---: | ---: | ---: | ---: | ---: |
-| 60 B | 575 B | 12.75% | 5.27% | 1.65% |
-| 120 B | 875 B | 19.41% | 8.02% | 2.51% |
+| 60 B | 460 B | 10.20% | 4.22% | 1.32% |
+| 120 B | 700 B | 15.52% | 6.42% | 2.01% |
 | 180 B | 1175 B | 26.06% | 10.77% | 3.37% |
 
 ### Measurement basis

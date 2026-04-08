@@ -1,5 +1,7 @@
 {
   "theme": "default",
+  "deterministicIds": true,
+  "deterministicIDSeed": "fleetmanager-diagrams",
   "themeVariables": {
     "background": "#ffffff",
     "primaryColor": "#f4f4f4",
@@ -14,6 +16,14 @@
     "participantBorder": "#222",
     "participantTextColor": "#222",
     "noteBkgColor": "#fffbe6",
-    "noteBorderColor": "#ffe58f"
+    "noteBorderColor": "#ffe58f",
+    "diagramMarginX": 30,
+    "diagramMarginY": 20,
+    "actorMargin": 48,
+    "messageMargin": 22,
+    "messageAlign": "left",
+    "boxMargin": 16,
+    "boxTextMargin": 8,
+    "noteMargin": 14
   }
 }

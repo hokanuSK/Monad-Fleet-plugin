@@ -9,6 +9,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY proto ./proto
 COPY sim_device_client.py ./sim_device_client.py
 COPY agent_v2_client.py ./agent_v2_client.py
+COPY agent_v2 ./agent_v2
 
 RUN python -m grpc_tools.protoc \
     -I./proto \
