@@ -1,0 +1,121 @@
+{# required vars: rw visibilityArr teamsArr scopedTeamgroupsArr usersArr #}
+{% if ucpPage %}{# set this to true on ucp page for default permissions #}
+  {% set column = rw == 'canread' ? 'default_read' : 'default_write' %}
+  {% set permissionsJson = App.Users.userData[column] %}
+  {% set identifier = rw ~ 'defaultPermissions' %}
+{% else %}
+  {% set identifier = rw %}
+  {% set permissionsJson = Entity.entityData[rw] %}
+{% endif %}
+
+{# default icon/label are for canread #}
+{% set icon = 'eye' %}
+{% set label = 'Visibility'|trans %}
+{% set modalTitle = 'Select who can see this entry'|trans %}
+{% if rw == 'canwrite' or rw == 'canwrite_target' %}
+  {% set icon = 'pencil-alt' %}
+  {% set label = 'Can write'|trans %}
+  {% set modalTitle = 'Select who can edit this entry'|trans %}
+{% elseif rw == 'canbook' %}
+  {% set icon = 'calendar-plus' %}
+  {% set label = 'Can book'|trans %}
+  {% set modalTitle = 'Select who can book this entry'|trans %}
+{% endif %}
+{# Modal for permission edit #}
+<div class='modal fade' id='permModal-{{ identifier }}' tabindex='-1' role='dialog' aria-labelledby='permModalLabel_{{ identifier }}'>
+  <div class='modal-dialog modal-lg' role='document'>
+    <div class='modal-content'>
+      <div class='modal-header'>
+        <h5 class='modal-title' id='permModalLabel_{{ identifier }}'><i class='fas fa-fw fa-{{ icon }}' title='{{ label }}'></i> {{ modalTitle }}</h5>
+        <button type='button' class='close' data-dismiss='modal' aria-label='{{ 'Close'|trans }}'>
+          <span aria-hidden='true'>&times;</span>
+        </button>
+      </div>
+      <div class='modal-body'>
+        <div data-rw={{ rw }}>
+          <label for='{{ identifier }}_select_base'>{{ 'Base'|trans }}</label>
+          <p class='smallgray'>{{ 'This setting sets a baseline upon which you can add more permissions by selecting teams, user groups or users below.'|trans }}</p>
+          <select id='{{ identifier }}_select_base' class='form-control'>
+            {% for key, value in visibilityArr %}
+              <option value='{{ key }}'
+              {{ permissionsJson|extractJson('base') == key ? ' selected' }}
+              >{{ value|trans }}</option>
+            {% endfor %}
+          </select>
+          {# TEAMS #}
+          <label for='{{ identifier }}_select_teams' class='mt-2'>+ {{ 'Teams'|trans }}</label> <p class='smallgray d-inline'>{{ '(hold %sctrl%s key to select multiple entries, %sctrl%s + click to deselect a selected entry)'|trans|format('<kbd>', '</kbd>', '<kbd>', '</kbd>')|raw }}</p>
+          <p class='smallgray'>{{ 'Selecting a team here will give access to all members of this team.'|trans }}</p>
+          {% include 'filter-input-snippet.html' with {'target': identifier ~ '_select_teams', targetType: 'option'} %}
+          <select id='{{ identifier }}_select_teams' multiple class='form-control' autocomplete='off'>
+            {% for team in teamsArr %}
+              <option value='team:{{ team.id }}'
+              {{ permissionsJson|isInJsonArray('teams', team.id) ? ' selected' }}
+              >{{ 'Team'|trans }} - {{ team.name }}</option>
+            {% endfor %}
+          </select>
+          {# USER GROUPS #}
+          <label for='{{ identifier }}_select_teamgroups' class='mt-2'>+ {{ 'User Groups'|trans }}</label>
+          <div class='d-flex'>
+            <p class='smallgray'>{{ '(hold %sctrl%s key to select multiple entries, %sctrl%s + click to deselect a selected entry)'|trans|format('<kbd>', '</kbd>', '<kbd>', '</kbd>')|raw }}</p>
+            <div class='ml-auto'>
+              <details closed>
+                <summary class='p-2 rounded hl-hover-gray'>{{ 'Set scope'|trans }}</summary>
+                <select aria-label='{{ 'Set scope'|trans }}' data-trigger='change' data-model='users/me' data-reload='{{ identifier }}_select_teamgroups' data-target='scope_teamgroups' class='form-control'>
+                  {% for case in enum('Elabftw\\Enums\\Scope').cases %}
+                    <option value='{{ case.value }}' {{ App.Users.userData.scope_teamgroups == case.value ? ' selected' }}>{{ case.toHuman() }}</option>
+                  {% endfor %}
+                </select>
+              </details>
+            </div>
+          </div>
+          <p class='smallgray'>{{ 'Selecting a user group here will give access to all users part of this user group.'|trans }}</p>
+          <select {{ scopedTeamgroupsArr|length == 0 ? 'disabled' }} id='{{ identifier }}_select_teamgroups' multiple class='form-control' autocomplete='off'>
+            {% for tg in scopedTeamgroupsArr %}
+              <option value='teamgroup:{{ tg.id }}'
+              {{ permissionsJson|isInJsonArray('teamgroups', tg.id) == ('teamgroup:' ~ tg.id) ? ' selected' }}
+                      >{{ tg.team_name }} - {{ tg.name }}</option>
+            {% endfor %}
+          </select>
+          {# USERS #}
+          <label for='{{ identifier }}_select_users' class='mt-2'>+ {{ 'Users'|trans }}</label> <p class='smallgray d-inline'>{{ 'Allow individual users to access this entry.'|trans }}</p>
+          <ul class='list-group mb-1' id='{{ identifier }}_list_users'>
+            {% set humanCan = permissionsJson|canToHuman %}
+            {% for user in humanCan.users %}
+              <li class='list-group-item w-100' data-id='{{ user.userid }}'>
+                <i class='fas fa-{{ rw == 'canread' ? 'eye' : 'pencil-alt' }}'></i> {{ user.fullname }} ({{ user.email }}) <span data-action='remove-parent' class='hover-danger'><i class='fas fa-xmark'></i></span>
+              </li>
+            {% endfor %}
+          </ul>
+          {# add user to permissions input #}
+          <div class='input-group'>
+            <input id='{{ identifier }}_select_users' type='text' data-identifier='{{ identifier }}' data-action='autocomplete' data-target='users' class='form-control' placeholder='{{ 'Add user'|trans }}' autocomplete='off'>
+            <div class='input-group-append'>
+              <button class='btn btn-primary' type='button' data-rw='{{ rw }}' data-identifier='{{ identifier }}' data-action='add-user-to-permissions'>{{ 'Add'|trans }}</button>
+            </div>
+          </div>
+          <div id='autocompleteAnchorDiv_{{ identifier }}'></div>
+        </div>
+        {% if rw == 'canread' and App.Config.configArr.anon_users and not ucpPage %}
+          <hr>
+          <div class='custom-control custom-checkbox'>
+            <input type='checkbox' class='custom-control-input' id='readAccessCheckbox' data-action='toggle-anonymous-access' autocomplete='off' {{ Entity.entityData.access_key ? 'checked' }}>
+            <label class='custom-control-label' for='readAccessCheckbox'>{{ 'Allow read access for anonymous users'|trans }}</label>
+          </div>
+          <div {{ not Entity.entityData.access_key ? 'hidden' }} id='anonymousAccessUrlDiv' class='mt-2'>
+            <div class='input-group'>
+              <div class='input-group-prepend'>
+                <button title='{{ 'Copy to clipboard'|trans }}' class='btn btn-outline-secondary' type='button' data-action='copy-to-clipboard' data-target='anonymousAccessUrlInput'><i class='fas fa-clone'></i></button>
+              </div>
+              <input type='url' class='form-control' readonly id='anonymousAccessUrlInput' value='{{ Entity.entityData.sharelink }}'>
+            </div>
+            <p class='smallgray'>{{ 'Anyone following this link can access this entry.'|trans }}</p>
+          </div>
+        {% endif %}
+      </div>
+      <div class='modal-footer'>
+        <button type='button' class='btn btn-secondary' data-dismiss='modal'>{{ 'Close'|trans }}</button>
+        <button type='button' class='btn btn-primary' data-dismiss='modal' data-identifier='{{ identifier }}' data-rw='{{ rw }}' {{ ucpPage ? 'data-is-user-default="1"' }} data-action='save-permissions'>{{ 'Save'|trans }}</button>
+      </div>
+    </div>
+  </div>
+</div>

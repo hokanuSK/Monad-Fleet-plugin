@@ -1,0 +1,98 @@
+#!/usr/bin/env php
+<?php
+
+/**
+ * @author Nicolas CARPi <nico-git@deltablot.email>
+ * @copyright 2012 Nicolas CARPi
+ * @see https://www.elabftw.net Official website
+ * @license AGPL-3.0
+ * @package elabftw
+ */
+
+declare(strict_types=1);
+
+namespace Elabftw\Commands;
+
+use Elabftw\Elabftw\App;
+use Elabftw\Elabftw\Env;
+use Elabftw\Elabftw\FsTools;
+use Elabftw\Enums\Storage;
+use Elabftw\Exceptions\AppException;
+use Elabftw\Exceptions\DatabaseErrorException;
+use Elabftw\Models\Config;
+use Elabftw\Services\Email;
+use Symfony\Component\Console\Application;
+use Symfony\Component\Mailer\Exception\InvalidArgumentException;
+use Symfony\Component\Mailer\Mailer;
+use Symfony\Component\Mailer\Transport;
+use Symfony\Component\Mime\Exception\RfcComplianceException;
+use Symfony\Component\Console\Logger\ConsoleLogger;
+use Symfony\Component\Console\Output\ConsoleOutput;
+
+use function dirname;
+
+require dirname(__DIR__) . '/vendor/autoload.php';
+
+$Application = new Application();
+$logger = new ConsoleLogger(new ConsoleOutput());
+try {
+    $Config = Config::getConfig();
+} catch (DatabaseErrorException $e) {
+    $logger->error('Database is not yet installed. Run bin/init db:install.');
+    exit;
+} catch (AppException $e) {
+    $logger->error($e->getMessage());
+    exit;
+}
+
+try {
+    $Email = new Email(
+        new Mailer(Transport::fromDsn($Config->getDsn())),
+        App::getDefaultLogger(),
+        $Config->configArr['mail_from'],
+        Env::asBool('DEMO_MODE'),
+    );
+} catch (RfcComplianceException $e) {
+    $logger->critical("It seems the configured sending email address is wrong. Try setting the 'mail_from' value to a valid email address: update config set conf_value = 'example@example.com' where conf_name = 'mail_from';\nError message:\n" . $e->getMessage() . "\n");
+    exit;
+} catch (InvalidArgumentException $e) {
+    $logger->critical("It seems your SMTP configuration is wrong. Try setting the 'smtp_address' value to a valid hostname: update config set conf_value = 'example.com' where conf_name = 'smtp_address';\nError message:\n" . $e->getMessage() . "\n");
+    exit;
+}
+
+$exportsFs = Storage::EXPORTS->getStorage();
+$sqlFs = FsTools::getFs(dirname(__DIR__) . '/src/sql');
+
+$Application->add(new InstallRedir());
+$Application->add(new GenI18n4Js());
+$Application->add(new CacheClear());
+$Application->add(new CheckDatabase((int) $Config->configArr['schema']));
+$Application->add(new CheckTsBalance((int) $Config->configArr['ts_balance'], $Email));
+$Application->add(new CleanDatabase());
+$Application->add(new ClearNotifications());
+$Application->add(new FingerprintCompounds());
+$Application->add(new ExportCommand($exportsFs));
+$Application->add(new ExportEln($exportsFs));
+$Application->add(new ImportEln($exportsFs));
+$Application->add(new ImportCompoundsCsv($exportsFs));
+$Application->add(new UpdateDatabase());
+$Application->add(new RevertSchema($sqlFs));
+$Application->add(new UpdateTo3());
+$Application->add(new UpdateTo34());
+$Application->add(new SnapFingers());
+$Application->add(new ForceSchema());
+$Application->add(new GenCache());
+$Application->add(new GenSchema($sqlFs));
+$Application->add(new MfaCode());
+$Application->add(new RefreshIdps($Config->configArr['proxy']));
+$Application->add(new SendNotifications($Email));
+$Application->add(new SendExpirationNotifications($Email));
+$Application->add(new TagsTeamsSync());
+$Application->add(new PruneUploads());
+$Application->add(new PruneExperiments());
+$Application->add(new PruneItems());
+$Application->add(new CheckUploads());
+$Application->add(new MigrateUploads());
+$Application->add(new ExperimentsTimestamp());
+
+$Application->run();

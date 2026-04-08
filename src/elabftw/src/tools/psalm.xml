@@ -1,0 +1,50 @@
+<?xml version="1.0"?>
+<!-- use findUnusedCode true to find a bunch of stuff -->
+<psalm
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xmlns="https://getpsalm.org/schema/config"
+    xsi:schemaLocation="https://getpsalm.org/schema/config vendor/vimeo/psalm/config.xsd"
+    strictBinaryOperands="true"
+    checkForThrowsInGlobalScope="true"
+    ignoreInternalFunctionFalseReturn="true"
+    ignoreInternalFunctionNullReturn="false"
+    reportMixedIssues="true"
+    errorLevel="3"
+    findUnusedVariablesAndParams="true"
+    findUnusedBaselineEntry="true"
+    findUnusedCode="false"
+>
+    <projectFiles>
+        <directory name="../../bin" />
+        <directory name="../../src" />
+        <directory name="../../var" />
+        <directory name="../../tests" />
+        <directory name="../../web" />
+        <ignoreFiles>
+            <directory name="../../cache" />
+            <directory name="../../uploads" />
+            <directory name="../../vendor" />
+            <directory name="../../tests" />
+            <file name="../../c3.php" />
+            <file name="../../src/Services/AdvancedSearchQuery/Grammar/Parser.php" />
+        </ignoreFiles>
+    </projectFiles>
+    <globals>
+        <var name="App" type="Elabftw\Elabftw\App" />
+    </globals>
+
+    <issueHandlers>
+        <UndefinedInterfaceMethod errorLevel="info" />
+        <!-- level 3 issues - slightly lazy code writing, but provably low false-negatives -->
+        <RedundantCondition errorLevel="info" />
+
+        <DocblockTypeContradiction errorLevel="info" />
+        <RedundantConditionGivenDocblockType errorLevel="info" />
+
+        <UnresolvableInclude errorLevel="info" />
+
+        <RawObjectIteration errorLevel="info" />
+        <UndefinedGlobalVariable errorLevel="info" />
+        <UncaughtThrowInGlobalScope errorLevel="info" />
+    </issueHandlers>
+</psalm>
