@@ -32,7 +32,7 @@ git clone --depth 1 "$ELABIMG_REPO" "$WORK_DIR"
 
 dockerfile="$WORK_DIR/Dockerfile"
 sed -i.bak \
-  "s|https://github.com/elabftw/elabftw/tarball/\\$ELABFTW_VERSION|https://github.com/${ELABFTW_OWNER}/${ELABFTW_REPO}/tarball/\\$ELABFTW_VERSION|g" \
+  "s|https://github.com/elabftw/elabftw/tarball/\$ELABFTW_VERSION|https://github.com/${ELABFTW_OWNER}/${ELABFTW_REPO}/tarball/\$ELABFTW_VERSION|g" \
   "$dockerfile"
 sed -i.bak "s|mv elabftw-\\* src|mv *elabftw* src|g" "$dockerfile"
 rm -f "$dockerfile.bak"
