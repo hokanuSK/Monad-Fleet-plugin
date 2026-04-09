@@ -270,6 +270,16 @@ Proxy validation (external + host-side):
 - `https://prometheus.32.195.200.179.sslip.io/-/healthy` -> healthy
 - `https://metrics.32.195.200.179.sslip.io/metrics` -> Prometheus metrics text
 
+TLS warning troubleshooting:
+- Trusted URL is hostname-based only:
+  - `https://elab.32.195.200.179.sslip.io`
+- Direct IP endpoints are expected to warn/fail:
+  - `https://32.195.200.179:9443` -> self-signed cert (legacy direct web endpoint)
+  - `https://32.195.200.179` -> hostname mismatch / TLS handshake failure
+- If browser still shows red on hostname URL, inspect cert details:
+  - Subject must be `CN=elab.32.195.200.179.sslip.io`
+  - Issuer currently `ZeroSSL ECC DV SSL CA 2`
+
 Important runtime recovery applied after proxy rollout:
 1. `web` container returned 500 due missing `/elabftw/vendor/autoload.php` after container recreation.
 2. Fixed with:
