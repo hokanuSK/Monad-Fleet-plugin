@@ -6,7 +6,7 @@ include .env
 export
 endif
 
-COMPOSE ?= docker compose
+COMPOSE ?= docker compose -f infrastructure/docker-compose.yml
 SMOKE_SCRIPT ?= scripts/smoke/v3_end_to_end_smoke.sh
 RESET_SCRIPT ?= scripts/reset/dev_reset.sh
 

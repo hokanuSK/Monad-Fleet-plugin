@@ -1,0 +1,209 @@
+name: elabftw
+
+services:
+  web:
+    image: elabftw/elabimg:custom
+    restart: always
+    container_name: elabftw
+    depends_on:
+      mysql:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - FOWNER
+      - DAC_OVERRIDE
+    environment:
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_NAME=elabftw
+      - DB_USER=elabftw
+      - DB_PASSWORD=OfSeuXOmu1WrjIcKaD6zi7KBnernjKH
+      - PHP_TIMEZONE=Europe/Bratislava
+      - TZ=Europe/Bratislava
+      - SECRET_KEY=def0000019d4bb3be0d4c8ea75a3d9be4c8b7742a134dab3535651b5131bf06151f2b19f750741de2c1aaee6dd4ad9f180a6cd9125c2abf1a739a3bd77278144ebd1415e
+      - SITE_URL=https://localhost:8443
+      - SERVER_NAME=localhost
+      - DISABLE_HTTPS=false      # NECHÁME HTTPS ZAPNUTÉ
+      - ENABLE_LETSENCRYPT=false
+    ports:
+      - "127.0.0.1:8443:443"      # v prehliadači choď na https://localhost:8443
+    volumes:
+      - ./artifacts/data/web:/elabftw/uploads
+    networks:
+      - elabftw-net
+
+  mysql:
+    image: mysql:8.4
+    restart: always
+    container_name: mysql
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: "/usr/bin/mysql --user=$$MYSQL_USER --password=$$MYSQL_PASSWORD --execute 'SHOW DATABASES;'"
+      interval: 5s
+      timeout: 5s
+      retries: 42
+    cap_drop:
+      - AUDIT_WRITE
+      - MKNOD
+      - SYS_CHROOT
+      - SETFCAP
+      - NET_RAW
+    cap_add:
+      - SYS_NICE
+    environment:
+      - MYSQL_ROOT_PASSWORD=rlb03Gyt4TmKhfVu8TYNoHUNCuBvsAo
+      - MYSQL_DATABASE=elabftw
+      - MYSQL_USER=elabftw
+      - MYSQL_PASSWORD=OfSeuXOmu1WrjIcKaD6zi7KBnernjKH
+      - TZ=Europe/Bratislava
+    volumes:
+      - ./artifacts/data/mysql:/var/lib/mysql
+    expose:
+      - "3306"
+    networks:
+      - elabftw-net
+
+  monad-fleet-service:
+    build: ./src/fleet-service
+    container_name: monad-fleet-service
+    restart: always
+    depends_on:
+      - web
+    environment:
+      - GATEWAY_PORT=50060
+      - SCAN_CIDR=172.20.0.0/16
+      - "ELAB_BASE_URL=https://web/api/v2"
+      - "FLEET_EXPERIMENT_TAG=fleet"
+      - "RESOURCE_TAG_PREFIX=device:"
+      - "POLICY_METADATA_KEYS=fleet.policy,policy,fleet_policy,policy_json"
+      - "ALLOW_LIVE_EVENTS=false"
+      - "EVENT_DURATION_MINUTES=180"
+      - "BOOK_MAX_MINUTES=180"
+      - "BOOK_CAN_OVERLAP=true"
+      - "BOOK_IS_CANCELLABLE=true"
+      - "DATA_DIR=/data"
+      - "METRICS_PORT=9108"
+      - "METRICS_EXCLUDE_PREFIXES=csi_"
+      - "INGEST_API_TOKEN="
+      # TU DOSAĎ SVOJ REST API KEY (celý reťazec z My Profile → API Keys → REST API key)
+      - ELAB_API_KEY=apiKey4Test
+    volumes:
+      - ./artifacts/data/fleet:/data
+    networks:
+      - elabftw-net
+    ports:
+      - "50060:50060"
+      - "9108:9108"
+
+  elab-mcp:
+    image: python:3.12-slim
+    container_name: elab-mcp
+    profiles:
+      - mcp
+    depends_on:
+      - web
+      - monad-fleet-service
+    working_dir: /workspace
+    command: ["python3", "-u", "scripts/elab-mcp/server.py"]
+    stdin_open: true
+    tty: false
+    environment:
+      - "ELAB_BASE_URL=https://web/api/v2"
+      - "ELAB_API_KEY=apiKey4Test"
+      - "ELAB_VERIFY_TLS=false"
+      - "FLEET_EXPERIMENT_TAG=fleet"
+      - "RESOURCE_TAG_PREFIX=device:"
+      - "POLICY_METADATA_KEYS=fleet.policy,policy,fleet_policy,policy_json"
+      - "ELAB_MCP_ARTIFACT_JOURNAL_PATH=/workspace/artifacts/data/fleet/ingest-artifacts.ndjson"
+      - "ELAB_MCP_ENABLE_WRITE=false"
+    volumes:
+      - ./:/workspace:ro
+    networks:
+      - elabftw-net
+
+  model-device:
+    build: ./src/device-sim
+    container_name: model-device
+    restart: always
+    depends_on:
+      - monad-fleet-service
+    environment:
+      - DEVICE_MAC=02:42:ac:14:00:04
+      - DEVICE_TYPE=rpi-dualband
+      - FLEET_MANAGER_HOST=monad-fleet-service
+      - FLEET_MANAGER_PORT=50060
+      - MAX_SYNC_CYCLES=0
+      - EXECUTE_POLICY=false
+    mac_address: 02:42:ac:14:00:04
+    networks:
+      - elabftw-net
+
+  mimir:
+    image: grafana/mimir:2.12.0
+    container_name: mimir
+    restart: always
+    command:
+      - "-config.file=/etc/mimir/mimir.yml"
+      - "-target=all"
+    volumes:
+      - ./observability/mimir/mimir.yml:/etc/mimir/mimir.yml:ro
+      - mimir-data:/data
+    ports:
+      - "9009:9009"
+    networks:
+      - elabftw-net
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: prometheus
+    restart: always
+    depends_on:
+      - monad-fleet-service
+      - mimir
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - elabftw-net
+
+  grafana:
+    image: grafana/grafana-oss:11.1.4
+    container_name: grafana
+    restart: always
+    depends_on:
+      - mimir
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    networks:
+      - elabftw-net
+
+networks:
+  elabftw-net:
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  mimir-data:
+  prom-data:
+  grafana-data:

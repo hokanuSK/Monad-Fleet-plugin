@@ -165,5 +165,5 @@ OK: Generated eLabFTW REST API key
 - Artifacts: ${out_dir}
 
 Next:
-- Set ELAB_API_KEY in docker-compose.yml (monad-fleet-service) to the generated key (do not commit real secrets).
+- Set ELAB_API_KEY in infrastructure/docker-compose.yml (monad-fleet-service) to the generated key (do not commit real secrets).
 EOF

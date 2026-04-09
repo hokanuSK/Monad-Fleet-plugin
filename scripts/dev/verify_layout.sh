@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
-required_dirs=(apps infra proto artifacts scripts docs)
+required_dirs=(src infrastructure shared artifacts scripts docs)
 for dir in "${required_dirs[@]}"; do
   if [[ ! -d "${dir}" ]]; then
     echo "ERROR: missing required directory '${dir}'." >&2
@@ -14,12 +14,7 @@ for dir in "${required_dirs[@]}"; do
 done
 
 expected_links=(
-  "monad-fleet-service:apps/fleet-service"
-  "device-sim:apps/device-sim"
-  "observability:infra/observability"
   "data:artifacts/data"
-  "tmp:artifacts/tmp"
-  "output:artifacts/output"
 )
 
 failures=0

@@ -17,21 +17,21 @@ This repo runs a local eLabFTW instance plus a Python gRPC "fleet manager" servi
 
 ## Repo Layout
 
-- `docker-compose.yml`: brings up eLabFTW (web + mysql) + Monad Fleet service + device simulator + observability.
-- `apps/fleet-service/`: Python gRPC server + HTTP `/metrics` + HTTP JSON ingest (`/ingest/v1/metrics`).
-- `apps/device-sim/`: simulator clients:
+- `infrastructure/docker-compose.yml`: brings up eLabFTW (web + mysql) + Monad Fleet service + device simulator + observability.
+- `src/fleet-service/`: Python gRPC server + HTTP `/metrics` + HTTP JSON ingest (`/ingest/v1/metrics`).
+- `src/device-sim/`: simulator clients:
   - `sim_device_client.py`: legacy `fleet.v1` flow.
   - `agent_v2_client.py`: v2 PREPARE/REPORT agent with local spooling (`DATA_ROOT`).
+- `infrastructure/observability/`: Prometheus/Mimir/Grafana config/provisioning.
+- `src/elabftw/`: eLabFTW source as a git submodule (fork branch `hypernext`).
+- `shared/proto/`: canonical protobuf source-of-truth (shared by service + simulator).
 - `scripts/smoke/`: end-to-end smoke tests for WiFi/BLE/CSI + Prometheus/Mimir.
 - `scripts/rpi/`: deploy/run the v2 agent on a Raspberry Pi via SSH + systemd.
-- `infra/observability/`: Prometheus/Mimir/Grafana config/provisioning.
-- `infra/docker/elabimg/`: Docker build context for the custom `elabftw/elabimg` image used by `docker-compose.yml`.
-- `proto/`: canonical protobuf source-of-truth (shared by service + simulator).
 - `artifacts/`: runtime artifacts (`data/`, `tmp/`, `output/`).
 
 Compatibility note:
 
-- Legacy paths (`monad-fleet-service/`, `device-sim/`, `observability/`, `elabimg/`, `data/`, `tmp/`, `output/`) are symlinked for backward compatibility.
+- Legacy alias `data/ -> artifacts/data` is kept for backward compatibility.
 
 ## Notion Ops Workflow (For Agents)
 
@@ -72,27 +72,22 @@ Naming requirements for ops records:
 
 ## Quick Start (Docker Compose)
 
-1) Ensure the `web` image exists locally.
-
-`docker-compose.yml` references `elabftw/elabimg:custom`. If you do not have this image, build it from `./infra/docker/elabimg`:
+1) Build the `web` image from the `hypernext` branch:
 
 ```bash
-docker build \
-  --build-arg ELABFTW_VERSION=<X.Y.Z-or-branch> \
-  -t elabftw/elabimg:custom \
-  ./infra/docker/elabimg
+docker build -t elabftw/elabimg:custom "https://github.com/hokanuSK/elabftw.git#hypernext"
 ```
 
 2) Bring up the stack:
 
 ```bash
-docker compose up -d --build
-docker compose ps
+docker compose -f infrastructure/docker-compose.yml up -d --build
+docker compose -f infrastructure/docker-compose.yml ps
 ```
 
 3) Ensure `monad-fleet-service` can talk to eLabFTW.
 
-`docker-compose.yml` sets `ELAB_API_KEY` for `monad-fleet-service`. For anything that reads/writes policies in eLabFTW (including the smoke test), update that value to a real eLabFTW REST API key (do not commit real secrets).
+`infrastructure/docker-compose.yml` sets `ELAB_API_KEY` for `monad-fleet-service`. For anything that reads/writes policies in eLabFTW (including the smoke test), update that value to a real eLabFTW REST API key (do not commit real secrets).
 
 If you need a REST API key quickly, you can generate one via the eLabFTW UI with a Playwright automation:
 
@@ -117,19 +112,19 @@ Web endpoints:
 Logs:
 
 ```bash
-docker compose logs -f monad-fleet-service
-docker compose logs -f model-device
+docker compose -f infrastructure/docker-compose.yml logs -f monad-fleet-service
+docker compose -f infrastructure/docker-compose.yml logs -f model-device
 ```
 
 ## eLab MCP (Compose on-demand)
 
 MCP server for eLab diagnostics is available as Compose service `elab-mcp` under profile `mcp`.
-It is intentionally on-demand (not started by default in `docker compose up`).
+It is intentionally on-demand (not started by default in `docker compose -f infrastructure/docker-compose.yml up`).
 
 Run MCP server over stdio:
 
 ```bash
-docker compose run --rm -T elab-mcp
+docker compose -f infrastructure/docker-compose.yml run --rm -T elab-mcp
 ```
 
 Quick MCP handshake smoke:
@@ -168,7 +163,7 @@ What it does (high level):
 One cycle (report only, no command execution):
 
 ```bash
-docker compose exec -T model-device sh -lc \
+docker compose -f infrastructure/docker-compose.yml exec -T model-device sh -lc \
   'MAX_SYNC_CYCLES=1 CONTROL_PLANE_MODE=RF_SHARING EXECUTE_POLICY=false python -u agent_v2_client.py'
 ```
 
@@ -206,16 +201,16 @@ RESET_STATE=true RESET_METRICS=true RESET_GRAFANA=false scripts/reset/dev_reset.
 Reset Fleet service state only:
 
 ```bash
-docker compose exec -T monad-fleet-service sh -lc "rm -f /data/state.json /data/ingest-metrics.ndjson || true"
-docker compose restart monad-fleet-service
+docker compose -f infrastructure/docker-compose.yml exec -T monad-fleet-service sh -lc "rm -f /data/state.json /data/ingest-metrics.ndjson || true"
+docker compose -f infrastructure/docker-compose.yml restart monad-fleet-service
 ```
 
 Reset Prometheus + Mimir data only:
 
 ```bash
-docker compose exec -T prometheus sh -lc "rm -rf /prometheus/* || true"
-docker compose exec -T mimir sh -lc "rm -rf /data/* || true"
-docker compose restart prometheus mimir
+docker compose -f infrastructure/docker-compose.yml exec -T prometheus sh -lc "rm -rf /prometheus/* || true"
+docker compose -f infrastructure/docker-compose.yml exec -T mimir sh -lc "rm -rf /data/* || true"
+docker compose -f infrastructure/docker-compose.yml restart prometheus mimir
 ```
 
 ## Raspberry Pi Agent (Deploy + systemd)
@@ -250,45 +245,44 @@ sudo journalctl -u monad-fleet-agent.service -n 100 --no-pager
 
 Canonical proto source-of-truth is now:
 
-- `proto/`
+- `shared/proto/`
 
 Service and simulator consume this through symlinked `proto/` directories under app roots.
 
 Then rebuild containers so stubs are regenerated during Docker build:
 
 ```bash
-docker compose build monad-fleet-service model-device
+docker compose -f infrastructure/docker-compose.yml build monad-fleet-service model-device
 ```
 
 ## Build gRPC Spec PDF (TeX)
 
 Source:
 
-- `docs/specs/monad_fleet_grpc_interface_v2.tex`
-- CI: `.github/workflows/docs_pdf.yml` builds `docs/specs/monad_fleet_grpc_interface_v2.pdf` and uploads it as a workflow artifact (it also attempts to commit the PDF on `main`, if branch rules allow).
+- `docs/monad_fleet_grpc_interface_v2.tex`
 
 Build (preferred):
 
 ```bash
-cd docs/specs
+cd docs
 latexmk -pdf -interaction=nonstopmode -halt-on-error monad_fleet_grpc_interface_v2.tex
 ```
 
 Output:
 
-- `docs/specs/monad_fleet_grpc_interface_v2.pdf`
+- `docs/monad_fleet_grpc_interface_v2.pdf`
 
 Clean:
 
 ```bash
-cd docs/specs
+cd docs
 latexmk -c monad_fleet_grpc_interface_v2.tex
 ```
 
 Fallback (if `latexmk` is unavailable):
 
 ```bash
-cd docs/specs
+cd docs
 pdflatex -interaction=nonstopmode -halt-on-error monad_fleet_grpc_interface_v2.tex
 pdflatex -interaction=nonstopmode -halt-on-error monad_fleet_grpc_interface_v2.tex
 ```
@@ -300,10 +294,10 @@ Run the Fleet service locally:
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-pip install -r apps/fleet-service/requirements.txt
-python -m grpc_tools.protoc -I proto --python_out=apps/fleet-service --grpc_python_out=apps/fleet-service \
-  proto/fleet_gateway.proto proto/fleet_gateway_v2.proto
-ELAB_BASE_URL=https://localhost:8443/api/v2 ELAB_API_KEY=<key> python -u apps/fleet-service/gateway_server.py
+pip install -r src/fleet-service/requirements.txt
+python -m grpc_tools.protoc -I shared/proto --python_out=src/fleet-service --grpc_python_out=src/fleet-service \
+  shared/proto/fleet_gateway.proto shared/proto/fleet_gateway_v2.proto
+ELAB_BASE_URL=https://localhost:8443/api/v2 ELAB_API_KEY=<key> python -u src/fleet-service/gateway_server.py
 ```
 
 Run the v2 agent locally:
@@ -311,8 +305,8 @@ Run the v2 agent locally:
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-pip install -r apps/device-sim/requirements.txt
-python -m grpc_tools.protoc -I proto --python_out=apps/device-sim --grpc_python_out=apps/device-sim \
-  proto/fleet_gateway.proto proto/fleet_gateway_v2.proto
-FLEET_MANAGER_HOST=127.0.0.1 FLEET_MANAGER_PORT=50060 MAX_SYNC_CYCLES=1 EXECUTE_POLICY=false python -u apps/device-sim/agent_v2_client.py
+pip install -r src/device-sim/requirements.txt
+python -m grpc_tools.protoc -I shared/proto --python_out=src/device-sim --grpc_python_out=src/device-sim \
+  shared/proto/fleet_gateway.proto shared/proto/fleet_gateway_v2.proto
+FLEET_MANAGER_HOST=127.0.0.1 FLEET_MANAGER_PORT=50060 MAX_SYNC_CYCLES=1 EXECUTE_POLICY=false python -u src/device-sim/agent_v2_client.py
 ```
