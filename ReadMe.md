@@ -39,8 +39,8 @@ FleetManager runs a local eLabFTW stack plus a Python gRPC fleet service, a devi
 
 The following root aliases are kept for compatibility during migration:
 
-- `device-sim -> apps/device-sim`
-- `monad-fleet-service -> apps/fleet-service`
+- `device-sim -> src/device-sim`
+- `monad-fleet-service -> src/fleet-service`
 - `observability -> infra/observability`
 - `data -> artifacts/data`
 - `tmp -> artifacts/tmp`

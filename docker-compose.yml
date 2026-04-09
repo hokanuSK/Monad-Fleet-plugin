@@ -71,7 +71,7 @@ services:
       - elabftw-net
 
   monad-fleet-service:
-    build: ./apps/fleet-service
+    build: ./src/fleet-service
     container_name: monad-fleet-service
     restart: always
     depends_on:
@@ -129,7 +129,7 @@ services:
       - elabftw-net
 
   model-device:
-    build: ./apps/device-sim
+    build: ./src/device-sim
     container_name: model-device
     restart: always
     depends_on:

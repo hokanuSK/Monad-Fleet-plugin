@@ -9,5 +9,5 @@ Files:
 
 App directories consume this through symlinked `proto/` directories:
 
-- `apps/fleet-service/proto -> ../../proto`
-- `apps/device-sim/proto -> ../../proto`
+- `src/fleet-service/proto -> ../../proto`
+- `src/device-sim/proto -> ../../proto`

@@ -1,4 +1,4 @@
-# Apps
+# Source Layout
 
 Application code is organized by deployable/runtime unit:
 
@@ -7,5 +7,5 @@ Application code is organized by deployable/runtime unit:
 
 Legacy root paths are kept as symlinks for compatibility:
 
-- `monad-fleet-service -> apps/fleet-service`
-- `device-sim -> apps/device-sim`
+- `monad-fleet-service -> src/fleet-service`
+- `device-sim -> src/device-sim`
