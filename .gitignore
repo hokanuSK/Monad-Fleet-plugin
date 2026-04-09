@@ -34,6 +34,9 @@ docs/diagrams/README.md
 docs/diagrams/flowchart-docs-information-architecture.mmd
 docs/diagrams/flowchart-metadata-write-boundaries.mmd
 docs/diagrams/flowchart-windowed-upload-scheduler.mmd
+docs/diagrams/mermaid-config.json
+docs/diagrams/package-lock.json
+docs/diagrams/package.json
 docs/adr/
 docs/handoffs/
 docs/handoofs/
