@@ -12,6 +12,7 @@ MAX_SYNC_CYCLES="${MAX_SYNC_CYCLES:-1}"
 RESET_STATE="${RESET_STATE:-true}"
 RESET_METRICS="${RESET_METRICS:-true}"
 RESET_GRAFANA="${RESET_GRAFANA:-false}"
+VERIFY_MIMIR="${VERIFY_MIMIR:-false}"
 CLEANUP="${CLEANUP:-false}"
 DO_BUILD="${DO_BUILD:-false}"
 SKIP_CORE_SERVICES_RESTART="${SKIP_CORE_SERVICES_RESTART:-false}"
@@ -559,7 +560,7 @@ else
   else
     echo "Skipping build (DO_BUILD=false)"
   fi
-  docker compose up -d --force-recreate --no-build monad-fleet-service model-device prometheus mimir grafana
+  docker compose up -d --force-recreate --no-build monad-fleet-service model-device mimir grafana
 fi
 
 SMOKE_LAST_STEP="2_reset_fleet_state"
@@ -573,10 +574,13 @@ fi
 
 SMOKE_LAST_STEP="3_reset_metrics"
 if [[ "${RESET_METRICS}" == "true" ]]; then
-  echo "[3/8] Reset Prometheus+Mimir data only (does not touch eLabFTW/MySQL)"
-  docker compose exec -T prometheus sh -lc "rm -rf /prometheus/* || true"
-  docker compose exec -T mimir sh -lc "rm -rf /data/* || true"
-  docker compose restart prometheus mimir >/dev/null
+  echo "[3/8] Reset Mimir data only (does not touch eLabFTW/MySQL)"
+  if docker compose ps --services --status running | grep -qx "mimir"; then
+    docker compose exec -T mimir sh -lc "rm -rf /data/* || true"
+    docker compose restart mimir >/dev/null
+  else
+    echo "Mimir is not running; skipping Mimir reset."
+  fi
 else
   echo "[3/8] Skip metrics reset (RESET_METRICS=${RESET_METRICS})"
 fi
@@ -1236,23 +1240,24 @@ else
 echo "[6/8] Skip hypothetical low-level board payload (INJECT_HYPOTHETICAL_METRICS=${INJECT_HYPOTHETICAL_METRICS})"
 fi
 
-SMOKE_LAST_STEP="7_wait_scrape"
+SMOKE_LAST_STEP="7_wait_metrics"
 WAIT_S=20
 if [[ "${RUN_PI}" == "true" && "${RUN_PI_PASSIVE}" == "true" ]]; then
   WAIT_S="${PASSIVE_AGENT_WAIT_S}"
 fi
-echo "[7/8] Wait for Prometheus scrape + remote_write (sleep=${WAIT_S}s)"
+echo "[7/8] Wait for metrics stabilization (sleep=${WAIT_S}s)"
 sleep "${WAIT_S}"
 
 SMOKE_LAST_STEP="8_verify"
-echo "[8/8] Verify metrics in Prometheus and Mimir"
-docker compose exec -T monad-fleet-service sh -lc "DEVICE_ID='${DEVICE_PI}' TARGET_DEVICE_IDS_CSV='${TARGET_DEVICE_IDS_CSV}' RUN_PI='${RUN_PI}' DEVICE_MODEL='${DEVICE_MODEL}' INJECT_HYPOTHETICAL_METRICS='${INJECT_HYPOTHETICAL_METRICS}' python - <<'PY'
+echo "[8/8] Verify metrics in Fleet endpoint (and optional Mimir)"
+docker compose exec -T monad-fleet-service sh -lc "DEVICE_ID='${DEVICE_PI}' TARGET_DEVICE_IDS_CSV='${TARGET_DEVICE_IDS_CSV}' RUN_PI='${RUN_PI}' DEVICE_MODEL='${DEVICE_MODEL}' INJECT_HYPOTHETICAL_METRICS='${INJECT_HYPOTHETICAL_METRICS}' VERIFY_MIMIR='${VERIFY_MIMIR}' python - <<'PY'
 import requests
 import os
 
 run_pi = (os.environ.get('RUN_PI') or '').lower().strip() in {'1','true','yes'}
 target_csv = (os.environ.get('TARGET_DEVICE_IDS_CSV') or '').strip()
 inject_hypothetical = (os.environ.get('INJECT_HYPOTHETICAL_METRICS') or '').lower().strip() in {'1','true','yes'}
+verify_mimir = (os.environ.get('VERIFY_MIMIR') or '').lower().strip() in {'1','true','yes','on'}
 
 if target_csv:
     targets = [row.strip().lower() for row in target_csv.split(',') if row.strip()]
@@ -1267,6 +1272,20 @@ def do_query(url: str, q: str):
     resp.raise_for_status()
     data = resp.json()
     return data.get('data', {}).get('result', [])
+
+metrics_text = requests.get('http://127.0.0.1:9108/metrics', timeout=15).text
+metrics_lines = metrics_text.splitlines()
+metric_lines = [line for line in metrics_lines if line.startswith('monad_fleet_metric_value{')]
+
+def find_fleet_lines(device_id: str, metric: str | None = None):
+    out = []
+    for line in metric_lines:
+        if f'device_id=\"{device_id}\"' not in line:
+            continue
+        if metric and f'metric=\"{metric}\"' not in line:
+            continue
+        out.append(line)
+    return out
 
 metric_keys = [
     'wifi_ap_total',
@@ -1294,18 +1313,20 @@ metric_keys = [
 for target in targets:
     print('target_device', target)
     for metric in metric_keys:
-        q = f'monad_fleet_metric_value{{device_id=\"{target}\",metric=\"{metric}\"}}'
-        pres = do_query('http://prometheus:9090/api/v1/query', q)
-        print('prometheus', q, '=>', len(pres), pres[:1])
-        mres = do_query('http://mimir:9009/prometheus/api/v1/query', q)
-        print('mimir     ', q, '=>', len(mres), mres[:1])
+        fleet_rows = find_fleet_lines(target, metric)
+        print('fleet/metrics', target, metric, '=>', len(fleet_rows), fleet_rows[:1])
+        if verify_mimir:
+            q = f'monad_fleet_metric_value{{device_id=\"{target}\",metric=\"{metric}\"}}'
+            mres = do_query('http://mimir:9009/prometheus/api/v1/query', q)
+            print('mimir       ', q, '=>', len(mres), mres[:1])
 
 if inject_hypothetical:
-    q = 'monad_fleet_metric_value{device_id=\"lowlevel-board-01\"}'
-    pres = do_query('http://prometheus:9090/api/v1/query', q)
-    print('prometheus', q, '=>', len(pres), pres[:1])
-    mres = do_query('http://mimir:9009/prometheus/api/v1/query', q)
-    print('mimir     ', q, '=>', len(mres), mres[:1])
+    fleet_rows = find_fleet_lines('lowlevel-board-01')
+    print('fleet/metrics', 'lowlevel-board-01', '=>', len(fleet_rows), fleet_rows[:1])
+    if verify_mimir:
+        q = 'monad_fleet_metric_value{device_id=\"lowlevel-board-01\"}'
+        mres = do_query('http://mimir:9009/prometheus/api/v1/query', q)
+        print('mimir       ', q, '=>', len(mres), mres[:1])
 PY
 "
 
@@ -1422,7 +1443,6 @@ SMOKE_LAST_STEP="8_done"
 echo "Smoke test completed."
 echo "eLabFTW smoke experiment id: ${SMOKE_EXPERIMENT_ID}"
 echo "Grafana: http://localhost:3000 (admin/admin)"
-echo "Prometheus: http://localhost:9090"
 echo "Mimir API: http://localhost:9009"
 
 if [[ "${CLEANUP}" == "true" ]]; then

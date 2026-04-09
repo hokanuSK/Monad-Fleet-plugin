@@ -88,7 +88,6 @@ if [[ "$ENABLE_REVERSE_PROXY" == "true" ]]; then
   echo "Reverse proxy enabled (Caddy):"
   echo "  eLab host: https://${ELAB_HOST}"
   echo "  Grafana host: https://${GRAFANA_HOST}"
-  echo "  Prometheus host: https://${PROMETHEUS_HOST}"
   echo "  Mimir host: https://${MIMIR_HOST}"
   echo "  Fleet metrics host: https://${FLEET_METRICS_HOST}"
 fi

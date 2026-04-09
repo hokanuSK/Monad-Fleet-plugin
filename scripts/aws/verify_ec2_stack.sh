@@ -28,7 +28,6 @@ required_services=(
   monad-fleet-service
   model-device
   mimir
-  prometheus
   grafana
 )
 

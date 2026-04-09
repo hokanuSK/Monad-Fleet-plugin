@@ -40,7 +40,6 @@ If you want automatic TLS certificates + host-based routing with reverse proxy:
 - set DNS hosts:
   - `ELAB_HOST`
   - `GRAFANA_HOST`
-  - `PROMETHEUS_HOST`
   - `MIMIR_HOST`
   - `FLEET_METRICS_HOST`
 - point those DNS records to your EC2 public IP

@@ -18,10 +18,6 @@ http://32.195.200.179 {
   reverse_proxy grafana:3000
 }
 
-{$PROMETHEUS_HOST} {
-  reverse_proxy prometheus:9090
-}
-
 {$MIMIR_HOST} {
   reverse_proxy mimir:9009
 }

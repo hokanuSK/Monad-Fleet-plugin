@@ -66,8 +66,6 @@ services:
         condition: service_started
       grafana:
         condition: service_started
-      prometheus:
-        condition: service_started
       mimir:
         condition: service_started
       monad-fleet-service:
@@ -76,7 +74,6 @@ services:
       ACME_EMAIL: ${ACME_EMAIL:-ops@example.com}
       ELAB_HOST: ${ELAB_HOST:-elab.example.com}
       GRAFANA_HOST: ${GRAFANA_HOST:-grafana.example.com}
-      PROMETHEUS_HOST: ${PROMETHEUS_HOST:-prometheus.example.com}
       MIMIR_HOST: ${MIMIR_HOST:-mimir.example.com}
       FLEET_METRICS_HOST: ${FLEET_METRICS_HOST:-metrics.example.com}
     ports:
@@ -155,26 +152,6 @@ services:
     networks:
       - elabftw-net
 
-  prometheus:
-    image: prom/prometheus:v2.54.1
-    restart: unless-stopped
-    depends_on:
-      monad-fleet-service:
-        condition: service_started
-      mimir:
-        condition: service_started
-    command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.path=/prometheus"
-      - "--web.enable-lifecycle"
-    volumes:
-      - ./infrastructure/observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prom-data:/prometheus
-    ports:
-      - "${PROMETHEUS_PORT:-9090}:9090"
-    networks:
-      - elabftw-net
-
   grafana:
     image: grafana/grafana-oss:11.1.4
     restart: unless-stopped
@@ -204,7 +181,6 @@ volumes:
   web-uploads:
   fleet-data:
   mimir-data:
-  prom-data:
   grafana-data:
   caddy-data:
   caddy-config:
