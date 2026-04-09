@@ -14,12 +14,14 @@ AWS deployment starter artifacts were added to this repo:
 - `docs/runbooks/aws_ec2_deploy.md`
 - `infrastructure/aws/docker/fleet-service.Dockerfile`
 - `infrastructure/aws/docker/device-sim.Dockerfile`
+- `infrastructure/aws/reverse-proxy/Caddyfile`
 
 Intent:
 - stop relying on ad-hoc host edits,
 - deploy with one reproducible script,
 - include first-admin bootstrap and asset checks,
 - avoid Docker build failures caused by `apps/*/proto` symlinks by using AWS-specific Dockerfiles with repo-root build context.
+- optional reverse proxy profile (`ENABLE_REVERSE_PROXY=true`) for TLS cert automation and host-based routing.
 
 Newest commit check on `develop`:
 - `git submodule update --init --recursive` still fails for `elabimg` commit `b1a95b121cf7a511b83ee88dab7d223a47371dfd` (missing upstream).
@@ -236,3 +238,8 @@ Credentials written on host:
 
 Important note:
 - The runtime asset copy is a compatibility workaround. Proper production fix is to build web assets in image build on a larger builder (or CI), then deploy that finished image.
+- Reverse proxy support is now in repo but not yet enabled on host. To enable:
+  - set `ENABLE_REVERSE_PROXY=true` in `.env.aws`,
+  - set `ELAB_HOST`, `GRAFANA_HOST`, `PROMETHEUS_HOST`, `MIMIR_HOST`, `FLEET_METRICS_HOST`, `ACME_EMAIL`,
+  - open security group inbound ports `80` and `443`,
+  - redeploy with `scripts/aws/deploy_ec2_stack.sh`.

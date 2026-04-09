@@ -5,6 +5,7 @@ This runbook deploys the current repo state on one EC2 host using Docker Compose
 ## Files Added
 - `docker-compose.aws.yml`
 - `.env.aws.example`
+- `infrastructure/aws/reverse-proxy/Caddyfile`
 - `scripts/aws/deploy_ec2_stack.sh`
 - `scripts/aws/build_elabimg_hypernext.sh`
 - `scripts/aws/elabftw_bootstrap_admin.sh`
@@ -27,10 +28,23 @@ Set strong secrets in `.env.aws`:
 - `GRAFANA_ADMIN_PASSWORD`
 - `ELAB_API_KEY`
 - `ELAB_ADMIN_PASSWORD`
+- `ELAB_TEAM_NAME` (use value without spaces, for example `MainTeam`)
 
 Set final URL values:
 - `ELAB_SITE_URL` (for example `https://elab.example.com`)
 - `ELAB_SERVER_NAME` (for example `elab.example.com`)
+
+If you want automatic TLS certificates + host-based routing with reverse proxy:
+- set `ENABLE_REVERSE_PROXY=true`
+- set `ACME_EMAIL`
+- set DNS hosts:
+  - `ELAB_HOST`
+  - `GRAFANA_HOST`
+  - `PROMETHEUS_HOST`
+  - `MIMIR_HOST`
+  - `FLEET_METRICS_HOST`
+- point those DNS records to your EC2 public IP
+- open inbound `80` and `443` in Security Group
 
 Optional helper for `ELAB_SECRET_KEY`:
 
@@ -49,6 +63,9 @@ Behavior:
 - starts the stack from `docker-compose.aws.yml`,
 - bootstraps first eLabFTW admin only when users table is empty,
 - runs post-deploy verification checks.
+
+When reverse proxy is enabled, deployment also starts Caddy (`proxy` profile),
+which requests Let's Encrypt certificates and routes by hostname.
 
 If you need eLabFTW from `hokanuSK/elabftw:hypernext`, build that image first during deploy:
 
@@ -84,4 +101,5 @@ scripts/aws/verify_ec2_stack.sh
 ## 5) Notes
 - Keep `.env.aws` out of git.
 - Recommended production ingress: domain + TLS termination (ALB/ACM or reverse proxy).
+- This repo includes optional reverse proxy (`infrastructure/aws/reverse-proxy/Caddyfile`) for cert automation and routing.
 - If the app renders HTML without CSS/JS, verify asset URLs from `scripts/aws/verify_ec2_stack.sh`.

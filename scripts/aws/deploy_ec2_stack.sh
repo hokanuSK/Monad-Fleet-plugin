@@ -8,6 +8,7 @@ BUILD_IMAGES="${BUILD_IMAGES:-true}"
 BUILD_ELAB_IMAGE="${BUILD_ELAB_IMAGE:-false}"
 RUN_BOOTSTRAP="${RUN_BOOTSTRAP:-true}"
 RUN_VERIFY="${RUN_VERIFY:-true}"
+ENABLE_REVERSE_PROXY="${ENABLE_REVERSE_PROXY:-false}"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "Missing env file: $ENV_FILE" >&2
@@ -58,6 +59,9 @@ for var_name in "${required_vars[@]}"; do
 done
 
 compose_cmd=(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE")
+if [[ "$ENABLE_REVERSE_PROXY" == "true" ]]; then
+  compose_cmd+=(--profile proxy)
+fi
 
 if [[ "$BUILD_ELAB_IMAGE" == "true" ]]; then
   ENV_FILE="$ENV_FILE" "$ROOT_DIR/scripts/aws/build_elabimg_hypernext.sh"
@@ -80,3 +84,11 @@ fi
 echo "Deploy complete."
 echo "eLabFTW: ${ELAB_SITE_URL}"
 echo "Grafana: http://$(hostname -I | awk '{print $1}'):${GRAFANA_PORT:-3000}"
+if [[ "$ENABLE_REVERSE_PROXY" == "true" ]]; then
+  echo "Reverse proxy enabled (Caddy):"
+  echo "  eLab host: https://${ELAB_HOST}"
+  echo "  Grafana host: https://${GRAFANA_HOST}"
+  echo "  Prometheus host: https://${PROMETHEUS_HOST}"
+  echo "  Mimir host: https://${MIMIR_HOST}"
+  echo "  Fleet metrics host: https://${FLEET_METRICS_HOST}"
+fi

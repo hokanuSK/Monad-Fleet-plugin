@@ -1,0 +1,27 @@
+{
+  email {$ACME_EMAIL}
+}
+
+{$ELAB_HOST} {
+  reverse_proxy https://web:443 {
+    transport http {
+      tls_insecure_skip_verify
+    }
+  }
+}
+
+{$GRAFANA_HOST} {
+  reverse_proxy grafana:3000
+}
+
+{$PROMETHEUS_HOST} {
+  reverse_proxy prometheus:9090
+}
+
+{$MIMIR_HOST} {
+  reverse_proxy mimir:9009
+}
+
+{$FLEET_METRICS_HOST} {
+  reverse_proxy monad-fleet-service:9108
+}
