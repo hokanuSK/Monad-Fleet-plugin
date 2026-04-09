@@ -65,10 +65,10 @@ CI runs the same contract via `.github/workflows/repo_checks.yml`.
 
 - eLabFTW: `https://localhost:8443`
 - Grafana: `http://localhost:3000`
-- Prometheus: `http://localhost:9090`
 - Mimir: `http://localhost:9009`
 - Fleet gRPC: `localhost:50060`
 - Fleet metrics/ingest: `http://localhost:9108/metrics`, `http://localhost:9108/ingest/v1/metrics`
+- Prometheus: device-local only (not part of the localhost stack)
 
 ## Useful Docs
 

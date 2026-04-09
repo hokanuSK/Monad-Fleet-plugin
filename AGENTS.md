@@ -22,10 +22,10 @@ This repo runs a local eLabFTW instance plus a Python gRPC "fleet manager" servi
 - `src/device-sim/`: simulator clients:
   - `sim_device_client.py`: legacy `fleet.v1` flow.
   - `agent_v2_client.py`: v2 PREPARE/REPORT agent with local spooling (`DATA_ROOT`).
-- `infrastructure/observability/`: Prometheus/Mimir/Grafana config/provisioning.
+- `infrastructure/observability/`: Mimir/Grafana config/provisioning.
 - `src/elabftw/`: eLabFTW source as a git submodule (fork branch `hypernext`).
 - `shared/proto/`: canonical protobuf source-of-truth (shared by service + simulator).
-- `scripts/smoke/`: end-to-end smoke tests for WiFi/BLE/CSI + Prometheus/Mimir.
+- `scripts/smoke/`: end-to-end smoke tests for WiFi/BLE/CSI + Fleet metrics endpoint (optional Mimir verification).
 - `scripts/rpi/`: deploy/run the v2 agent on a Raspberry Pi via SSH + systemd.
 - `artifacts/`: runtime artifacts (`data/`, `tmp/`, `output/`).
 
@@ -61,7 +61,7 @@ Source-of-truth boundaries:
 
 - Git repo: code, proto contracts, scripts, implementation docs.
 - eLabFTW: experiment metadata and uploaded artifacts.
-- Prometheus/Grafana: time-series metrics.
+- Mimir/Grafana: time-series metrics and dashboards.
 - Notion: operational log, decisions, incidents, and execution tasks.
 
 Naming requirements for ops records:
@@ -104,10 +104,10 @@ Web endpoints:
 
 - eLabFTW: https://localhost:8443
 - Grafana: http://localhost:3000 (admin/admin)
-- Prometheus: http://localhost:9090
 - Mimir API: http://localhost:9009
 - Monad Fleet gRPC: `localhost:50060`
 - Monad Fleet metrics + ingest: `http://localhost:9108/metrics`, `http://localhost:9108/ingest/v1/metrics`
+- Prometheus: runs only on capable device nodes (not in localhost system stack)
 
 Logs:
 
@@ -152,11 +152,11 @@ What it does (high level):
 
 - restarts Fleet + device + observability services (optionally builds images)
 - optionally resets Fleet dedupe state + ingest journal (`/data/state.json`, `/data/ingest-metrics.ndjson`)
-- optionally clears Prometheus/Mimir data directories (does not touch eLabFTW/MySQL bind mounts)
+- optionally clears Mimir data directory
 - creates a new eLabFTW experiment with a v3 policy (WiFi/BLE/CSI commands)
 - runs one agent v2 cycle and publishes a report
 - posts a sample low-level JSON payload to `/ingest/v1/metrics`
-- verifies metrics in both Prometheus and Mimir query APIs
+- verifies metrics in Fleet `/metrics` endpoint (optional Mimir verification via `VERIFY_MIMIR=true`)
 
 ## Run Agent v2 Manually (In `model-device` Container)
 
@@ -205,12 +205,11 @@ docker compose -f infrastructure/docker-compose.yml exec -T monad-fleet-service 
 docker compose -f infrastructure/docker-compose.yml restart monad-fleet-service
 ```
 
-Reset Prometheus + Mimir data only:
+Reset Mimir data only:
 
 ```bash
-docker compose -f infrastructure/docker-compose.yml exec -T prometheus sh -lc "rm -rf /prometheus/* || true"
 docker compose -f infrastructure/docker-compose.yml exec -T mimir sh -lc "rm -rf /data/* || true"
-docker compose -f infrastructure/docker-compose.yml restart prometheus mimir
+docker compose -f infrastructure/docker-compose.yml restart mimir
 ```
 
 ## Raspberry Pi Agent (Deploy + systemd)

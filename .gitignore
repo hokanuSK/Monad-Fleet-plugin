@@ -11,6 +11,8 @@ tools/
 
 # Local scratch / secrets
 scripts/rpi/keys/
+.env.aws
+.env.aws.local
 Poznamky.md
 PoznamkyBP1.md
 agend.md
@@ -26,6 +28,18 @@ AGENT.MD
 # Local editor / generated deps
 .vscode/
 docs/diagrams/node_modules/
+docs/diagrams/legacy/
+docs/diagrams/scripts/
+docs/diagrams/README.md
+docs/diagrams/flowchart-docs-information-architecture.mmd
+docs/diagrams/flowchart-metadata-write-boundaries.mmd
+docs/diagrams/flowchart-windowed-upload-scheduler.mmd
+docs/diagrams/mermaid-config.json
+docs/diagrams/package-lock.json
+docs/diagrams/package.json
+docs/diagrams/svg/flowchart-docs-information-architecture.svg
+docs/diagrams/svg/flowchart-metadata-write-boundaries.svg
+docs/diagrams/svg/flowchart-windowed-upload-scheduler.svg
 docs/adr/
 docs/handoffs/
 docs/handoofs/

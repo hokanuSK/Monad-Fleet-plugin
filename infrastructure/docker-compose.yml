@@ -160,25 +160,6 @@ services:
     networks:
       - elabftw-net
 
-  prometheus:
-    image: prom/prometheus:v2.54.1
-    container_name: prometheus
-    restart: always
-    depends_on:
-      - monad-fleet-service
-      - mimir
-    command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.path=/prometheus"
-      - "--web.enable-lifecycle"
-    volumes:
-      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prom-data:/prometheus
-    ports:
-      - "9090:9090"
-    networks:
-      - elabftw-net
-
   grafana:
     image: grafana/grafana-oss:11.1.4
     container_name: grafana
@@ -205,5 +186,4 @@ networks:
 
 volumes:
   mimir-data:
-  prom-data:
   grafana-data:
