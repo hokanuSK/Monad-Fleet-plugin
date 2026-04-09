@@ -26,7 +26,7 @@ Tento server pridava read-only MCP introspekciu pre eLabFTW policy/artifact debu
 
 ## Konfiguracia
 
-Server cita nastavenia z ENV, a ked chybaju, skusi fallback z `docker-compose.yml`.
+Server cita nastavenia z ENV, a ked chybaju, skusi fallback z `infrastructure/docker-compose.yml`.
 
 - `ELAB_BASE_URL` (fallback z compose; default `https://web/api/v2`)
 - `ELAB_API_KEY` (fallback z compose)
@@ -51,12 +51,12 @@ python3 scripts/elab-mcp/server.py
 
 ## Docker Compose (on-demand)
 
-V `docker-compose.yml` je pridana sluzba `elab-mcp` pod profilom `mcp`, aby sa nespustala pri beznom `docker compose up`.
+V `infrastructure/docker-compose.yml` je pridana sluzba `elab-mcp` pod profilom `mcp`, aby sa nespustala pri beznom `docker compose up`.
 
 Spustenie cez Compose (stdio MCP):
 
 ```bash
-docker compose run --rm -T elab-mcp
+docker compose -f infrastructure/docker-compose.yml run --rm -T elab-mcp
 ```
 
 Priklad MCP konfiguracie:

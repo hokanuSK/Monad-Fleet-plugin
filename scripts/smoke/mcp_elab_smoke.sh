@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT_DIR}"
+export COMPOSE_FILE="${COMPOSE_FILE:-${ROOT_DIR}/infrastructure/docker-compose.yml}"
 
 MODE="${MODE:-local}" # local|compose
 

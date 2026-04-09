@@ -17,7 +17,7 @@ This repo runs a local eLabFTW instance plus a Python gRPC "fleet manager" servi
 
 ## Repo Layout
 
-- `docker-compose.yml`: brings up eLabFTW (web + mysql) + Monad Fleet service + device simulator + observability.
+- `infrastructure/docker-compose.yml`: brings up eLabFTW (web + mysql) + Monad Fleet service + device simulator + observability.
 - `src/fleet-service/`: Python gRPC server + HTTP `/metrics` + HTTP JSON ingest (`/ingest/v1/metrics`).
 - `src/device-sim/`: simulator clients:
   - `sim_device_client.py`: legacy `fleet.v1` flow.
@@ -81,13 +81,13 @@ docker build -t elabftw/elabimg:custom "https://github.com/hokanuSK/elabftw.git#
 2) Bring up the stack:
 
 ```bash
-docker compose up -d --build
-docker compose ps
+docker compose -f infrastructure/docker-compose.yml up -d --build
+docker compose -f infrastructure/docker-compose.yml ps
 ```
 
 3) Ensure `monad-fleet-service` can talk to eLabFTW.
 
-`docker-compose.yml` sets `ELAB_API_KEY` for `monad-fleet-service`. For anything that reads/writes policies in eLabFTW (including the smoke test), update that value to a real eLabFTW REST API key (do not commit real secrets).
+`infrastructure/docker-compose.yml` sets `ELAB_API_KEY` for `monad-fleet-service`. For anything that reads/writes policies in eLabFTW (including the smoke test), update that value to a real eLabFTW REST API key (do not commit real secrets).
 
 If you need a REST API key quickly, you can generate one via the eLabFTW UI with a Playwright automation:
 
@@ -112,19 +112,19 @@ Web endpoints:
 Logs:
 
 ```bash
-docker compose logs -f monad-fleet-service
-docker compose logs -f model-device
+docker compose -f infrastructure/docker-compose.yml logs -f monad-fleet-service
+docker compose -f infrastructure/docker-compose.yml logs -f model-device
 ```
 
 ## eLab MCP (Compose on-demand)
 
 MCP server for eLab diagnostics is available as Compose service `elab-mcp` under profile `mcp`.
-It is intentionally on-demand (not started by default in `docker compose up`).
+It is intentionally on-demand (not started by default in `docker compose -f infrastructure/docker-compose.yml up`).
 
 Run MCP server over stdio:
 
 ```bash
-docker compose run --rm -T elab-mcp
+docker compose -f infrastructure/docker-compose.yml run --rm -T elab-mcp
 ```
 
 Quick MCP handshake smoke:
@@ -163,7 +163,7 @@ What it does (high level):
 One cycle (report only, no command execution):
 
 ```bash
-docker compose exec -T model-device sh -lc \
+docker compose -f infrastructure/docker-compose.yml exec -T model-device sh -lc \
   'MAX_SYNC_CYCLES=1 CONTROL_PLANE_MODE=RF_SHARING EXECUTE_POLICY=false python -u agent_v2_client.py'
 ```
 
@@ -201,16 +201,16 @@ RESET_STATE=true RESET_METRICS=true RESET_GRAFANA=false scripts/reset/dev_reset.
 Reset Fleet service state only:
 
 ```bash
-docker compose exec -T monad-fleet-service sh -lc "rm -f /data/state.json /data/ingest-metrics.ndjson || true"
-docker compose restart monad-fleet-service
+docker compose -f infrastructure/docker-compose.yml exec -T monad-fleet-service sh -lc "rm -f /data/state.json /data/ingest-metrics.ndjson || true"
+docker compose -f infrastructure/docker-compose.yml restart monad-fleet-service
 ```
 
 Reset Prometheus + Mimir data only:
 
 ```bash
-docker compose exec -T prometheus sh -lc "rm -rf /prometheus/* || true"
-docker compose exec -T mimir sh -lc "rm -rf /data/* || true"
-docker compose restart prometheus mimir
+docker compose -f infrastructure/docker-compose.yml exec -T prometheus sh -lc "rm -rf /prometheus/* || true"
+docker compose -f infrastructure/docker-compose.yml exec -T mimir sh -lc "rm -rf /data/* || true"
+docker compose -f infrastructure/docker-compose.yml restart prometheus mimir
 ```
 
 ## Raspberry Pi Agent (Deploy + systemd)
@@ -252,7 +252,7 @@ Service and simulator consume this through symlinked `proto/` directories under 
 Then rebuild containers so stubs are regenerated during Docker build:
 
 ```bash
-docker compose build monad-fleet-service model-device
+docker compose -f infrastructure/docker-compose.yml build monad-fleet-service model-device
 ```
 
 ## Build gRPC Spec PDF (TeX)

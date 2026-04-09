@@ -135,7 +135,10 @@ class ElabConfig:
 
     @classmethod
     def from_env_and_repo(cls, repo_root: Path) -> "ElabConfig":
-        discovered = discover_compose_env(repo_root / "docker-compose.yml")
+        compose_path = repo_root / "infrastructure" / "docker-compose.yml"
+        if not compose_path.exists():
+            compose_path = repo_root / "docker-compose.yml"
+        discovered = discover_compose_env(compose_path)
 
         base_url = (
             normalize_string(os.environ.get("ELAB_BASE_URL"))
