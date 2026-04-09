@@ -319,6 +319,29 @@ Operational note:
   - composer install in `/elabftw`,
   - asset copy from `elabftw/elabimg:5.3.11`.
 
+## Login Incident Fix (2026-04-09)
+Symptom:
+- Admin login returned generic `An error occurred` on `POST /app/controllers/LoginController.php`.
+
+Root cause:
+- `ELAB_SECRET_KEY` in `.env.aws` was not in Defuse ASCII-safe format (it was a random hex string).
+- Local auth device token flow loads `SECRET_KEY` via `Defuse\\Crypto\\Key::loadFromAsciiSafeString()`.
+- This threw `Defuse\\Crypto\\Exception\\BadFormatException: Invalid header` during login.
+
+Fix applied:
+1. Generated a valid Defuse key (`def...`) in the running `web` context.
+2. Updated `ELAB_SECRET_KEY` in `~/FleetManager_deploy/.env.aws`.
+3. Recreated `web` container.
+4. Reapplied runtime workarounds required by this image in this environment:
+   - `composer install --no-dev --optimize-autoloader`,
+   - copied `/elabftw/web/assets` from `elabftw/elabimg:5.3.11`.
+
+Verification:
+- Login POST test succeeded:
+  - `POST /app/controllers/LoginController.php` -> `302` to `/index.php`
+  - Follow-up `GET /index.php` -> `302` to `/dashboard.php`
+- Session cookies now issued correctly: `token`, `token_team`, `devicetoken`.
+
 Important runtime recovery applied after proxy rollout:
 1. `web` container returned 500 due missing `/elabftw/vendor/autoload.php` after container recreation.
 2. Fixed with:
