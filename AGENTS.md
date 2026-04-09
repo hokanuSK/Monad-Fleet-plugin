@@ -259,30 +259,30 @@ docker compose build monad-fleet-service model-device
 
 Source:
 
-- `docs/specs/monad_fleet_grpc_interface_v2.tex`
+- `docs/monad_fleet_grpc_interface_v2.tex`
 
 Build (preferred):
 
 ```bash
-cd docs/specs
+cd docs
 latexmk -pdf -interaction=nonstopmode -halt-on-error monad_fleet_grpc_interface_v2.tex
 ```
 
 Output:
 
-- `docs/specs/monad_fleet_grpc_interface_v2.pdf`
+- `docs/monad_fleet_grpc_interface_v2.pdf`
 
 Clean:
 
 ```bash
-cd docs/specs
+cd docs
 latexmk -c monad_fleet_grpc_interface_v2.tex
 ```
 
 Fallback (if `latexmk` is unavailable):
 
 ```bash
-cd docs/specs
+cd docs
 pdflatex -interaction=nonstopmode -halt-on-error monad_fleet_grpc_interface_v2.tex
 pdflatex -interaction=nonstopmode -halt-on-error monad_fleet_grpc_interface_v2.tex
 ```

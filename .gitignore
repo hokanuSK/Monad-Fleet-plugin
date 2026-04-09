@@ -25,8 +25,14 @@ AGENT.MD
 # Local editor / generated deps
 .vscode/
 docs/diagrams/node_modules/
+docs/adr/
 docs/handoffs/
-docs/ops/agent_handoff_*.md
+docs/handoofs/
+docs/ops/
+docs/research/
+docs/runbooks/
+docs/DOCS_MAP.md
+docs/README.md
 
 # Python
 __pycache__/

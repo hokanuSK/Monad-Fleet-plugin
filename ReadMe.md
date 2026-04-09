@@ -75,4 +75,4 @@ CI runs the same contract via `.github/workflows/repo_checks.yml`.
 - Operational handoff: `docs/ops/agent_handoff_notion_ops_2026-03-19.md`
 - Layout runbook: `docs/runbooks/repo-layout.md`
 - Docs index: `docs/DOCS_MAP.md`
-- gRPC spec source: `docs/specs/monad_fleet_grpc_interface_v2.tex`
+- gRPC spec source: `docs/monad_fleet_grpc_interface_v2.tex`
