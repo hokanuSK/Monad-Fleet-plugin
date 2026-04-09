@@ -40,8 +40,6 @@ FleetManager runs a local eLabFTW stack plus a Python gRPC fleet service, a devi
 The following root aliases are kept for compatibility during migration:
 
 - `data -> artifacts/data`
-- `tmp -> artifacts/tmp`
-- `output -> artifacts/output`
 
 Use canonical paths in new code and docs. Migration details are in `docs/runbooks/repo-layout.md`.
 

@@ -15,8 +15,6 @@ done
 
 expected_links=(
   "data:artifacts/data"
-  "tmp:artifacts/tmp"
-  "output:artifacts/output"
 )
 
 failures=0
