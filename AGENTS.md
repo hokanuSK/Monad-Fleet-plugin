@@ -18,20 +18,20 @@ This repo runs a local eLabFTW instance plus a Python gRPC "fleet manager" servi
 ## Repo Layout
 
 - `docker-compose.yml`: brings up eLabFTW (web + mysql) + Monad Fleet service + device simulator + observability.
-- `apps/fleet-service/`: Python gRPC server + HTTP `/metrics` + HTTP JSON ingest (`/ingest/v1/metrics`).
-- `apps/device-sim/`: simulator clients:
+- `src/fleet-service/`: Python gRPC server + HTTP `/metrics` + HTTP JSON ingest (`/ingest/v1/metrics`).
+- `src/device-sim/`: simulator clients:
   - `sim_device_client.py`: legacy `fleet.v1` flow.
   - `agent_v2_client.py`: v2 PREPARE/REPORT agent with local spooling (`DATA_ROOT`).
+- `src/observability/`: Prometheus/Mimir/Grafana config/provisioning.
+- `src/elabftw/`: eLabFTW source as a git submodule (fork branch `hypernext`).
 - `scripts/smoke/`: end-to-end smoke tests for WiFi/BLE/CSI + Prometheus/Mimir.
 - `scripts/rpi/`: deploy/run the v2 agent on a Raspberry Pi via SSH + systemd.
-- `infra/observability/`: Prometheus/Mimir/Grafana config/provisioning.
-- `infra/docker/elabimg/`: Docker build context for the custom `elabftw/elabimg` image used by `docker-compose.yml`.
 - `proto/`: canonical protobuf source-of-truth (shared by service + simulator).
 - `artifacts/`: runtime artifacts (`data/`, `tmp/`, `output/`).
 
 Compatibility note:
 
-- Legacy paths (`monad-fleet-service/`, `device-sim/`, `observability/`, `elabimg/`, `data/`, `tmp/`, `output/`) are symlinked for backward compatibility.
+- Legacy alias `data/ -> artifacts/data` is kept for backward compatibility.
 
 ## Notion Ops Workflow (For Agents)
 
@@ -72,15 +72,10 @@ Naming requirements for ops records:
 
 ## Quick Start (Docker Compose)
 
-1) Ensure the `web` image exists locally.
-
-`docker-compose.yml` references `elabftw/elabimg:custom`. If you do not have this image, build it from `./infra/docker/elabimg`:
+1) Build the `web` image from the `hypernext` branch:
 
 ```bash
-docker build \
-  --build-arg ELABFTW_VERSION=<X.Y.Z-or-branch> \
-  -t elabftw/elabimg:custom \
-  ./infra/docker/elabimg
+docker build -t elabftw/elabimg:custom "https://github.com/hokanuSK/elabftw.git#hypernext"
 ```
 
 2) Bring up the stack:
@@ -265,7 +260,6 @@ docker compose build monad-fleet-service model-device
 Source:
 
 - `docs/specs/monad_fleet_grpc_interface_v2.tex`
-- CI: `.github/workflows/docs_pdf.yml` builds `docs/specs/monad_fleet_grpc_interface_v2.pdf` and uploads it as a workflow artifact (it also attempts to commit the PDF on `main`, if branch rules allow).
 
 Build (preferred):
 
@@ -300,10 +294,10 @@ Run the Fleet service locally:
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-pip install -r apps/fleet-service/requirements.txt
-python -m grpc_tools.protoc -I proto --python_out=apps/fleet-service --grpc_python_out=apps/fleet-service \
+pip install -r src/fleet-service/requirements.txt
+python -m grpc_tools.protoc -I proto --python_out=src/fleet-service --grpc_python_out=src/fleet-service \
   proto/fleet_gateway.proto proto/fleet_gateway_v2.proto
-ELAB_BASE_URL=https://localhost:8443/api/v2 ELAB_API_KEY=<key> python -u apps/fleet-service/gateway_server.py
+ELAB_BASE_URL=https://localhost:8443/api/v2 ELAB_API_KEY=<key> python -u src/fleet-service/gateway_server.py
 ```
 
 Run the v2 agent locally:
@@ -311,8 +305,8 @@ Run the v2 agent locally:
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-pip install -r apps/device-sim/requirements.txt
-python -m grpc_tools.protoc -I proto --python_out=apps/device-sim --grpc_python_out=apps/device-sim \
+pip install -r src/device-sim/requirements.txt
+python -m grpc_tools.protoc -I proto --python_out=src/device-sim --grpc_python_out=src/device-sim \
   proto/fleet_gateway.proto proto/fleet_gateway_v2.proto
-FLEET_MANAGER_HOST=127.0.0.1 FLEET_MANAGER_PORT=50060 MAX_SYNC_CYCLES=1 EXECUTE_POLICY=false python -u apps/device-sim/agent_v2_client.py
+FLEET_MANAGER_HOST=127.0.0.1 FLEET_MANAGER_PORT=50060 MAX_SYNC_CYCLES=1 EXECUTE_POLICY=false python -u src/device-sim/agent_v2_client.py
 ```

@@ -1,40 +1,33 @@
 # Repository Layout Runbook
 
-Last update: 2026-03-25
+Last update: 2026-04-09
 
 ## Canonical Paths
 
-- `apps/fleet-service`
-- `apps/device-sim`
-- `infra/observability`
-- `infra/docker/elabimg`
+- `src/fleet-service`
+- `src/device-sim`
+- `src/observability`
+- `src/elabftw` (git submodule)
 - `proto`
 - `artifacts/data`
-- `artifacts/tmp`
-- `artifacts/output`
 
 ## Compatibility Symlinks
 
-Legacy root paths are currently kept as compatibility aliases:
+Legacy compatibility aliases:
 
-- `monad-fleet-service -> apps/fleet-service`
-- `device-sim -> apps/device-sim`
-- `observability -> infra/observability`
 - `data -> artifacts/data`
-- `tmp -> artifacts/tmp`
-- `output -> artifacts/output`
 
 ## Authoring Rules
 
 - New scripts/docs must use canonical paths first.
-- Keep compatibility links intact until all active tooling migrates.
-- Avoid adding new references to legacy root paths in newly created files.
+- Do not reintroduce removed root aliases (`device-sim`, `monad-fleet-service`, `observability`, `tmp`, `output`).
+- Avoid adding new references to removed legacy root paths in newly created files.
 
 ## Migration Plan
 
-1. Phase 1 (active): canonical-first authoring with compatibility links still enabled.
+1. Phase 1: canonical-first authoring with compatibility links enabled.
 2. Phase 2: remove legacy path usage from maintained scripts and docs.
-3. Phase 3: remove compatibility symlinks after two stable release cycles with zero legacy path dependency.
+3. Phase 3 (current): only `data -> artifacts/data` alias remains.
 
 ## Verification
 
@@ -44,4 +37,4 @@ Use the local contract check:
 make verify-layout
 ```
 
-This validates required canonical directories and expected compatibility symlinks.
+This validates required canonical directories and the remaining compatibility symlink.

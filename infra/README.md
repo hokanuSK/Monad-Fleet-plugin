@@ -2,10 +2,9 @@
 
 Infrastructure and deployment assets:
 
-- `docker/elabimg/`: custom eLabFTW image build context
-- `observability/`: Prometheus, Mimir, Grafana configuration
+- This directory currently keeps ancillary infrastructure notes only.
+- Observability assets are in `src/observability/`.
 
-Legacy root paths are kept as symlinks for compatibility:
+Legacy compatibility alias retained:
 
-- `elabimg -> infra/docker/elabimg`
-- `observability -> infra/observability`
+- `data -> artifacts/data`
