@@ -31,11 +31,12 @@ Newest commit check on `develop`:
 - Region: `us-east-1`
 - Active instance: `i-0b68042aa66951809` (`t3.micro`)
 - Active public IP: `32.195.200.179`
-- Web URL: `https://32.195.200.179:9443`
+- Web URL (direct): `https://32.195.200.179:9443`
+- Web URL (proxy TLS): `https://elab.32.195.200.179.sslip.io`
 - SSH:
   - `ssh -i /tmp/fleetmanager-key-20260409000516.pem ubuntu@32.195.200.179`
 - Security group: `sg-022af3bf0b59fb506`
-  - Open: `22, 3000, 50060, 9009, 9090, 8443, 9443`
+  - Open: `22, 80, 443, 3000, 50060, 9009, 9090, 8443, 9443`
 
 ## Runtime Status
 From active host `docker compose ps`:
@@ -238,8 +239,47 @@ Credentials written on host:
 
 Important note:
 - The runtime asset copy is a compatibility workaround. Proper production fix is to build web assets in image build on a larger builder (or CI), then deploy that finished image.
-- Reverse proxy support is now in repo but not yet enabled on host. To enable:
-  - set `ENABLE_REVERSE_PROXY=true` in `.env.aws`,
-  - set `ELAB_HOST`, `GRAFANA_HOST`, `PROMETHEUS_HOST`, `MIMIR_HOST`, `FLEET_METRICS_HOST`, `ACME_EMAIL`,
-  - open security group inbound ports `80` and `443`,
-  - redeploy with `scripts/aws/deploy_ec2_stack.sh`.
+- Reverse proxy was added in repo and was enabled later on the same date; see `Reverse Proxy Enablement Update` section below for final state.
+
+## Reverse Proxy Enablement Update (2026-04-09, late evening UTC)
+Reverse proxy is now enabled and deployed on host.
+
+Host-side deployment status:
+- Compose files in use:
+  - `docker-compose.aws.yml`
+  - `docker-compose.proxy.yml`
+- Reverse proxy container:
+  - `elabftw-aws-reverse-proxy-1` (`caddy:2.8-alpine`)
+- Public HTTPS hostnames:
+  - `elab.32.195.200.179.sslip.io`
+  - `grafana.32.195.200.179.sslip.io`
+  - `prometheus.32.195.200.179.sslip.io`
+  - `mimir.32.195.200.179.sslip.io`
+  - `metrics.32.195.200.179.sslip.io`
+
+TLS/certificate status:
+- ACME challenges passed for all above hostnames.
+- Active cert on `elab.*`:
+  - Subject: `CN = elab.32.195.200.179.sslip.io`
+  - Issuer: `ZeroSSL ECC DV SSL CA 2`
+  - Validity: `2026-04-09` to `2026-07-08`
+
+Proxy validation (external + host-side):
+- `https://elab.32.195.200.179.sslip.io/login.php` -> `HTTP/2 302` (expected unauth redirect/cookie flow)
+- `https://grafana.32.195.200.179.sslip.io/api/health` -> `200` + Grafana JSON
+- `https://prometheus.32.195.200.179.sslip.io/-/healthy` -> healthy
+- `https://metrics.32.195.200.179.sslip.io/metrics` -> Prometheus metrics text
+
+Important runtime recovery applied after proxy rollout:
+1. `web` container returned 500 due missing `/elabftw/vendor/autoload.php` after container recreation.
+2. Fixed with:
+```bash
+sudo docker compose --env-file .env.aws -f docker-compose.aws.yml -f docker-compose.proxy.yml exec -T web sh -lc \
+  'cd /elabftw && php -d open_basedir= /usr/local/bin/composer install --no-dev --optimize-autoloader'
+```
+3. UI rendered only HTML (CSS/JS 404) due missing built assets in `/elabftw/web/assets`.
+4. Fixed by copying assets from `elabftw/elabimg:5.3.11` into running `web` container.
+
+Operational caveat:
+- Composer install and asset copy are runtime fixes and will be lost if `web` container is replaced.
+- Long-term fix remains: build full web image (with vendor + frontend assets) on a builder with enough memory and deploy that immutable image.
