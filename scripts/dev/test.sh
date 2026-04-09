@@ -8,7 +8,7 @@ cd "${REPO_ROOT}"
 scripts/dev/verify_layout.sh
 
 ran_tests=0
-for root in apps scripts tools; do
+for root in src scripts shared; do
   if [[ -n "$(find "${root}" -type f -name 'test_*.py' -print -quit)" ]]; then
     echo "[test] python unittest discover in ${root}/"
     python3 -m unittest discover -s "${root}" -p 'test_*.py'
@@ -17,7 +17,7 @@ for root in apps scripts tools; do
 done
 
 if (( ran_tests == 0 )); then
-  echo "[test] No python unit tests discovered under apps/, scripts/, tools/."
+  echo "[test] No python unit tests discovered under src/, scripts/, shared/."
 fi
 
 echo "[test] OK"
