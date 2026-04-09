@@ -32,7 +32,7 @@ Newest commit check on `develop`:
 - Active instance: `i-0b68042aa66951809` (`t3.micro`)
 - Active public IP: `32.195.200.179`
 - Web URL (direct): `https://32.195.200.179:9443`
-- Web URL (proxy TLS): `https://elab.32.195.200.179.sslip.io`
+- Web URL (proxy TLS): `https://elab-monad-fleet.32.195.200.179.sslip.io`
 - SSH:
   - `ssh -i /tmp/fleetmanager-key-20260409000516.pem ubuntu@32.195.200.179`
 - Security group: `sg-022af3bf0b59fb506`
@@ -251,39 +251,40 @@ Host-side deployment status:
 - Reverse proxy container:
   - `elabftw-aws-reverse-proxy-1` (`caddy:2.8-alpine`)
 - Public HTTPS hostnames:
-  - `elab.32.195.200.179.sslip.io`
-  - `grafana.32.195.200.179.sslip.io`
-  - `prometheus.32.195.200.179.sslip.io`
-  - `mimir.32.195.200.179.sslip.io`
-  - `metrics.32.195.200.179.sslip.io`
+  - `elab-monad-fleet.32.195.200.179.sslip.io`
+  - `grafana-monad-fleet.32.195.200.179.sslip.io`
+  - `prometheus-monad-fleet.32.195.200.179.sslip.io`
+  - `mimir-monad-fleet.32.195.200.179.sslip.io`
+  - `metrics-monad-fleet.32.195.200.179.sslip.io`
 
 TLS/certificate status:
 - ACME challenges passed for all above hostnames.
 - Active cert on `elab.*`:
-  - Subject: `CN = elab.32.195.200.179.sslip.io`
+  - Subject: `CN = elab-monad-fleet.32.195.200.179.sslip.io`
   - Issuer: `ZeroSSL ECC DV SSL CA 2`
   - Validity: `2026-04-09` to `2026-07-08`
 
 Proxy validation (external + host-side):
-- `https://elab.32.195.200.179.sslip.io/login.php` -> `HTTP/2 302` (expected unauth redirect/cookie flow)
-- `https://grafana.32.195.200.179.sslip.io/api/health` -> `200` + Grafana JSON
-- `https://prometheus.32.195.200.179.sslip.io/-/healthy` -> healthy
-- `https://metrics.32.195.200.179.sslip.io/metrics` -> Prometheus metrics text
+- `https://elab-monad-fleet.32.195.200.179.sslip.io/login.php` -> `HTTP/2 302` (expected unauth redirect/cookie flow)
+- `https://grafana-monad-fleet.32.195.200.179.sslip.io/api/health` -> `200` + Grafana JSON
+- `https://prometheus-monad-fleet.32.195.200.179.sslip.io/-/healthy` -> healthy
+- `https://metrics-monad-fleet.32.195.200.179.sslip.io/metrics` -> Prometheus metrics text
 
 TLS warning troubleshooting:
 - Trusted URL is hostname-based only:
-  - `https://elab.32.195.200.179.sslip.io`
+  - `https://elab-monad-fleet.32.195.200.179.sslip.io`
 - Direct IP endpoints are expected to warn/fail:
   - `https://32.195.200.179:9443` -> self-signed cert (legacy direct web endpoint)
   - `https://32.195.200.179` -> hostname mismatch / TLS handshake failure
+  - `http://32.195.200.179` now redirects (`308`) to `https://elab-monad-fleet.32.195.200.179.sslip.io`
 - If browser still shows red on hostname URL, inspect cert details:
-  - Subject must be `CN=elab.32.195.200.179.sslip.io`
+  - Subject must be `CN=elab-monad-fleet.32.195.200.179.sslip.io`
   - Issuer currently `ZeroSSL ECC DV SSL CA 2`
 
 ## Internet Exposure Status (2026-04-09)
 Requested public services are exposed and reachable:
 - eLabFTW (TLS via reverse proxy):
-  - URL: `https://elab.32.195.200.179.sslip.io`
+  - URL: `https://elab-monad-fleet.32.195.200.179.sslip.io`
   - External check: `HTTP/2 302` on `/login.php` (expected pre-login redirect flow)
 - gRPC server:
   - Endpoint: `32.195.200.179:50060`
@@ -296,6 +297,27 @@ Current SG includes these required inbound ports:
 - `443/tcp` (eLab TLS)
 - `50060/tcp` (gRPC)
 - `9009/tcp` (Mimir)
+
+## Domain Rename Update (2026-04-09, late night UTC)
+Requested hostname was updated to include `monad-fleet`.
+
+Live hostnames now:
+- `elab-monad-fleet.32.195.200.179.sslip.io`
+- `grafana-monad-fleet.32.195.200.179.sslip.io`
+- `prometheus-monad-fleet.32.195.200.179.sslip.io`
+- `mimir-monad-fleet.32.195.200.179.sslip.io`
+- `metrics-monad-fleet.32.195.200.179.sslip.io`
+
+Validation after rename:
+- `http://32.195.200.179/login.php` -> `308` redirect to new eLab hostname.
+- `https://elab-monad-fleet.32.195.200.179.sslip.io/login.php` -> `HTTP/2 302`.
+- `https://elab-monad-fleet.32.195.200.179.sslip.io/assets/main.bundle.js` -> `HTTP/2 200`.
+- Certificate subject: `CN=elab-monad-fleet.32.195.200.179.sslip.io`.
+
+Operational note:
+- Recreating `web` still drops runtime-installed vendor/assets in this environment and requires replaying:
+  - composer install in `/elabftw`,
+  - asset copy from `elabftw/elabimg:5.3.11`.
 
 Important runtime recovery applied after proxy rollout:
 1. `web` container returned 500 due missing `/elabftw/vendor/autoload.php` after container recreation.

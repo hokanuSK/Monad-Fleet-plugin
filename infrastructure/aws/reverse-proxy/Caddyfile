@@ -3,7 +3,7 @@
 }
 
 http://32.195.200.179 {
-  redir https://elab.32.195.200.179.sslip.io{uri} 308
+  redir https://{$ELAB_HOST}{uri} 308
 }
 
 {$ELAB_HOST} {
