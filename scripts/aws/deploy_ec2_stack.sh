@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env.aws}"
-COMPOSE_FILE="${COMPOSE_FILE:-$ROOT_DIR/docker-compose.aws.yml}"
+COMPOSE_FILE="${COMPOSE_FILE:-$ROOT_DIR/infrastructure/aws/docker-compose.aws.yml}"
 BUILD_IMAGES="${BUILD_IMAGES:-true}"
 BUILD_ELAB_IMAGE="${BUILD_ELAB_IMAGE:-false}"
 RUN_BOOTSTRAP="${RUN_BOOTSTRAP:-true}"

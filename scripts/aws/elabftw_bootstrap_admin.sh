@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env.aws}"
-COMPOSE_FILE="${COMPOSE_FILE:-$ROOT_DIR/docker-compose.aws.yml}"
+COMPOSE_FILE="${COMPOSE_FILE:-$ROOT_DIR/infrastructure/aws/docker-compose.aws.yml}"
 MAX_ATTEMPTS="${MAX_ATTEMPTS:-60}"
 SLEEP_SECONDS="${SLEEP_SECONDS:-5}"
 

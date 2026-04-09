@@ -5,7 +5,7 @@ Deploy `hokanuSK/Monad-Fleet-plugin` (`develop`) to AWS EC2, using eLabFTW image
 
 ## Repo Update (2026-04-09, develop)
 AWS deployment starter artifacts were added to this repo:
-- `docker-compose.aws.yml`
+- `infrastructure/aws/docker-compose.aws.yml`
 - `.env.aws.example`
 - `scripts/aws/deploy_ec2_stack.sh`
 - `scripts/aws/build_elabimg_hypernext.sh`
@@ -246,7 +246,7 @@ Reverse proxy is now enabled and deployed on host.
 
 Host-side deployment status:
 - Compose files in use:
-  - `docker-compose.aws.yml`
+  - `infrastructure/aws/docker-compose.aws.yml`
   - `docker-compose.proxy.yml`
 - Reverse proxy container:
   - `elabftw-aws-reverse-proxy-1` (`caddy:2.8-alpine`)
@@ -346,7 +346,7 @@ Important runtime recovery applied after proxy rollout:
 1. `web` container returned 500 due missing `/elabftw/vendor/autoload.php` after container recreation.
 2. Fixed with:
 ```bash
-sudo docker compose --env-file .env.aws -f docker-compose.aws.yml -f docker-compose.proxy.yml exec -T web sh -lc \
+sudo docker compose --env-file .env.aws -f infrastructure/aws/docker-compose.aws.yml -f docker-compose.proxy.yml exec -T web sh -lc \
   'cd /elabftw && php -d open_basedir= /usr/local/bin/composer install --no-dev --optimize-autoloader'
 ```
 3. UI rendered only HTML (CSS/JS 404) due missing built assets in `/elabftw/web/assets`.

@@ -3,7 +3,7 @@
 This runbook deploys the current repo state on one EC2 host using Docker Compose.
 
 ## Files Added
-- `docker-compose.aws.yml`
+- `infrastructure/aws/docker-compose.aws.yml`
 - `.env.aws.example`
 - `infrastructure/aws/reverse-proxy/Caddyfile`
 - `scripts/aws/deploy_ec2_stack.sh`
@@ -60,7 +60,7 @@ scripts/aws/deploy_ec2_stack.sh
 
 Behavior:
 - builds `monad-fleet-service` + `model-device` images,
-- starts the stack from `docker-compose.aws.yml`,
+- starts the stack from `infrastructure/aws/docker-compose.aws.yml`,
 - bootstraps first eLabFTW admin only when users table is empty,
 - runs post-deploy verification checks.
 
