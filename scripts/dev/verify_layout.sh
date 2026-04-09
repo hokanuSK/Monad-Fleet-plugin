@@ -14,9 +14,6 @@ for dir in "${required_dirs[@]}"; do
 done
 
 expected_links=(
-  "monad-fleet-service:src/fleet-service"
-  "device-sim:src/device-sim"
-  "observability:src/observability"
   "data:artifacts/data"
   "tmp:artifacts/tmp"
   "output:artifacts/output"

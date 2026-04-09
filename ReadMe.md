@@ -29,8 +29,8 @@ FleetManager runs a local eLabFTW stack plus a Python gRPC fleet service, a devi
 
 ## Repository Layout (Canonical)
 
-- `apps/`: deployable/runtime app code
-- `infra/`: infrastructure and observability definitions
+- `src/`: deployable/runtime source code (`fleet-service`, `device-sim`, `observability`, `elabftw` submodule)
+- `infra/`: ancillary infrastructure files
 - `proto/`: protobuf source-of-truth
 - `artifacts/`: runtime data, temp files, outputs
 - `scripts/`: operational scripts grouped by domain (`smoke/`, `rpi/`, `reset/`, `ops/`, `dev/`)
@@ -39,9 +39,6 @@ FleetManager runs a local eLabFTW stack plus a Python gRPC fleet service, a devi
 
 The following root aliases are kept for compatibility during migration:
 
-- `device-sim -> src/device-sim`
-- `monad-fleet-service -> src/fleet-service`
-- `observability -> src/observability`
 - `data -> artifacts/data`
 - `tmp -> artifacts/tmp`
 - `output -> artifacts/output`
