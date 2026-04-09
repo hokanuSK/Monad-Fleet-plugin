@@ -201,3 +201,38 @@ Recommendation:
 ## Local Reference File
 Local env snapshot for this handoff:
 - `/tmp/fleetmanager_aws_deploy_current.env`
+
+## Deployment Update (2026-04-09, evening UTC)
+- Host: `ubuntu@32.195.200.179`
+- Working deploy checkout: `~/FleetManager_deploy`
+- Deployed branch/commit on host: `develop` @ `76ae06e`
+
+Actions completed:
+1. Stopped old broken stack in `~/FleetManager` (`docker-compose.yml` + `docker-compose.aws.override.yml`).
+2. Created `~/FleetManager_deploy/.env.aws` with fresh secrets and admin bootstrap values.
+3. Built hypernext web image from `hokanuSK/elabftw:hypernext` via patched `scripts/aws/build_elabimg_hypernext.sh`.
+4. Because t3.micro memory is insufficient for `buildall:prod` in Docker build, rebuilt web image with:
+   - `--build-arg BUILD_ALL=0`
+5. Deployed stack via:
+   - `scripts/aws/deploy_ec2_stack.sh` with `BUILD_ELAB_IMAGE=false RUN_BOOTSTRAP=false RUN_VERIFY=false`
+6. Runtime-prepared web container:
+   - `composer install` inside `web`,
+   - copied `/elabftw/web/assets` from `elabftw/elabimg:5.3.11` into running `web` container.
+7. Ran:
+   - `scripts/aws/elabftw_bootstrap_admin.sh`
+   - `scripts/aws/verify_ec2_stack.sh`
+
+Validation now passing:
+- `https://127.0.0.1:9443/login.php` -> `200`
+- `https://127.0.0.1:9443/assets/vendor.bundle.js` -> `200`
+- `https://127.0.0.1:9443/assets/main.bundle.js` -> `200`
+- `https://127.0.0.1:9443/assets/vendor.min.css` -> `200`
+- `https://127.0.0.1:9443/assets/elabftw.min.css` -> `200`
+- `http://127.0.0.1:3000/api/health` -> `200`
+- `http://127.0.0.1:9108/metrics` -> `200`
+
+Credentials written on host:
+- `/tmp/fleetmanager_deploy_credentials_20260409.txt`
+
+Important note:
+- The runtime asset copy is a compatibility workaround. Proper production fix is to build web assets in image build on a larger builder (or CI), then deploy that finished image.
