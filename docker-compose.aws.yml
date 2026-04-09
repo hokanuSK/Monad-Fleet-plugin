@@ -59,7 +59,7 @@ services:
   monad-fleet-service:
     build:
       context: .
-      dockerfile: infra/aws/docker/fleet-service.Dockerfile
+      dockerfile: infrastructure/aws/docker/fleet-service.Dockerfile
     restart: unless-stopped
     depends_on:
       web:
@@ -92,7 +92,7 @@ services:
   model-device:
     build:
       context: .
-      dockerfile: infra/aws/docker/device-sim.Dockerfile
+      dockerfile: infrastructure/aws/docker/device-sim.Dockerfile
     restart: unless-stopped
     depends_on:
       monad-fleet-service:

@@ -12,8 +12,8 @@ AWS deployment starter artifacts were added to this repo:
 - `scripts/aws/elabftw_bootstrap_admin.sh`
 - `scripts/aws/verify_ec2_stack.sh`
 - `docs/runbooks/aws_ec2_deploy.md`
-- `infra/aws/docker/fleet-service.Dockerfile`
-- `infra/aws/docker/device-sim.Dockerfile`
+- `infrastructure/aws/docker/fleet-service.Dockerfile`
+- `infrastructure/aws/docker/device-sim.Dockerfile`
 
 Intent:
 - stop relying on ad-hoc host edits,
