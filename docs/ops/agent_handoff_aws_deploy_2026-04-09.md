@@ -280,6 +280,23 @@ TLS warning troubleshooting:
   - Subject must be `CN=elab.32.195.200.179.sslip.io`
   - Issuer currently `ZeroSSL ECC DV SSL CA 2`
 
+## Internet Exposure Status (2026-04-09)
+Requested public services are exposed and reachable:
+- eLabFTW (TLS via reverse proxy):
+  - URL: `https://elab.32.195.200.179.sslip.io`
+  - External check: `HTTP/2 302` on `/login.php` (expected pre-login redirect flow)
+- gRPC server:
+  - Endpoint: `32.195.200.179:50060`
+  - External TCP check: port open
+- Mimir:
+  - Endpoint: `http://32.195.200.179:9009/ready`
+  - External check response: `ready`
+
+Current SG includes these required inbound ports:
+- `443/tcp` (eLab TLS)
+- `50060/tcp` (gRPC)
+- `9009/tcp` (Mimir)
+
 Important runtime recovery applied after proxy rollout:
 1. `web` container returned 500 due missing `/elabftw/vendor/autoload.php` after container recreation.
 2. Fixed with:

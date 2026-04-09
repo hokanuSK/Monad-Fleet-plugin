@@ -2,6 +2,10 @@
   email {$ACME_EMAIL}
 }
 
+http://32.195.200.179 {
+  redir https://elab.32.195.200.179.sslip.io{uri} 308
+}
+
 {$ELAB_HOST} {
   reverse_proxy https://web:443 {
     transport http {
