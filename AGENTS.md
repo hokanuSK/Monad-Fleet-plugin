@@ -22,7 +22,7 @@ This repo runs a local eLabFTW instance plus a Python gRPC "fleet manager" servi
 - `src/device-sim/`: simulator clients:
   - `sim_device_client.py`: legacy `fleet.v1` flow.
   - `agent_v2_client.py`: v2 PREPARE/REPORT agent with local spooling (`DATA_ROOT`).
-- `src/observability/`: Prometheus/Mimir/Grafana config/provisioning.
+- `infrastructure/observability/`: Prometheus/Mimir/Grafana config/provisioning.
 - `src/elabftw/`: eLabFTW source as a git submodule (fork branch `hypernext`).
 - `shared/proto/`: canonical protobuf source-of-truth (shared by service + simulator).
 - `scripts/smoke/`: end-to-end smoke tests for WiFi/BLE/CSI + Prometheus/Mimir.
