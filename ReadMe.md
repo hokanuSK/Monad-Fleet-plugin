@@ -41,7 +41,7 @@ The following root aliases are kept for compatibility during migration:
 
 - `device-sim -> src/device-sim`
 - `monad-fleet-service -> src/fleet-service`
-- `observability -> infra/observability`
+- `observability -> src/observability`
 - `data -> artifacts/data`
 - `tmp -> artifacts/tmp`
 - `output -> artifacts/output`

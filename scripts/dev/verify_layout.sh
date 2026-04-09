@@ -16,7 +16,7 @@ done
 expected_links=(
   "monad-fleet-service:src/fleet-service"
   "device-sim:src/device-sim"
-  "observability:infra/observability"
+  "observability:src/observability"
   "data:artifacts/data"
   "tmp:artifacts/tmp"
   "output:artifacts/output"
