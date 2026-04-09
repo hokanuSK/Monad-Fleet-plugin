@@ -37,7 +37,7 @@ run_scp() {
 }
 
 AGENT_SRC="${ROOT_DIR}/src/device-sim/agent_v2_client.py"
-PROTO_SRC="${ROOT_DIR}/proto/fleet_gateway_v2.proto"
+PROTO_SRC="${ROOT_DIR}/shared/proto/fleet_gateway_v2.proto"
 
 if [[ ! -f "${AGENT_SRC}" ]]; then
   echo "Missing file: ${AGENT_SRC}" >&2

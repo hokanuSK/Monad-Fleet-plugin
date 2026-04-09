@@ -111,7 +111,7 @@ services:
       - web
       - monad-fleet-service
     working_dir: /workspace
-    command: ["python3", "-u", "tools/elab-mcp/server.py"]
+    command: ["python3", "-u", "scripts/elab-mcp/server.py"]
     stdin_open: true
     tty: false
     environment:

@@ -1,4 +1,4 @@
-# Infra
+# Infrastructure
 
 Infrastructure and deployment assets:
 

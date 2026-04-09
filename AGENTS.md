@@ -24,9 +24,9 @@ This repo runs a local eLabFTW instance plus a Python gRPC "fleet manager" servi
   - `agent_v2_client.py`: v2 PREPARE/REPORT agent with local spooling (`DATA_ROOT`).
 - `src/observability/`: Prometheus/Mimir/Grafana config/provisioning.
 - `src/elabftw/`: eLabFTW source as a git submodule (fork branch `hypernext`).
+- `shared/proto/`: canonical protobuf source-of-truth (shared by service + simulator).
 - `scripts/smoke/`: end-to-end smoke tests for WiFi/BLE/CSI + Prometheus/Mimir.
 - `scripts/rpi/`: deploy/run the v2 agent on a Raspberry Pi via SSH + systemd.
-- `proto/`: canonical protobuf source-of-truth (shared by service + simulator).
 - `artifacts/`: runtime artifacts (`data/`, `tmp/`, `output/`).
 
 Compatibility note:
@@ -245,7 +245,7 @@ sudo journalctl -u monad-fleet-agent.service -n 100 --no-pager
 
 Canonical proto source-of-truth is now:
 
-- `proto/`
+- `shared/proto/`
 
 Service and simulator consume this through symlinked `proto/` directories under app roots.
 
@@ -295,8 +295,8 @@ Run the Fleet service locally:
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r src/fleet-service/requirements.txt
-python -m grpc_tools.protoc -I proto --python_out=src/fleet-service --grpc_python_out=src/fleet-service \
-  proto/fleet_gateway.proto proto/fleet_gateway_v2.proto
+python -m grpc_tools.protoc -I shared/proto --python_out=src/fleet-service --grpc_python_out=src/fleet-service \
+  shared/proto/fleet_gateway.proto shared/proto/fleet_gateway_v2.proto
 ELAB_BASE_URL=https://localhost:8443/api/v2 ELAB_API_KEY=<key> python -u src/fleet-service/gateway_server.py
 ```
 
@@ -306,7 +306,7 @@ Run the v2 agent locally:
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r src/device-sim/requirements.txt
-python -m grpc_tools.protoc -I proto --python_out=src/device-sim --grpc_python_out=src/device-sim \
-  proto/fleet_gateway.proto proto/fleet_gateway_v2.proto
+python -m grpc_tools.protoc -I shared/proto --python_out=src/device-sim --grpc_python_out=src/device-sim \
+  shared/proto/fleet_gateway.proto shared/proto/fleet_gateway_v2.proto
 FLEET_MANAGER_HOST=127.0.0.1 FLEET_MANAGER_PORT=50060 MAX_SYNC_CYCLES=1 EXECUTE_POLICY=false python -u src/device-sim/agent_v2_client.py
 ```

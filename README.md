@@ -30,8 +30,8 @@ FleetManager runs a local eLabFTW stack plus a Python gRPC fleet service, a devi
 ## Repository Layout (Canonical)
 
 - `src/`: deployable/runtime source code (`fleet-service`, `device-sim`, `observability`, `elabftw` submodule)
-- `infra/`: ancillary infrastructure files
-- `proto/`: protobuf source-of-truth
+- `shared/`: shared assets/libraries across apps (protobuf contracts under `shared/proto/`)
+- `infrastructure/`: infrastructure and deployment assets
 - `artifacts/`: runtime data, temp files, outputs
 - `scripts/`: operational scripts grouped by domain (`smoke/`, `rpi/`, `reset/`, `ops/`, `dev/`)
 

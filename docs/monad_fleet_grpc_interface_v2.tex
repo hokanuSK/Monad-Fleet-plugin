@@ -70,10 +70,10 @@ The words \textbf{MUST}, \textbf{SHOULD}, and \textbf{MAY} are used in the RFC-s
 
 \section{Source of Truth}
 \begin{itemize}
-  \item v2 protobuf: \texttt{proto/fleet\_gateway\_v2.proto}
-  \item server implementation: \texttt{apps/fleet-service/gateway\_server.py}
-  \item reference client: \texttt{apps/device-sim/agent\_v2\_client.py}
-  \item legacy v1 protobuf (still served): \texttt{proto/fleet\_gateway.proto}
+  \item v2 protobuf: \texttt{shared/proto/fleet\_gateway\_v2.proto}
+  \item server implementation: \texttt{src/fleet-service/gateway\_server.py}
+  \item reference client: \texttt{src/device-sim/agent\_v2\_client.py}
+  \item legacy v1 protobuf (still served): \texttt{shared/proto/fleet\_gateway.proto}
 \end{itemize}
 
 \section{Quick Start for New Device Integrators}
@@ -1219,8 +1219,8 @@ This repository provisions a Grafana dashboard focused on Raspberry Pi wireless 
   \item dashboard URL path: \texttt{/d/monad-fleet-wireless-v3/monad-fleet-wireless-sensing-pi-smoke-v3}
   \item provisioning files:
   \begin{itemize}
-    \item \texttt{infra/observability/grafana/provisioning/dashboards/monad-fleet.yml}
-    \item \texttt{infra/observability/grafana/provisioning/dashboards/monad-fleet-wireless-sensing-v3.json}
+    \item \texttt{src/observability/grafana/provisioning/dashboards/monad-fleet.yml}
+    \item \texttt{src/observability/grafana/provisioning/dashboards/monad-fleet-wireless-sensing-v3.json}
   \end{itemize}
 \end{itemize}
 

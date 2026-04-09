@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
-required_dirs=(src infra proto artifacts scripts docs)
+required_dirs=(src infrastructure shared artifacts scripts docs)
 for dir in "${required_dirs[@]}"; do
   if [[ ! -d "${dir}" ]]; then
     echo "ERROR: missing required directory '${dir}'." >&2
