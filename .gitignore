@@ -1,14 +1,19 @@
-
-artifacts/data/
-artifacts/tmp/
-artifacts/output/
+# Runtime/output folders
+artifacts/
+data/
+tmp/
+output/
+tools/
 
 # macOS
 .DS_Store
 
 # Local scratch / secrets
-tmp/
 scripts/rpi/keys/
+Poznamky.md
+PoznamkyBP1.md
+agend.md
+AGENT.MD
 
 # Vendored upstream clones (too large for this repo; keep as separate submodule or external checkout)
 
@@ -20,6 +25,8 @@ scripts/rpi/keys/
 # Local editor / generated deps
 .vscode/
 docs/diagrams/node_modules/
+docs/handoffs/
+docs/ops/agent_handoff_*.md
 
 # Python
 __pycache__/
