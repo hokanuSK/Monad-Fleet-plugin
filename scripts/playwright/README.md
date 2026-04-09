@@ -10,8 +10,8 @@ Artifacts (screenshots, traces, extracted values) are written under `artifacts/o
 
 ```bash
 cd /Users/admin/FleetManager
-docker compose -f infrastructure/docker-compose.yml up -d
-docker compose -f infrastructure/docker-compose.yml ps
+docker compose up -d
+docker compose ps
 ```
 
 2. Ensure `npx` is available (comes with Node.js/npm):
@@ -59,4 +59,4 @@ Output:
 
 Next:
 
-- Update `ELAB_API_KEY` in `/Users/admin/FleetManager/infrastructure/docker-compose.yml` for the `monad-fleet-service` container (do not commit real secrets).
+- Update `ELAB_API_KEY` in `/Users/admin/FleetManager/docker-compose.yml` for the `monad-fleet-service` container (do not commit real secrets).

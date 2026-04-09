@@ -4,10 +4,6 @@ set -euo pipefail
 # Resets only Monad Fleet state and observability data.
 # Does NOT touch MySQL/eLabFTW database volumes.
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-export COMPOSE_FILE="${COMPOSE_FILE:-${REPO_ROOT}/infrastructure/docker-compose.yml}"
-
 RESET_STATE="${RESET_STATE:-true}"
 RESET_METRICS="${RESET_METRICS:-true}"
 RESET_GRAFANA="${RESET_GRAFANA:-false}"
@@ -38,3 +34,4 @@ else
 fi
 
 echo "Reset complete."
+

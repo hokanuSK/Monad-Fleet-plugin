@@ -3,7 +3,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-export COMPOSE_FILE="${COMPOSE_FILE:-${REPO_ROOT}/infrastructure/docker-compose.yml}"
 
 DEVICE_MODEL="${DEVICE_MODEL:-02:42:ac:14:00:04}"
 DEVICE_PI="${DEVICE_PI:-2c:cf:67:80:f5:d9}"

@@ -1,4 +1,4 @@
-[submodule "src/elabftw"]
-	path = src/elabftw
-	url = https://github.com/hokanuSK/elabftw.git
-	branch = hypernext
+[submodule "elabimg"]
+	path = elabimg
+	url = https://github.com/elabftw/elabimg.git
+

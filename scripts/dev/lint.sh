@@ -15,7 +15,7 @@ for file in "${shell_files[@]}"; do
 done
 
 echo "[lint] Python syntax"
-PYTHONPYCACHEPREFIX=/tmp/pycache python3 -m compileall -q src scripts shared
+PYTHONPYCACHEPREFIX=/tmp/pycache python3 -m compileall -q apps scripts tools
 
 echo "[lint] YAML syntax"
 yaml_files=()
@@ -50,7 +50,7 @@ fi
 
 echo "[lint] Docker Compose sanity"
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-  docker compose -f infrastructure/docker-compose.yml config -q
+  docker compose -f docker-compose.yml config -q
 else
   echo "WARN: docker compose is not available; skipping compose sanity check."
 fi
