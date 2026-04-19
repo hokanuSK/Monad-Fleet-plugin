@@ -17,7 +17,7 @@ set -a
 source "$ENV_FILE"
 set +a
 
-compose_cmd=(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE")
+compose_cmd=(docker compose --project-directory "$ROOT_DIR" --env-file "$ENV_FILE" -f "$COMPOSE_FILE")
 if [[ "$ENABLE_REVERSE_PROXY" == "true" ]]; then
   compose_cmd+=(--profile proxy)
 fi
