@@ -74,10 +74,11 @@ if [[ "$grafana_code" != "200" ]]; then
 fi
 
 if [[ "$ENABLE_REVERSE_PROXY" == "true" ]]; then
+  proxy_port="${PROXY_HTTPS_PORT:-443}"
   proxy_elab_code="$(
     curl -k -sS -o /dev/null -w '%{http_code}' \
-      -H "Host: ${ELAB_HOST}" \
-      "https://127.0.0.1:${PROXY_HTTPS_PORT:-443}/login.php"
+      --resolve "${ELAB_HOST}:${proxy_port}:127.0.0.1" \
+      "https://${ELAB_HOST}:${proxy_port}/login.php"
   )"
   if [[ "$proxy_elab_code" != "200" ]]; then
     echo "Reverse proxy eLab check failed for host ${ELAB_HOST}: $proxy_elab_code" >&2
@@ -86,8 +87,8 @@ if [[ "$ENABLE_REVERSE_PROXY" == "true" ]]; then
 
   proxy_grafana_code="$(
     curl -k -sS -o /dev/null -w '%{http_code}' \
-      -H "Host: ${GRAFANA_HOST}" \
-      "https://127.0.0.1:${PROXY_HTTPS_PORT:-443}/api/health"
+      --resolve "${GRAFANA_HOST}:${proxy_port}:127.0.0.1" \
+      "https://${GRAFANA_HOST}:${proxy_port}/api/health"
   )"
   if [[ "$proxy_grafana_code" != "200" ]]; then
     echo "Reverse proxy Grafana check failed for host ${GRAFANA_HOST}: $proxy_grafana_code" >&2
