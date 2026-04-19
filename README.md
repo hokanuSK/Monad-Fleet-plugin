@@ -70,6 +70,29 @@ CI runs the same contract via `.github/workflows/repo_checks.yml`.
 - Fleet metrics/ingest: `http://localhost:9108/metrics`, `http://localhost:9108/ingest/v1/metrics`
 - Prometheus: device-local only (not part of the localhost stack)
 
+## AWS CloudFormation Bootstrap
+
+For one-host AWS deploys using infrastructure-as-code:
+
+1. Prepare `.env.aws` from `.env.aws.example`.
+2. Store `.env.aws` in SSM Parameter Store (SecureString).
+3. Deploy stack:
+   ```bash
+   AWS_REGION=eu-north-1 \
+   STACK_NAME=fleetmanager-ec2 \
+   ENV_SSM_PARAMETER_NAME=/fleetmanager/prod/env \
+   scripts/aws/deploy_cloudformation_stack.sh
+   ```
+4. Verify stack + services:
+   ```bash
+   AWS_REGION=eu-north-1 \
+   STACK_NAME=fleetmanager-ec2 \
+   scripts/aws/verify_cloudformation_stack.sh
+   ```
+
+CloudFormation template path:
+- `infrastructure/aws/cloudformation/fleetmanager-ec2.yml`
+
 ## Useful Docs
 
 - Operational handoff: `docs/ops/agent_handoff_notion_ops_2026-03-19.md`

@@ -1,0 +1,317 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  FleetManager single-host EC2 deployment bootstrap. The instance pulls .env.aws
+  from SSM Parameter Store and runs scripts/aws/deploy_ec2_stack.sh.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: fleetmanager
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9-]*"
+    Description: Prefix used for Name tags.
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC where the FleetManager host will run.
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet for the FleetManager host.
+
+  KeyPairName:
+    Type: String
+    Default: ""
+    Description: Optional EC2 key pair for SSH. Leave empty to use SSM only.
+
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+      - t3.large
+    Description: EC2 instance type for the FleetManager host.
+
+  RootVolumeSizeGiB:
+    Type: Number
+    Default: 30
+    MinValue: 20
+    MaxValue: 200
+    Description: Size of root gp3 EBS volume.
+
+  SshIngressCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    AllowedPattern: "^(\\d{1,3}\\.){3}\\d{1,3}/\\d{1,2}$"
+    Description: CIDR allowed to connect over SSH (port 22).
+
+  PublicWebIngressCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    AllowedPattern: "^(\\d{1,3}\\.){3}\\d{1,3}/\\d{1,2}$"
+    Description: CIDR allowed to connect to 80/443.
+
+  EnableDirectServiceAccess:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Whether to expose Grafana/Mimir/Fleet ports publicly.
+
+  AttachElasticIp:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Attach an Elastic IP to the instance.
+
+  RepoUrl:
+    Type: String
+    Default: https://github.com/hokanuSK/Monad-Fleet-plugin.git
+    Description: Git repository URL with FleetManager code.
+
+  RepoRef:
+    Type: String
+    Default: develop
+    Description: Branch, tag, or commit to deploy.
+
+  EnvSsmParameterName:
+    Type: String
+    Description: SSM SecureString parameter name holding .env.aws content.
+
+  BuildElabImage:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Whether deploy script should build custom eLab image.
+
+  EnableReverseProxy:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Whether deploy script should start proxy profile.
+
+Conditions:
+  HasKeyPair: !Not [!Equals [!Ref KeyPairName, ""]]
+  DirectServiceAccessEnabled: !Equals [!Ref EnableDirectServiceAccess, "true"]
+  AttachElasticIpEnabled: !Equals [!Ref AttachElasticIp, "true"]
+
+Resources:
+  FleetManagerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: !Sub "${EnvironmentName}-fleetmanager-ssm-read"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource: "*"
+
+  FleetManagerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref FleetManagerRole
+
+  FleetManagerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: FleetManager EC2 ingress rules
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - Description: SSH
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SshIngressCidr
+        - Description: HTTP
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref PublicWebIngressCidr
+        - Description: HTTPS
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref PublicWebIngressCidr
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-fleetmanager-sg"
+
+  FleetManagerSgIngressGrpc:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: DirectServiceAccessEnabled
+    Properties:
+      GroupId: !Ref FleetManagerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 50060
+      ToPort: 50060
+      CidrIp: !Ref PublicWebIngressCidr
+      Description: Fleet gRPC
+
+  FleetManagerSgIngressMetrics:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: DirectServiceAccessEnabled
+    Properties:
+      GroupId: !Ref FleetManagerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 9108
+      ToPort: 9108
+      CidrIp: !Ref PublicWebIngressCidr
+      Description: Fleet metrics
+
+  FleetManagerSgIngressGrafana:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: DirectServiceAccessEnabled
+    Properties:
+      GroupId: !Ref FleetManagerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 3000
+      ToPort: 3000
+      CidrIp: !Ref PublicWebIngressCidr
+      Description: Grafana
+
+  FleetManagerSgIngressMimir:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: DirectServiceAccessEnabled
+    Properties:
+      GroupId: !Ref FleetManagerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 9009
+      ToPort: 9009
+      CidrIp: !Ref PublicWebIngressCidr
+      Description: Mimir
+
+  FleetManagerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref FleetManagerInstanceProfile
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref FleetManagerSecurityGroup
+      KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref "AWS::NoValue"]
+      MetadataOptions:
+        HttpTokens: required
+        HttpEndpoint: enabled
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: !Ref RootVolumeSizeGiB
+            VolumeType: gp3
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-fleetmanager-host"
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+
+          LOG_FILE=/var/log/fleetmanager-bootstrap.log
+          exec > >(tee -a "$LOG_FILE") 2>&1
+
+          REGION="${AWS::Region}"
+          REPO_URL="${RepoUrl}"
+          REPO_REF="${RepoRef}"
+          ENV_PARAM="${EnvSsmParameterName}"
+          BUILD_ELAB_IMAGE="${BuildElabImage}"
+          ENABLE_REVERSE_PROXY="${EnableReverseProxy}"
+
+          dnf -y update
+          dnf -y install docker docker-compose-plugin git jq awscli
+          systemctl enable --now docker
+          usermod -aG docker ec2-user || true
+
+          install -d -m 0755 /opt/FleetManager
+          if [[ ! -d /opt/FleetManager/.git ]]; then
+            git clone "$REPO_URL" /opt/FleetManager
+          fi
+
+          cd /opt/FleetManager
+          git fetch --all --tags
+          if git show-ref --verify --quiet "refs/remotes/origin/$REPO_REF"; then
+            git checkout -B "$REPO_REF" "origin/$REPO_REF"
+          else
+            git checkout "$REPO_REF"
+          fi
+
+          aws ssm get-parameter \
+            --region "$REGION" \
+            --name "$ENV_PARAM" \
+            --with-decryption \
+            --output json | jq -r '.Parameter.Value' > /opt/FleetManager/.env.aws
+
+          chown ec2-user:ec2-user /opt/FleetManager/.env.aws
+          chmod 600 /opt/FleetManager/.env.aws
+          chmod +x /opt/FleetManager/scripts/aws/*.sh
+
+          ENV_FILE=/opt/FleetManager/.env.aws \
+          BUILD_IMAGES=true \
+          BUILD_ELAB_IMAGE="$BUILD_ELAB_IMAGE" \
+          ENABLE_REVERSE_PROXY="$ENABLE_REVERSE_PROXY" \
+          /opt/FleetManager/scripts/aws/deploy_ec2_stack.sh
+
+  FleetManagerElasticIp:
+    Type: AWS::EC2::EIP
+    Condition: AttachElasticIpEnabled
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-fleetmanager-eip"
+
+  FleetManagerElasticIpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Condition: AttachElasticIpEnabled
+    Properties:
+      InstanceId: !Ref FleetManagerInstance
+      EIP: !Ref FleetManagerElasticIp
+
+Outputs:
+  InstanceId:
+    Description: FleetManager EC2 instance ID
+    Value: !Ref FleetManagerInstance
+
+  PublicIp:
+    Description: Public IP of the EC2 host
+    Value: !If
+      - AttachElasticIpEnabled
+      - !Ref FleetManagerElasticIp
+      - !GetAtt FleetManagerInstance.PublicIp
+
+  PublicDnsName:
+    Description: Public DNS of the EC2 host
+    Value: !GetAtt FleetManagerInstance.PublicDnsName
+
+  SecurityGroupId:
+    Description: Security Group used by FleetManager instance
+    Value: !Ref FleetManagerSecurityGroup
+
+  SshCommand:
+    Description: SSH command when key pair is configured
+    Value: !If
+      - HasKeyPair
+      - !Sub "ssh -i <path-to-${KeyPairName}.pem> ec2-user@${FleetManagerInstance.PublicDnsName}"
+      - "No key pair configured. Use AWS SSM Session Manager."
+
+  SsmStartSessionCommand:
+    Description: Session Manager command for shell access
+    Value: !Sub "aws ssm start-session --target ${FleetManagerInstance}"
