@@ -19,7 +19,8 @@ RUN python -m grpc_tools.protoc \
     --python_out=. \
     --grpc_python_out=. \
     proto/fleet_gateway.proto \
-    proto/fleet_gateway_v2.proto
+    proto/fleet_gateway_v2.proto \
+    proto/fleet_gateway_v3.proto
 
 EXPOSE 50060
 EXPOSE 9108

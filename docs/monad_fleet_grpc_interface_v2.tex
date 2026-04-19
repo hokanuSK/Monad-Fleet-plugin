@@ -11,7 +11,7 @@
 \setlist{noitemsep,topsep=4pt}
 \graphicspath{{../diagrams/svg/}}
 
-\title{Monad Fleet Device Protocol Specification\\fleet.v2 Implementation Profile}
+\title{Monad Fleet Device Protocol Specification\\fleet.v3 Implementation Profile}
 \author{FleetManager Project}
 \date{\today}
 
@@ -26,28 +26,28 @@ It is intended for engineers building new device agents (Raspberry Pi or other W
 
 The scope includes:
 \begin{itemize}
-  \item gRPC contract (\texttt{fleet.v2}),
+  \item gRPC contract (\texttt{fleet.v3}),
   \item run lifecycle and idempotency,
   \item device-side persistence model,
   \item metrics forwarding pipeline (Prometheus/Mimir/Grafana),
   \item eLabFTW integration profile used by the running server.
 \end{itemize}
 
-\textbf{Implementation baseline:} February 23, 2026.
+\textbf{Implementation baseline:} April 15, 2026.
 This document describes the behavior currently implemented in this repository, not a hypothetical future API.
 \textbf{Canonical documentation note:} this file is the single source of truth for the Fleet device protocol profile.
 
 \section{Audience, Scope, and Non-goals}
 \textbf{Primary audience:}
 \begin{itemize}
-  \item engineers implementing a new device agent against \texttt{fleet.v2},
+  \item engineers implementing a new device agent against \texttt{fleet.v3},
   \item platform engineers deploying Monad Fleet with eLabFTW,
   \item operators validating interoperability before production rollout.
 \end{itemize}
 
 \textbf{In scope:}
 \begin{itemize}
-  \item wire contract and behavioral semantics for \texttt{fleet.v2},
+  \item wire contract and behavioral semantics for \texttt{fleet.v3},
   \item device lifecycle guarantees (prepare/measure/report),
   \item idempotency and replay requirements,
   \item mapping from device reports into eLabFTW and observability systems.
@@ -70,7 +70,7 @@ The words \textbf{MUST}, \textbf{SHOULD}, and \textbf{MAY} are used in the RFC-s
 
 \section{Source of Truth}
 \begin{itemize}
-  \item v2 protobuf: \texttt{shared/proto/fleet\_gateway\_v2.proto}
+  \item v3 protobuf: \texttt{shared/proto/fleet\_gateway\_v3.proto}
   \item server implementation: \texttt{src/fleet-service/gateway\_server.py}
   \item reference client: \texttt{src/device-sim/agent\_v2\_client.py}
   \item legacy v1 protobuf (still served): \texttt{shared/proto/fleet\_gateway.proto}
@@ -79,16 +79,18 @@ The words \textbf{MUST}, \textbf{SHOULD}, and \textbf{MAY} are used in the RFC-s
 \section{Quick Start for New Device Integrators}
 Use this path to bring a new device implementation online with predictable interoperability:
 \begin{enumerate}
-  \item \textbf{Generate gRPC stubs from the v2 proto.}
-  Implement \texttt{fleet.v2.FleetManager} client calls from \texttt{fleet\_gateway\_v2.proto}.
+  \item \textbf{Generate gRPC stubs from the v3 proto.}
+  Implement \texttt{fleet.v3.FleetManager} client calls from \texttt{fleet\_gateway\_v3.proto}.
   \item \textbf{Implement required identity behavior.}
   Persist a stable \texttt{agent\_id}. Do not generate a new identifier on every reboot.
   \item \textbf{Implement PREPARE loop.}
   \texttt{Hello} $\rightarrow$ \texttt{GetPolicy} $\rightarrow$ \texttt{AckPrepared}.
   Cache \texttt{policy\_id}; handle \texttt{NO\_WORK} and \texttt{NOT\_MODIFIED}.
-  \item \textbf{Implement MEASURE execution.}
-  Execute \texttt{CommandGroup.commands} in order with timeout/retry semantics.
-  \item \textbf{Implement REPORT replay safety.}
+  \item \textbf{Implement EXECUTION status reporting.}
+  Execute \texttt{CommandGroup.commands} in order with timeout/retry semantics and emit
+  \texttt{ReportCommandStatus} (\texttt{STARTED}/\texttt{FINISHED}/\texttt{FAILED}).
+  \item \textbf{Implement MAINTENANCE/REPORT replay safety.}
+  Emit \texttt{ReportUploadStatus} and \texttt{ReportArtifactUploadStatus} during deferred upload ticks.
   Persist run bundles locally and retry \texttt{PublishReport} until \texttt{ACCEPTED} or \texttt{DUPLICATE}.
   \item \textbf{Validate with smoke and verifier.}
   Run a real-device smoke flow and verify report acceptance, artifact linkage, and required metrics.
@@ -117,7 +119,7 @@ Backend routing (eLabFTW, time-series, object storage) is a server deployment co
 
 \section{Architecture Overview}
 \begin{verbatim}
-Device Agent <-> gRPC fleet.v2 <-> Monad Fleet <-> eLabFTW API
+Device Agent <-> gRPC fleet.v3 <-> Monad Fleet <-> eLabFTW API
           \-> optional HTTP ingest (/ingest/v1/metrics, /ingest/v1/artifacts)
                                            -> /metrics -> Prometheus -> Mimir -> Grafana
 \end{verbatim}
@@ -180,12 +182,15 @@ This keeps the device contract generic while allowing server-side forwarding to 
 \end{itemize}
 
 \section{Service Definition}
-Served package: \texttt{fleet.v2}. Service: \texttt{FleetManager}.
+Served package: \texttt{fleet.v3}. Service: \texttt{FleetManager}.
 
 \begin{verbatim}
 rpc Hello(HelloRequest) returns (HelloResponse);
 rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse);
 rpc AckPrepared(AckPreparedRequest) returns (AckPreparedResponse);
+rpc ReportCommandStatus(ReportCommandStatusRequest) returns (StatusAck);
+rpc ReportUploadStatus(ReportUploadStatusRequest) returns (StatusAck);
+rpc ReportArtifactUploadStatus(ReportArtifactUploadStatusRequest) returns (StatusAck);
 rpc PublishReport(PublishReportRequest) returns (PublishReportResponse);
 rpc PublishEvents(PublishEventsRequest) returns (PublishEventsResponse); // optional
 \end{verbatim}
@@ -207,6 +212,18 @@ Cache by \texttt{policy\_id}. Reuse cached policy on \texttt{NOT\_MODIFIED}. \\
 \texttt{agent\_id}, \texttt{preparation\_id}, \texttt{policy\_id} &
 \texttt{ACCEPTED} (including duplicate \texttt{preparation\_id}) &
 Treat \texttt{REJECTED} as a control-plane failure; reacquire policy before measure. \\
+\texttt{ReportCommandStatus} &
+\texttt{agent\_id}, \texttt{run\_id}, \texttt{experiment\_id}, \texttt{policy\_id}, \texttt{stage} &
+\texttt{StatusAck(ok=true)} &
+Report command start/finish/failure in real time; keep stable \texttt{event\_id} for idempotent retries. \\
+\texttt{ReportUploadStatus} &
+\texttt{agent\_id}, \texttt{run\_id}, \texttt{experiment\_id}, \texttt{policy\_id}, \texttt{payload\_kind}, \texttt{status} &
+\texttt{StatusAck(ok=true)} &
+Report maintenance metrics/logs upload state before/alongside report replay. \\
+\texttt{ReportArtifactUploadStatus} &
+\texttt{agent\_id}, \texttt{run\_id}, \texttt{experiment\_id}, \texttt{policy\_id}, \texttt{artifact\_name}, \texttt{status} &
+\texttt{StatusAck(ok=true)} &
+Report per-artifact upload outcome in maintenance window; include URI/hash/size when available. \\
 \texttt{PublishReport} &
 \texttt{report.run\_id} and agent identity &
 \texttt{ACCEPTED} or \texttt{DUPLICATE} &
@@ -222,7 +239,8 @@ Optional in this profile; currently disabled by default and returns \texttt{REJE
 \subsection{Operational phases}
 \begin{itemize}
   \item \textbf{PREPARE}: \texttt{Hello}, \texttt{GetPolicy}, \texttt{AckPrepared}
-  \item \textbf{MEASURE}: local policy command execution on agent
+  \item \textbf{EXECUTION}: local policy command execution + \texttt{ReportCommandStatus}
+  \item \textbf{MAINTENANCE}: deferred uploads + \texttt{ReportUploadStatus}/\texttt{ReportArtifactUploadStatus}
   \item \textbf{REPORT}: \texttt{PublishReport}; optional \texttt{PublishEvents}
 \end{itemize}
 
@@ -232,11 +250,13 @@ Optional in this profile; currently disabled by default and returns \texttt{REJE
 2) repeat:
    a) GetPolicy(agent_id, last_policy_id)
    b) if NO_WORK: sleep(recommended_prepare_poll_sec)
-   c) if NOT_MODIFIED: sleep(recommended_prepare_poll_sec)
-   d) AckPrepared(...)
-   e) execute command_groups
-   f) PublishReport(run_id, events, artifacts, summary)
-   g) on ACCEPTED or DUPLICATE: cache policy_id and continue
+   c) if NOT_MODIFIED: resolve executable policy from response or local cache by policy_id
+   d) if no executable policy: run maintenance replay and sleep(recommended_prepare_poll_sec)
+   e) AckPrepared(...)
+   f) execute command_groups and report status via ReportCommandStatus
+   g) run maintenance upload tick and report upload states
+   h) PublishReport(run_id, events, artifacts, summary)
+   i) on ACCEPTED or DUPLICATE: cache policy_id and continue
 \end{verbatim}
 
 \section{Process Flow Diagrams}
@@ -384,6 +404,46 @@ This diagram shows how existing events are updated with additional report data:
 \textbf{Idempotency:}
 duplicate \texttt{preparation\_id} is accepted and treated as already acknowledged.
 
+\subsection{\texttt{ReportCommandStatus}}
+\textbf{Required:}
+\begin{itemize}
+  \item \texttt{agent\_id}, \texttt{run\_id}, \texttt{experiment\_id}, \texttt{policy\_id}
+  \item \texttt{stage} (\texttt{STARTED} / \texttt{FINISHED} / \texttt{FAILED})
+\end{itemize}
+
+\textbf{Purpose:}
+\begin{itemize}
+  \item stream command lifecycle progress during execution,
+  \item update run metadata before final report replay,
+  \item preserve idempotency via optional \texttt{event\_id}.
+\end{itemize}
+
+\subsection{\texttt{ReportUploadStatus}}
+\textbf{Required:}
+\begin{itemize}
+  \item \texttt{agent\_id}, \texttt{run\_id}, \texttt{experiment\_id}, \texttt{policy\_id}
+  \item \texttt{payload\_kind}, \texttt{status}
+\end{itemize}
+
+\textbf{Purpose:}
+\begin{itemize}
+  \item report maintenance-window upload state for metrics/logs spool data,
+  \item expose \texttt{ACK}/\texttt{ERROR}/\texttt{PENDING}/\texttt{SKIPPED} to backend metadata.
+\end{itemize}
+
+\subsection{\texttt{ReportArtifactUploadStatus}}
+\textbf{Required:}
+\begin{itemize}
+  \item \texttt{agent\_id}, \texttt{run\_id}, \texttt{experiment\_id}, \texttt{policy\_id}
+  \item \texttt{artifact\_name}, \texttt{status}
+\end{itemize}
+
+\textbf{Purpose:}
+\begin{itemize}
+  \item report per-artifact upload outcome during maintenance replay,
+  \item optionally attach \texttt{artifact\_uri}, \texttt{artifact\_size\_bytes}, \texttt{artifact\_sha256}.
+\end{itemize}
+
 \subsection{\texttt{PublishReport}}
 \textbf{Required:}
 \begin{itemize}
@@ -393,7 +453,7 @@ duplicate \texttt{preparation\_id} is accepted and treated as already acknowledg
 
 \textbf{Current server behavior:}
 \begin{itemize}
-  \item map v2 report/events into internal event model,
+  \item map v3 report/events into internal event model,
   \item write run state to eLabFTW scheduler event metadata,
   \item process artifact references as \texttt{ARTIFACT\_UPLOADED} events,
   \item export numeric summary/event metrics to \texttt{monad\_fleet\_metric\_value}.
@@ -432,6 +492,7 @@ Stop and raise operator-visible configuration/security error. \\
 \subsection{Application-level response status handling}
 \begin{itemize}
   \item \texttt{AckPrepared.REJECTED}: reacquire policy and do not execute stale policy.
+  \item \texttt{StatusAck(ok=false)} on status RPCs: treat as application rejection, keep run data local, and retry with backoff.
   \item \texttt{PublishReport.REJECTED}: keep run in pending spool and retry after backoff.
   \item \texttt{PublishReport.DUPLICATE}: treat as successful delivery outcome.
   \item \texttt{PublishEvents.EventAck.REJECTED}: do not fail the run lifecycle in this profile (live events are optional).
@@ -530,6 +591,47 @@ Server runtime state is persisted at:
 \endhead
 \texttt{max\_attempts} & no & Total attempts including first attempt. \\
 \texttt{backoff\_ms} & no & Fixed wait between attempts. \\
+\hline
+\end{longtable}
+
+\subsection{Status RPC payloads}
+\begin{longtable}{p{4.1cm}p{1.6cm}p{9.3cm}}
+\textbf{Field} & \textbf{Req} & \textbf{Meaning} \\
+\hline
+\endhead
+\texttt{ReportCommandStatus.event\_id} & no & Optional idempotency key for status ingestion. \\
+\texttt{ReportCommandStatus.agent\_id} & yes & Reporting agent identity. \\
+\texttt{ReportCommandStatus.run\_id} & yes & Run correlation id. \\
+\texttt{ReportCommandStatus.experiment\_id} & yes & Experiment id for this run. \\
+\texttt{ReportCommandStatus.policy\_id} & yes & Policy revision id for this run. \\
+\texttt{ReportCommandStatus.command\_id} & no & Command correlation id. \\
+\texttt{ReportCommandStatus.command\_type} & no & Command class label (\texttt{hello}/\texttt{upload}/\texttt{Metrics}/\texttt{Log}/\texttt{measure}/...). \\
+\texttt{ReportCommandStatus.measure\_type} & no & Optional measurement class (\texttt{WIFI}/\texttt{BLE}/\texttt{CSI}). \\
+\texttt{ReportCommandStatus.stage} & yes & \texttt{STARTED}, \texttt{FINISHED}, or \texttt{FAILED}. \\
+\texttt{ReportCommandStatus.exit\_code} & no & Command exit code (typically nonzero for failed stage). \\
+\texttt{ReportCommandStatus.duration\_ms} & no & Command duration in milliseconds. \\
+\texttt{ReportCommandStatus.message} & no & Human-readable status context. \\
+\texttt{ReportCommandStatus.metrics} & no & Extension map for runtime status metadata. \\
+\hline
+\end{longtable}
+
+\begin{longtable}{p{4.1cm}p{1.6cm}p{9.3cm}}
+\textbf{Field} & \textbf{Req} & \textbf{Meaning} \\
+\hline
+\endhead
+\texttt{ReportUploadStatus.event\_id} & no & Optional idempotency key for run-level upload status ingestion. \\
+\texttt{ReportUploadStatus.agent\_id/run\_id/experiment\_id/policy\_id} & yes & Required run identity tuple. \\
+\texttt{ReportUploadStatus.payload\_kind} & yes & \texttt{METRICS\_LOGS} or \texttt{ARTIFACT}. \\
+\texttt{ReportUploadStatus.status} & yes & \texttt{ACK}, \texttt{ERROR}, \texttt{PENDING}, \texttt{SKIPPED}. \\
+\texttt{ReportUploadStatus.message/metrics} & no & Optional detail and extension metadata. \\
+\texttt{ReportArtifactUploadStatus.event\_id} & no & Optional idempotency key for per-artifact status ingestion. \\
+\texttt{ReportArtifactUploadStatus.agent\_id/run\_id/experiment\_id/policy\_id} & yes & Required run identity tuple. \\
+\texttt{ReportArtifactUploadStatus.artifact\_name} & yes & Artifact correlation label. \\
+\texttt{ReportArtifactUploadStatus.artifact\_uri} & no & Uploaded artifact URI when known. \\
+\texttt{ReportArtifactUploadStatus.artifact\_size\_bytes} & no & Artifact size in bytes. \\
+\texttt{ReportArtifactUploadStatus.artifact\_sha256} & no & Artifact checksum. \\
+\texttt{ReportArtifactUploadStatus.status} & yes & \texttt{ACK}, \texttt{ERROR}, \texttt{PENDING}, \texttt{SKIPPED}. \\
+\texttt{ReportArtifactUploadStatus.message/metrics} & no & Optional detail and extension metadata. \\
 \hline
 \end{longtable}
 
@@ -659,7 +761,7 @@ policy_id = sha256:<digest>
 This profile lets experiment authors define sampling cadence in the policy itself.
 Device-side constraints may clamp requested values (minimum interval, maximum duration, maximum points).
 
-\subsection{Policy JSON to \texttt{fleet.v2} mapping rules}
+\subsection{Policy JSON to \texttt{fleet.v3} mapping rules}
 When policy is authored in eLabFTW metadata, the Fleet server maps JSON to proto with the following rules:
 \begin{itemize}
   \item command type aliases:
@@ -950,6 +1052,23 @@ Collector output files can be mirrored as run artifacts and uploaded to eLabFTW 
 scripts/smoke/v3_end_to_end_smoke.sh
 \end{verbatim}
 
+\subsection{Bootstrap prerequisites}
+Before running smoke on a fresh local stack, eLabFTW MUST be initialized and Fleet MUST use a valid REST API key.
+\begin{itemize}
+  \item Bootstrap eLab DB + first admin (fresh/local environments):
+\begin{verbatim}
+docker compose -f infrastructure/docker-compose.yml exec -T web sh -lc \
+  'cd /elabftw && bin/init db:install -n --reset \
+   -e admin@example.com -f Local -l Admin -p <12+char-password> -t Fleet'
+\end{verbatim}
+  \item Use the emitted ``Sysadmin API key'' as \texttt{ELAB\_API\_KEY} for Fleet and smoke.
+\end{itemize}
+
+\textbf{Compose note:} local compose now resolves \texttt{ELAB\_API\_KEY} via environment substitution:
+\begin{verbatim}
+ELAB_API_KEY=<rest-api-key> docker compose -f infrastructure/docker-compose.yml up -d
+\end{verbatim}
+
 \subsection{Manual reset helper}
 \begin{verbatim}
 scripts/reset/dev_reset.sh
@@ -978,6 +1097,7 @@ It resets fleet runtime and metrics storage state only.
 \begin{verbatim}
 DEVICE_MODEL=02:42:ac:14:00:04
 DEVICE_PI=2c:cf:67:80:f5:d9
+ELAB_API_KEY=<valid_rest_api_key>
 RESET_STATE=true|false
 RESET_METRICS=true|false
 RESET_GRAFANA=true|false
@@ -1297,7 +1417,8 @@ monad_fleet_artifact_uploads_total
 
 \section{Compatibility and Versioning}
 \begin{itemize}
-  \item preferred interface for new devices: \texttt{fleet.v2}
+  \item preferred interface for new devices: \texttt{fleet.v3}
+  \item \texttt{fleet.v2} remains served as a compatibility endpoint
   \item \texttt{fleet.v1} remains served for backward compatibility
   \item unknown fields/enums should be treated as forward-compatible additions
 \end{itemize}

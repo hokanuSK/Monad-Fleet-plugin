@@ -21,6 +21,8 @@ def flush_pending_reports(
     store: RunStore,
     *,
     metrics_upload_state: str = "",
+    report_upload_status_hook: Any = None,
+    artifact_upload_status_hook: Any = None,
 ) -> set[str]:
     sent_run_ids: set[str] = set()
     report_timeout_s = max(10, parse_int(os.environ.get("REPORT_RPC_TIMEOUT_S"), 90))
@@ -33,7 +35,21 @@ def flush_pending_reports(
         if desired_metrics_state and normalize(report.summary_metrics.get("metrics_upload_state")).upper() != desired_metrics_state:
             report.summary_metrics["metrics_upload_state"] = desired_metrics_state
             report_changed = True
-        uploaded_count, failed_count = upload_report_artifacts_to_elab(report, store, fallback_agent_id=agent_id)
+        effective_metrics_state = normalize(report.summary_metrics.get("metrics_upload_state")).upper()
+        if not effective_metrics_state:
+            effective_metrics_state = desired_metrics_state or "PENDING"
+        if callable(report_upload_status_hook):
+            try:
+                report_upload_status_hook(run_id, report, effective_metrics_state, "report_replay")
+            except Exception:
+                log.debug("report_upload_status_hook failed run_id=%s", run_id, exc_info=True)
+
+        uploaded_count, failed_count = upload_report_artifacts_to_elab(
+            report,
+            store,
+            fallback_agent_id=agent_id,
+            artifact_status_hook=artifact_upload_status_hook,
+        )
         if uploaded_count or failed_count:
             report.summary_metrics["artifacts_uploaded_elab"] = str(uploaded_count)
             report.summary_metrics["artifacts_upload_failed"] = str(failed_count)
@@ -301,6 +317,7 @@ def upload_report_artifacts_to_elab(
     store: RunStore,
     *,
     fallback_agent_id: str,
+    artifact_status_hook: Any = None,
 ) -> tuple[int, int]:
     experiment_numeric_id = parse_experiment_numeric_id(report.experiment_id)
     if experiment_numeric_id is None:
@@ -330,6 +347,17 @@ def upload_report_artifacts_to_elab(
             timeout_s=timeout_s,
             ingest_token=ingest_token,
         )
+        if callable(artifact_status_hook):
+            try:
+                reason = "uploaded_to_elab" if status == "uploaded" else "upload_failed" if status == "failed" else "skipped"
+                artifact_status_hook(report, artifact, status, reason)
+            except Exception:
+                log.debug(
+                    "artifact_status_hook failed run_id=%s artifact=%s",
+                    normalize(report.run_id),
+                    normalize(artifact.name),
+                    exc_info=True,
+                )
         if status == "uploaded":
             uploaded += 1
         elif status == "failed":

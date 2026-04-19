@@ -21,8 +21,8 @@ from urllib3.exceptions import InsecureRequestWarning
 
 import fleet_gateway_pb2
 import fleet_gateway_pb2_grpc
-import fleet_gateway_v2_pb2
-import fleet_gateway_v2_pb2_grpc
+import fleet_gateway_v3_pb2 as fleet_gateway_v2_pb2
+import fleet_gateway_v3_pb2_grpc as fleet_gateway_v2_pb2_grpc
 
 
 logging.basicConfig(
@@ -55,7 +55,7 @@ PROM_REGISTRY = CollectorRegistry()
 
 REPORTS_TOTAL = Counter(
     "monad_fleet_reports_total",
-    "Total v2 reports processed by status.",
+    "Total v3 reports processed by status.",
     ["status"],
     registry=PROM_REGISTRY,
 )
@@ -1064,4 +1064,3 @@ def start_http_sidecar(cfg: dict[str, Any]) -> ThreadingHTTPServer:
     thread.start()
     log.info("HTTP sidecar started on http://%s:%d (metrics + ingest)", bind, port)
     return httpd
-

@@ -66,6 +66,163 @@ def main() -> None:
     channel = grpc.insecure_channel(target)
     stub = fleet_gateway_v2_pb2_grpc.FleetManagerStub(channel)
 
+    def _is_unimplemented_rpc(exc: grpc.RpcError) -> bool:
+        return exc.code() == grpc.StatusCode.UNIMPLEMENTED
+
+    def report_command_status(
+        *,
+        event_id: str,
+        run_id: str,
+        experiment_id: str,
+        policy_id: str,
+        command_id: str,
+        command_type: str,
+        stage: int,
+        message: str = "",
+        metrics: dict[str, str] | None = None,
+        duration_ms: int = 0,
+        exit_code: int = 0,
+        measure_type: str = "",
+    ) -> None:
+        payload_metrics = {
+            normalize(k): normalize(v)
+            for k, v in (metrics or {}).items()
+            if normalize(k)
+        }
+        try:
+            ack = stub.ReportCommandStatus(
+                fleet_gateway_v2_pb2.ReportCommandStatusRequest(
+                    event_id=normalize(event_id),
+                    agent_id=agent_id,
+                    run_id=normalize(run_id),
+                    experiment_id=normalize(experiment_id),
+                    policy_id=normalize(policy_id),
+                    command_id=normalize(command_id),
+                    command_type=normalize(command_type),
+                    measure_type=normalize(measure_type),
+                    stage=int(stage),
+                    exit_code=int(exit_code),
+                    duration_ms=max(0, int(duration_ms)),
+                    message=normalize(message),
+                    metrics=payload_metrics,
+                ),
+                timeout=control_rpc_timeout_s,
+            )
+            if not bool(getattr(ack, "ok", False)):
+                log.warning(
+                    "ReportCommandStatus rejected run_id=%s command_id=%s reason=%s",
+                    normalize(run_id),
+                    normalize(command_id),
+                    normalize(getattr(ack, "reason", "")),
+                )
+        except grpc.RpcError as exc:
+            if _is_unimplemented_rpc(exc):
+                log.debug("ReportCommandStatus not implemented on server; continuing")
+                return
+            log.warning(
+                "ReportCommandStatus failed run_id=%s command_id=%s: %s",
+                normalize(run_id),
+                normalize(command_id),
+                exc,
+            )
+
+    def report_upload_status_from_report(run_id: str, report: fleet_gateway_v2_pb2.Report, metrics_state: str, reason: str) -> None:
+        token = normalize(metrics_state).upper()
+        status_value = fleet_gateway_v2_pb2.UPLOAD_PENDING
+        if token == "UPLOADED":
+            status_value = fleet_gateway_v2_pb2.UPLOAD_ACK
+        elif token in {"UPLOAD_FAILED", "ERROR", "FAILED"}:
+            status_value = fleet_gateway_v2_pb2.UPLOAD_ERROR
+        elif token == "PENDING":
+            status_value = fleet_gateway_v2_pb2.UPLOAD_PENDING
+
+        try:
+            ack = stub.ReportUploadStatus(
+                fleet_gateway_v2_pb2.ReportUploadStatusRequest(
+                    event_id=f"{normalize(run_id)}:upload:metrics_logs:{token.lower() or 'pending'}",
+                    agent_id=agent_id,
+                    run_id=normalize(run_id),
+                    experiment_id=normalize(report.experiment_id),
+                    policy_id=normalize(report.policy_id),
+                    payload_kind=fleet_gateway_v2_pb2.METRICS_LOGS,
+                    status=status_value,
+                    message=normalize(reason) or f"metrics/logs upload status={token or 'PENDING'}",
+                    metrics={
+                        "metrics_upload_state": token or "PENDING",
+                        "upload_hook_reason": normalize(reason),
+                    },
+                ),
+                timeout=control_rpc_timeout_s,
+            )
+            if not bool(getattr(ack, "ok", False)):
+                log.warning(
+                    "ReportUploadStatus rejected run_id=%s reason=%s",
+                    normalize(run_id),
+                    normalize(getattr(ack, "reason", "")),
+                )
+        except grpc.RpcError as exc:
+            if _is_unimplemented_rpc(exc):
+                log.debug("ReportUploadStatus not implemented on server; continuing")
+                return
+            log.warning("ReportUploadStatus failed run_id=%s: %s", normalize(run_id), exc)
+
+    def report_artifact_upload_status_from_report(
+        report: fleet_gateway_v2_pb2.Report,
+        artifact: fleet_gateway_v2_pb2.ArtifactRef,
+        artifact_status: str,
+        reason: str,
+    ) -> None:
+        token = normalize(artifact_status).lower()
+        status_value = fleet_gateway_v2_pb2.UPLOAD_PENDING
+        if token == "uploaded":
+            status_value = fleet_gateway_v2_pb2.UPLOAD_ACK
+        elif token == "failed":
+            status_value = fleet_gateway_v2_pb2.UPLOAD_ERROR
+        elif token == "skipped":
+            status_value = fleet_gateway_v2_pb2.UPLOAD_SKIPPED
+
+        run_id = normalize(report.run_id)
+        artifact_name = normalize(artifact.name) or "artifact"
+        event_id = f"{run_id}:artifact:{artifact_name}:{token or 'pending'}"
+        try:
+            ack = stub.ReportArtifactUploadStatus(
+                fleet_gateway_v2_pb2.ReportArtifactUploadStatusRequest(
+                    event_id=event_id,
+                    agent_id=agent_id,
+                    run_id=run_id,
+                    experiment_id=normalize(report.experiment_id),
+                    policy_id=normalize(report.policy_id),
+                    artifact_name=artifact_name,
+                    artifact_uri=normalize(artifact.uri),
+                    artifact_size_bytes=max(0, int(artifact.size_bytes or 0)),
+                    artifact_sha256=normalize(artifact.sha256),
+                    status=status_value,
+                    message=normalize(reason) or f"artifact upload status={token or 'pending'}",
+                    metrics={
+                        "artifact_upload_status": token or "pending",
+                        "artifact_upload_reason": normalize(reason),
+                    },
+                ),
+                timeout=control_rpc_timeout_s,
+            )
+            if not bool(getattr(ack, "ok", False)):
+                log.warning(
+                    "ReportArtifactUploadStatus rejected run_id=%s artifact=%s reason=%s",
+                    run_id,
+                    artifact_name,
+                    normalize(getattr(ack, "reason", "")),
+                )
+        except grpc.RpcError as exc:
+            if _is_unimplemented_rpc(exc):
+                log.debug("ReportArtifactUploadStatus not implemented on server; continuing")
+                return
+            log.warning(
+                "ReportArtifactUploadStatus failed run_id=%s artifact=%s: %s",
+                run_id,
+                artifact_name,
+                exc,
+            )
+
     def flush_pending_reports_guarded(reason: str) -> set[str]:
         upload_allowed, upload_reason = core_mod._upload_window_send_allowed(active_upload_cfg, agent_id)
         if not upload_allowed:
@@ -115,6 +272,8 @@ def main() -> None:
                 agent_id,
                 store,
                 metrics_upload_state=metrics_upload_state,
+                report_upload_status_hook=report_upload_status_from_report,
+                artifact_upload_status_hook=report_artifact_upload_status_from_report,
             )
         finally:
             remote_write_off_ok, remote_write_off_reason = core_mod._set_prom_remote_write_mode(
@@ -148,6 +307,7 @@ def main() -> None:
 
     poll = int(hello.recommended_prepare_poll_sec or default_poll_seconds)
     last_policy_id = ""
+    cached_policy: fleet_gateway_v2_pb2.Policy | None = None
     cycles = 0
 
     # Try to deliver any runs persisted from previous process/network interruptions.
@@ -177,24 +337,44 @@ def main() -> None:
             ts_to_iso(policy_resp.measurement_from),
             ts_to_iso(policy_resp.measurement_to),
         )
+        policy: fleet_gateway_v2_pb2.Policy | None = None
         if policy_resp.status == fleet_gateway_v2_pb2.GetPolicyResponse.NOT_MODIFIED:
             if normalize(policy_resp.policy_id):
                 last_policy_id = normalize(policy_resp.policy_id)
-            log.info("Policy not modified: %s", last_policy_id)
-            flush_pending_reports_guarded("policy-not-modified")
-            if reached_max_cycles(cycles, max_cycles):
-                break
-            time.sleep(poll)
-            continue
-        if policy_resp.status != fleet_gateway_v2_pb2.GetPolicyResponse.OK:
+            if len(policy_resp.policy.command_groups) > 0:
+                policy = policy_resp.policy
+                log.info("Policy not modified: server returned executable policy_id=%s", last_policy_id)
+            elif cached_policy is not None and normalize(cached_policy.policy_id) == normalize(last_policy_id):
+                policy = fleet_gateway_v2_pb2.Policy()
+                policy.CopyFrom(cached_policy)
+                log.info("Policy not modified: using locally cached policy_id=%s", last_policy_id)
+            else:
+                log.warning("Policy not modified but no cached policy body is available; skipping execution")
+                flush_pending_reports_guarded("policy-not-modified-no-cache")
+                if reached_max_cycles(cycles, max_cycles):
+                    break
+                time.sleep(poll)
+                continue
+        elif policy_resp.status != fleet_gateway_v2_pb2.GetPolicyResponse.OK:
             log.info("No policy available")
             flush_pending_reports_guarded("policy-unavailable")
             if reached_max_cycles(cycles, max_cycles):
                 break
             time.sleep(poll)
             continue
+        else:
+            policy = policy_resp.policy
+            cached_policy = fleet_gateway_v2_pb2.Policy()
+            cached_policy.CopyFrom(policy)
 
-        policy = policy_resp.policy
+        if policy is None:
+            log.warning("No executable policy payload after policy resolution; skipping cycle")
+            flush_pending_reports_guarded("policy-empty")
+            if reached_max_cycles(cycles, max_cycles):
+                break
+            time.sleep(poll)
+            continue
+
         policy_upload_overrides = core_mod._extract_policy_upload_window_overrides(policy)
         active_upload_cfg = core_mod._apply_upload_window_overrides(base_upload_cfg, policy_upload_overrides)
         if policy_upload_overrides:
@@ -291,6 +471,13 @@ def main() -> None:
                 cmd_id = normalize(cmd.id) or f"cmd-{commands_total}"
                 cmdline = normalize(cmd.cmdline)
                 cmd_type_name = command_type_name(int(cmd.type))
+                measure_type = ""
+                if int(cmd.type) == int(fleet_gateway_v2_pb2.WIFI_SCAN):
+                    measure_type = "WIFI"
+                elif int(cmd.type) == int(fleet_gateway_v2_pb2.BLE_SCAN):
+                    measure_type = "BLE"
+                elif int(cmd.type) == int(fleet_gateway_v2_pb2.CAPTURE_CSI):
+                    measure_type = "CSI"
                 cmd_argv = [normalize(a) for a in getattr(cmd, "argv", []) if normalize(a)]
                 cmd_env = {normalize(k): normalize(v) for k, v in getattr(cmd, "env", {}).items() if normalize(k)}
                 upload_during_measure = parse_bool(
@@ -300,10 +487,12 @@ def main() -> None:
                 artifact_upload_target = sinks_mod._artifact_upload_target(
                     cmd_env.get("ARTIFACT_UPLOAD_TARGET") or global_artifact_upload_target
                 )
+                command_start_message = cmdline or (" ".join(cmd_argv) if cmd_argv else cmd_type_name)
+                command_start_event_id = f"{run_id}:{cmd_id}:start"
 
                 record(
                     fleet_gateway_v2_pb2.Event(
-                        event_id=f"{run_id}:{cmd_id}:start",
+                        event_id=command_start_event_id,
                         run_id=run_id,
                         experiment_id=policy.experiment_id,
                         policy_id=policy.policy_id,
@@ -312,8 +501,20 @@ def main() -> None:
                         type=fleet_gateway_v2_pb2.COMMAND_STARTED,
                         group_id=normalize(group.id),
                         command_id=cmd_id,
-                        message=cmdline or (" ".join(cmd_argv) if cmd_argv else cmd_type_name),
+                        message=command_start_message,
                     )
+                )
+                report_command_status(
+                    event_id=command_start_event_id,
+                    run_id=run_id,
+                    experiment_id=policy.experiment_id,
+                    policy_id=policy.policy_id,
+                    command_id=cmd_id,
+                    command_type=cmd_type_name,
+                    stage=fleet_gateway_v2_pb2.COMMAND_STATUS_STAGE_STARTED,
+                    message=command_start_message,
+                    metrics={"group_id": normalize(group.id)},
+                    measure_type=measure_type,
                 )
 
                 timeout_ms = int(cmd.timeout_ms or 60000)
@@ -445,9 +646,15 @@ def main() -> None:
                         continue
                     latest_observed_metrics[normalize(key)] = normalize(value)
 
+                command_end_event_id = f"{run_id}:{cmd_id}:end"
+                command_end_stage = (
+                    fleet_gateway_v2_pb2.COMMAND_STATUS_STAGE_FINISHED
+                    if int(exit_code) == 0
+                    else fleet_gateway_v2_pb2.COMMAND_STATUS_STAGE_FAILED
+                )
                 record(
                     fleet_gateway_v2_pb2.Event(
-                        event_id=f"{run_id}:{cmd_id}:end",
+                        event_id=command_end_event_id,
                         run_id=run_id,
                         experiment_id=policy.experiment_id,
                         policy_id=policy.policy_id,
@@ -461,6 +668,20 @@ def main() -> None:
                         message=message,
                         metrics=event_metrics,
                     )
+                )
+                report_command_status(
+                    event_id=command_end_event_id,
+                    run_id=run_id,
+                    experiment_id=policy.experiment_id,
+                    policy_id=policy.policy_id,
+                    command_id=cmd_id,
+                    command_type=cmd_type_name,
+                    stage=command_end_stage,
+                    message=message,
+                    metrics=event_metrics,
+                    duration_ms=max(0, int(duration_ms)),
+                    exit_code=int(exit_code),
+                    measure_type=measure_type,
                 )
 
                 command_artifacts: list[fleet_gateway_v2_pb2.ArtifactRef] = []

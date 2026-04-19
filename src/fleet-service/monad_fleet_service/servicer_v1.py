@@ -352,6 +352,8 @@ class FleetManagerServicer(fleet_gateway_pb2_grpc.FleetManagerServicer):
         event_type = normalize_string(event.type).upper()
         if event_type == "ERROR":
             return "FAILED"
+        if event_type == "COMMAND_FAILED":
+            return "PARTIAL"
         if event_type == "COMMAND_FINISHED":
             return "RUNNING" if event.exit_code == 0 else "PARTIAL"
         if event_type in {"COMMAND_STARTED", "ARTIFACT_UPLOADED", "HEARTBEAT"}:
@@ -449,9 +451,12 @@ class FleetManagerServicer(fleet_gateway_pb2_grpc.FleetManagerServicer):
         summary["events_total"] = int(summary.get("events_total", 0)) + 1
         if normalize_string(event.type).upper() == "ARTIFACT_UPLOADED":
             summary["artifacts_total"] = int(summary.get("artifacts_total", 0)) + 1
-        if normalize_string(event.type).upper() == "COMMAND_FINISHED" and int(event.exit_code) != 0:
+        event_type = normalize_string(event.type).upper()
+        if event_type == "COMMAND_FINISHED" and int(event.exit_code) != 0:
             summary["commands_failed"] = int(summary.get("commands_failed", 0)) + 1
-        if normalize_string(event.type).upper() == "ERROR":
+        if event_type == "COMMAND_FAILED":
+            summary["commands_failed"] = int(summary.get("commands_failed", 0)) + 1
+        if event_type == "ERROR":
             summary["commands_failed"] = int(summary.get("commands_failed", 0)) + 1
 
         metadata["status"] = merged_status
@@ -557,5 +562,4 @@ class FleetManagerServicer(fleet_gateway_pb2_grpc.FleetManagerServicer):
         except Exception as exc:
             log.exception("PublishEvent failed for device_id=%s", device_id)
             return fleet_gateway_pb2.Ack(ok=False, message=f"PublishEvent failed: {exc}")
-
 

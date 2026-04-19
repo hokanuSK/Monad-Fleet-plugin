@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package fleet.v2;
+package fleet.v3;
 
 import "google/protobuf/timestamp.proto";
 

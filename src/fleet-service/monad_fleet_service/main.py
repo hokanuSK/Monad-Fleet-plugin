@@ -6,6 +6,7 @@ import grpc
 
 import fleet_gateway_pb2_grpc
 import fleet_gateway_v2_pb2_grpc
+import fleet_gateway_v3_pb2_grpc
 
 from . import core
 from .servicer_v1 import FleetManagerServicer
@@ -61,7 +62,7 @@ def serve() -> None:
     core.METRICS_EXCLUDE_PREFIXES = tuple(cfg.get("metrics_exclude_prefixes") or ())
     if core.METRICS_EXCLUDE_PREFIXES:
         core.log.info("Metrics export filter enabled, excluded prefixes: %s", ",".join(core.METRICS_EXCLUDE_PREFIXES))
-    core.log.info("fleet.v2 device state metadata patching enabled=%s", cfg["enable_v2_device_state_patch"])
+    core.log.info("fleet.v3 device state metadata patching enabled=%s", cfg["enable_v2_device_state_patch"])
     state = core.LocalState(data_dir / "state.json", max_event_ids=cfg["max_dedupe_events"])
 
     elab_client = core.ElabFTWClient(base_url=base_url, api_key=api_key, verify_tls=verify_tls)
@@ -71,6 +72,9 @@ def serve() -> None:
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     fleet_gateway_pb2_grpc.add_FleetManagerServicer_to_server(v1_servicer, server)
+    # Primary endpoint (v3).
+    fleet_gateway_v3_pb2_grpc.add_FleetManagerServicer_to_server(v2_servicer, server)
+    # Backward-compatible endpoint (v2) served by the same implementation.
     fleet_gateway_v2_pb2_grpc.add_FleetManagerServicer_to_server(v2_servicer, server)
 
     core.start_http_sidecar(cfg)

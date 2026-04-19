@@ -378,6 +378,28 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
             return value
         return "UNKNOWN"
 
+    def _status_ack_from_v1(self, ack: fleet_gateway_pb2.Ack) -> fleet_gateway_v2_pb2.StatusAck:
+        return fleet_gateway_v2_pb2.StatusAck(
+            ok=bool(ack.ok),
+            reason=normalize_string(ack.message),
+        )
+
+    def _upload_status_text(self, status_value: int) -> str:
+        mapping = {
+            int(fleet_gateway_v2_pb2.UPLOAD_ACK): "ACK",
+            int(fleet_gateway_v2_pb2.UPLOAD_ERROR): "ERROR",
+            int(fleet_gateway_v2_pb2.UPLOAD_PENDING): "PENDING",
+            int(fleet_gateway_v2_pb2.UPLOAD_SKIPPED): "SKIPPED",
+        }
+        return mapping.get(int(status_value), "UNSPECIFIED")
+
+    def _upload_payload_kind_text(self, kind_value: int) -> str:
+        mapping = {
+            int(fleet_gateway_v2_pb2.METRICS_LOGS): "metrics_logs",
+            int(fleet_gateway_v2_pb2.ARTIFACT): "artifact",
+        }
+        return mapping.get(int(kind_value), "unspecified")
+
     def _command_type(self, cmd: dict[str, Any]) -> int:
         raw = normalize_string(cmd.get("type") or cmd.get("command_type") or "SHELL").upper()
         mapping = {
@@ -747,6 +769,191 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
         except Exception as exc:
             log.exception("GetPolicy(v2) failed for agent_id=%s", agent_id)
             context.abort(grpc.StatusCode.INTERNAL, f"GetPolicy(v2) failed: {exc}")
+
+    def ReportCommandStatus(self, request, context):
+        agent_id = normalize_device_id(request.agent_id)
+        run_id = normalize_string(request.run_id)
+        experiment_id = normalize_string(request.experiment_id)
+        policy_id = normalize_string(request.policy_id)
+        command_id = normalize_string(request.command_id)
+        if not agent_id or not run_id or not experiment_id or not policy_id:
+            return fleet_gateway_v2_pb2.StatusAck(
+                ok=False,
+                reason="agent_id, run_id, experiment_id and policy_id are required",
+            )
+
+        stage_value = int(request.stage)
+        stage_text = {
+            int(fleet_gateway_v2_pb2.COMMAND_STATUS_STAGE_STARTED): "COMMAND_STARTED",
+            int(fleet_gateway_v2_pb2.COMMAND_STATUS_STAGE_FINISHED): "COMMAND_FINISHED",
+            int(fleet_gateway_v2_pb2.COMMAND_STATUS_STAGE_FAILED): "COMMAND_FAILED",
+        }.get(stage_value, "")
+        if not stage_text:
+            return fleet_gateway_v2_pb2.StatusAck(ok=False, reason="stage is required")
+
+        event_type = stage_text
+        exit_code = int(request.exit_code)
+        if stage_text == "COMMAND_STARTED":
+            exit_code = 0
+        elif stage_text == "COMMAND_FAILED" and exit_code == 0:
+            exit_code = 1
+
+        metrics = {
+            normalize_string(k): normalize_string(v)
+            for k, v in dict(request.metrics).items()
+            if normalize_string(k)
+        }
+        metrics.setdefault("run_id", run_id)
+        cmd_type = normalize_string(request.command_type)
+        measure_type = normalize_string(request.measure_type)
+        if cmd_type:
+            metrics.setdefault("command_type", cmd_type)
+        if measure_type:
+            metrics.setdefault("measure_type", measure_type)
+        metrics.setdefault("status_stage", stage_text)
+        message = normalize_string(request.message) or f"{command_id or 'command'} {stage_text}"
+        event_id = normalize_string(request.event_id) or f"{run_id}:{command_id or 'command'}:{stage_text.lower()}"
+        event = fleet_gateway_pb2.Event(
+            event_id=event_id,
+            experiment_id=experiment_id,
+            policy_revision=policy_id,
+            device_id=agent_id,
+            unix_time_ms=int(time.time() * 1000),
+            type=event_type,
+            command_id=command_id,
+            exit_code=exit_code,
+            stdout_tail=message,
+            stderr_tail="",
+            metrics=metrics,
+            artifacts={},
+        )
+
+        try:
+            ack = self._core._ingest_v1_event(event)
+            return self._status_ack_from_v1(ack)
+        except Exception as exc:
+            log.exception("ReportCommandStatus(v2) failed for agent_id=%s run_id=%s", agent_id, run_id)
+            context.abort(grpc.StatusCode.INTERNAL, f"ReportCommandStatus(v2) failed: {exc}")
+
+    def ReportUploadStatus(self, request, context):
+        agent_id = normalize_device_id(request.agent_id)
+        run_id = normalize_string(request.run_id)
+        experiment_id = normalize_string(request.experiment_id)
+        policy_id = normalize_string(request.policy_id)
+        if not agent_id or not run_id or not experiment_id or not policy_id:
+            return fleet_gateway_v2_pb2.StatusAck(
+                ok=False,
+                reason="agent_id, run_id, experiment_id and policy_id are required",
+            )
+
+        payload_kind = self._upload_payload_kind_text(int(request.payload_kind))
+        status_text = self._upload_status_text(int(request.status))
+        command_id = f"upload:{payload_kind}"
+        if status_text == "ACK":
+            event_type = "COMMAND_FINISHED"
+            exit_code = 0
+        elif status_text == "SKIPPED":
+            event_type = "COMMAND_FINISHED"
+            exit_code = 0
+        elif status_text == "ERROR":
+            event_type = "COMMAND_FAILED"
+            exit_code = 1
+        else:
+            event_type = "COMMAND_STARTED"
+            exit_code = 0
+
+        metrics = {
+            normalize_string(k): normalize_string(v)
+            for k, v in dict(request.metrics).items()
+            if normalize_string(k)
+        }
+        metrics.setdefault("run_id", run_id)
+        metrics.setdefault("upload_payload_kind", payload_kind)
+        metrics.setdefault("upload_status", status_text)
+
+        message = normalize_string(request.message) or f"{payload_kind} upload {status_text}"
+        event_id = normalize_string(request.event_id) or f"{run_id}:{command_id}:{status_text.lower()}"
+        event = fleet_gateway_pb2.Event(
+            event_id=event_id,
+            experiment_id=experiment_id,
+            policy_revision=policy_id,
+            device_id=agent_id,
+            unix_time_ms=int(time.time() * 1000),
+            type=event_type,
+            command_id=command_id,
+            exit_code=exit_code,
+            stdout_tail=message,
+            stderr_tail="",
+            metrics=metrics,
+            artifacts={},
+        )
+
+        try:
+            ack = self._core._ingest_v1_event(event)
+            return self._status_ack_from_v1(ack)
+        except Exception as exc:
+            log.exception("ReportUploadStatus(v2) failed for agent_id=%s run_id=%s", agent_id, run_id)
+            context.abort(grpc.StatusCode.INTERNAL, f"ReportUploadStatus(v2) failed: {exc}")
+
+    def ReportArtifactUploadStatus(self, request, context):
+        agent_id = normalize_device_id(request.agent_id)
+        run_id = normalize_string(request.run_id)
+        experiment_id = normalize_string(request.experiment_id)
+        policy_id = normalize_string(request.policy_id)
+        if not agent_id or not run_id or not experiment_id or not policy_id:
+            return fleet_gateway_v2_pb2.StatusAck(
+                ok=False,
+                reason="agent_id, run_id, experiment_id and policy_id are required",
+            )
+
+        artifact_name = normalize_string(request.artifact_name) or "artifact"
+        status_text = self._upload_status_text(int(request.status))
+        event_type = "ARTIFACT_UPLOADED" if status_text in {"ACK", "SKIPPED"} else "ERROR"
+        exit_code = 0 if status_text in {"ACK", "SKIPPED"} else 1
+
+        metrics = {
+            normalize_string(k): normalize_string(v)
+            for k, v in dict(request.metrics).items()
+            if normalize_string(k)
+        }
+        metrics.setdefault("run_id", run_id)
+        metrics.setdefault("upload_payload_kind", "artifact")
+        metrics.setdefault("upload_status", status_text)
+        metrics.setdefault("artifact_name", artifact_name)
+        if int(request.artifact_size_bytes or 0) > 0:
+            metrics.setdefault("artifact_size_bytes", str(int(request.artifact_size_bytes)))
+        artifact_sha = normalize_string(request.artifact_sha256)
+        if artifact_sha:
+            metrics.setdefault("artifact_sha256", artifact_sha)
+
+        artifacts = {}
+        artifact_uri = normalize_string(request.artifact_uri)
+        if artifact_uri:
+            artifacts["uri"] = artifact_uri
+
+        message = normalize_string(request.message) or f"artifact {artifact_name} upload {status_text}"
+        event_id = normalize_string(request.event_id) or f"{run_id}:artifact:{artifact_name}:{status_text.lower()}"
+        event = fleet_gateway_pb2.Event(
+            event_id=event_id,
+            experiment_id=experiment_id,
+            policy_revision=policy_id,
+            device_id=agent_id,
+            unix_time_ms=int(time.time() * 1000),
+            type=event_type,
+            command_id=artifact_name,
+            exit_code=exit_code,
+            stdout_tail=message,
+            stderr_tail="",
+            metrics=metrics,
+            artifacts=artifacts,
+        )
+
+        try:
+            ack = self._core._ingest_v1_event(event)
+            return self._status_ack_from_v1(ack)
+        except Exception as exc:
+            log.exception("ReportArtifactUploadStatus(v2) failed for agent_id=%s run_id=%s", agent_id, run_id)
+            context.abort(grpc.StatusCode.INTERNAL, f"ReportArtifactUploadStatus(v2) failed: {exc}")
 
     def AckPrepared(self, request, context):
         agent_id = normalize_device_id(request.agent_id)

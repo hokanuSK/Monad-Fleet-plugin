@@ -27,8 +27,8 @@ from typing import Any
 import grpc
 from google.protobuf.timestamp_pb2 import Timestamp
 
-import fleet_gateway_v2_pb2
-import fleet_gateway_v2_pb2_grpc
+import fleet_gateway_v3_pb2 as fleet_gateway_v2_pb2
+import fleet_gateway_v3_pb2_grpc as fleet_gateway_v2_pb2_grpc
 
 
 logging.basicConfig(

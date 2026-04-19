@@ -71,7 +71,9 @@ services:
       - elabftw-net
 
   monad-fleet-service:
-    build: ./src/fleet-service
+    build:
+      context: ..
+      dockerfile: src/fleet-service/Dockerfile
     container_name: monad-fleet-service
     restart: always
     depends_on:
@@ -93,7 +95,7 @@ services:
       - "METRICS_EXCLUDE_PREFIXES=csi_"
       - "INGEST_API_TOKEN="
       # TU DOSAĎ SVOJ REST API KEY (celý reťazec z My Profile → API Keys → REST API key)
-      - ELAB_API_KEY=apiKey4Test
+      - ELAB_API_KEY=${ELAB_API_KEY:-apiKey4Test}
     volumes:
       - ./artifacts/data/fleet:/data
     networks:
@@ -116,7 +118,7 @@ services:
     tty: false
     environment:
       - "ELAB_BASE_URL=https://web/api/v2"
-      - "ELAB_API_KEY=apiKey4Test"
+      - "ELAB_API_KEY=${ELAB_API_KEY:-apiKey4Test}"
       - "ELAB_VERIFY_TLS=false"
       - "FLEET_EXPERIMENT_TAG=fleet"
       - "RESOURCE_TAG_PREFIX=device:"
@@ -129,7 +131,9 @@ services:
       - elabftw-net
 
   model-device:
-    build: ./src/device-sim
+    build:
+      context: ..
+      dockerfile: src/device-sim/Dockerfile
     container_name: model-device
     restart: always
     depends_on:

@@ -37,14 +37,19 @@ run_scp() {
 }
 
 AGENT_SRC="${ROOT_DIR}/src/device-sim/agent_v2_client.py"
-PROTO_SRC="${ROOT_DIR}/shared/proto/fleet_gateway_v2.proto"
+PROTO_V2_SRC="${ROOT_DIR}/shared/proto/fleet_gateway_v2.proto"
+PROTO_V3_SRC="${ROOT_DIR}/shared/proto/fleet_gateway_v3.proto"
 
 if [[ ! -f "${AGENT_SRC}" ]]; then
   echo "Missing file: ${AGENT_SRC}" >&2
   exit 1
 fi
-if [[ ! -f "${PROTO_SRC}" ]]; then
-  echo "Missing file: ${PROTO_SRC}" >&2
+if [[ ! -f "${PROTO_V2_SRC}" ]]; then
+  echo "Missing file: ${PROTO_V2_SRC}" >&2
+  exit 1
+fi
+if [[ ! -f "${PROTO_V3_SRC}" ]]; then
+  echo "Missing file: ${PROTO_V3_SRC}" >&2
   exit 1
 fi
 
@@ -53,7 +58,8 @@ run_ssh "${PI_USER}@${PI_HOST}" "mkdir -p '${PI_DIR}'"
 
 echo "[2/4] Copying agent and proto"
 run_scp "${AGENT_SRC}" "${PI_USER}@${PI_HOST}:${PI_DIR}/agent_v2_client.py"
-run_scp "${PROTO_SRC}" "${PI_USER}@${PI_HOST}:${PI_DIR}/fleet_gateway_v2.proto"
+run_scp "${PROTO_V2_SRC}" "${PI_USER}@${PI_HOST}:${PI_DIR}/fleet_gateway_v2.proto"
+run_scp "${PROTO_V3_SRC}" "${PI_USER}@${PI_HOST}:${PI_DIR}/fleet_gateway_v3.proto"
 
 echo "[3/4] Creating venv and installing dependencies"
 run_ssh "${PI_USER}@${PI_HOST}" "bash -lc '
@@ -69,8 +75,13 @@ set -euo pipefail
   -I\"${PI_DIR}\" \\
   --python_out=\"${PI_DIR}\" \\
   --grpc_python_out=\"${PI_DIR}\" \\
-  \"${PI_DIR}/fleet_gateway_v2.proto\"
-ls -1 \"${PI_DIR}/fleet_gateway_v2_pb2.py\" \"${PI_DIR}/fleet_gateway_v2_pb2_grpc.py\"
+  \"${PI_DIR}/fleet_gateway_v2.proto\" \\
+  \"${PI_DIR}/fleet_gateway_v3.proto\"
+ls -1 \\
+  \"${PI_DIR}/fleet_gateway_v2_pb2.py\" \\
+  \"${PI_DIR}/fleet_gateway_v2_pb2_grpc.py\" \\
+  \"${PI_DIR}/fleet_gateway_v3_pb2.py\" \\
+  \"${PI_DIR}/fleet_gateway_v3_pb2_grpc.py\"
 '"
 
 echo "Pi agent deployment completed."

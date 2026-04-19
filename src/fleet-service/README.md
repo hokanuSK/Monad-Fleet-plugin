@@ -1,33 +1,61 @@
 # Monad Fleet Service
 
-Python gRPC service that integrates devices with eLabFTW for Wi-Fi sensing automation.
+Python gRPC service that integrates devices with eLabFTW for Wi-Fi/BLE/CSI fleet automation.
 
-## Implemented MVP
-- gRPC API:
+## Implemented API surface
+- `fleet.v1.FleetManager` (legacy-compatible)
   - `Hello(AgentInfo) -> ServerConfig`
   - `GetPolicy(PolicyRequest) -> PolicyResponse`
   - `PublishEvent(Event) -> Ack`
-- Versioned API:
-  - `fleet.v1.FleetManager` (legacy-compatible)
-  - `fleet.v2.FleetManager` (standardized PREPARE/REPORT draft)
-- HTTP sidecar:
-  - `GET /metrics` (Prometheus scrape endpoint, default port `9108`)
-  - `POST /ingest/v1/metrics` (lightweight JSON ingest for constrained senders)
-  - `POST /ingest/v1/artifacts` (JSON+base64 artifact ingest; uploads to eLabFTW experiment attachments)
-- Device resource discovery/creation in eLabFTW Items/Resources.
-- Device `last_seen_at` and capabilities updates on `Hello`.
-- Device runtime state updates in item metadata (`fleet_v2_runtime`) across `GetPolicy`, `AckPrepared`, and `PublishReport`.
-- Policy fetch from fleet-tagged experiments (`fleet` by default), using experiment metadata from JSON editor/custom fields.
-  - Default metadata keys checked in order: `fleet.policy`, `policy`, `fleet_policy`, `policy_json`.
-- Canonical policy hashing (`policy_revision = sha256:<hash>`).
-- Event ingestion with idempotency (`event_id`) and scheduler event metadata updates.
-- Local file state only (`/data/state.json`) for dedupe/run mapping. No separate DB service.
-- Metadata write compatibility for some eLabFTW builds:
-  - Item/event metadata writes are sent as JSON string.
-  - Other metadata object writes retry once with metadata serialized as JSON string.
-- `fleet.v2` safety defaults:
-  - `PublishEvents` is disabled by default for RF-sharing deployments.
-  - `DUAL_NIC` prepare ack requires `route_verified=true` and ethernet control-plane interface.
+- `fleet.v3.FleetManager` (primary; PREPARE/EXECUTION/MAINTENANCE split)
+  - `GetPolicy(GetPolicyRequest) -> GetPolicyResponse`
+  - `AckPrepared(AckPreparedRequest) -> AckPreparedResponse`
+  - `ReportCommandStatus(ReportCommandStatusRequest) -> StatusAck`
+  - `ReportUploadStatus(ReportUploadStatusRequest) -> StatusAck`
+  - `ReportArtifactUploadStatus(ReportArtifactUploadStatusRequest) -> StatusAck`
+  - `PublishReport(PublishReportRequest) -> PublishReportResponse`
+  - Server also exposes `fleet.v2.FleetManager` as a backward-compatible endpoint.
+
+## `fleet.v3` runtime behavior
+- PREPARE:
+  - device resource discovery/creation in eLabFTW Items/Resources
+  - periodic presence updates (`last_seen_at`, capabilities, `fleet_v2_runtime` metadata)
+  - policy selection from fleet-tagged experiments (`fleet` by default)
+  - canonical policy hashing (`policy_revision = sha256:<hash>`)
+- EXECUTION:
+  - `ReportCommandStatus` records command start/finish/failure in near-real-time
+  - status calls are normalized into legacy event ingestion path (`_ingest_v1_event`) to keep one metadata/update pipeline
+- MAINTENANCE:
+  - `ReportUploadStatus` reports metrics/logs upload state (`ACK`, `ERROR`, `PENDING`, `SKIPPED`)
+  - `ReportArtifactUploadStatus` reports per-artifact upload state and optional URI/hash/size metadata
+  - `PublishReport` remains the authoritative run close-out + dedupe decision (`ACCEPTED`/`DUPLICATE`/`REJECTED`)
+
+## Status mapping (v3 status RPC -> ingested event)
+- `ReportCommandStatus`:
+  - `COMMAND_STATUS_STAGE_STARTED` -> `COMMAND_STARTED`
+  - `COMMAND_STATUS_STAGE_FINISHED` -> `COMMAND_FINISHED`
+  - `COMMAND_STATUS_STAGE_FAILED` -> `COMMAND_FAILED`
+- `ReportUploadStatus`:
+  - `UPLOAD_ACK` / `UPLOAD_SKIPPED` -> `COMMAND_FINISHED` (`command_id=upload:<kind>`, `exit_code=0`)
+  - `UPLOAD_ERROR` -> `COMMAND_FAILED` (`exit_code=1`)
+  - `UPLOAD_PENDING` / unspecified -> `COMMAND_STARTED`
+- `ReportArtifactUploadStatus`:
+  - `UPLOAD_ACK` / `UPLOAD_SKIPPED` -> `ARTIFACT_UPLOADED`
+  - `UPLOAD_ERROR` / `UPLOAD_PENDING` / unspecified -> `ERROR`
+
+## Event, state, and idempotency notes
+- Event idempotency remains keyed by `event_id`.
+- Runtime summary/status updates now treat `COMMAND_FAILED` as failure:
+  - run status mapping: `COMMAND_FAILED` -> `PARTIAL`
+  - run summary counter: `commands_failed` increments on `COMMAND_FAILED`
+- `GetPolicyResponse.NOT_MODIFIED` contract:
+  - server may return only `policy_id` (without policy body)
+  - clients are expected to reuse locally cached policy body for the same `policy_id`
+
+## HTTP sidecar
+- `GET /metrics` (Prometheus scrape endpoint, default `9108`)
+- `POST /ingest/v1/metrics` (lightweight JSON ingest for constrained senders)
+- `POST /ingest/v1/artifacts` (JSON+base64 artifact ingest; uploads to eLabFTW experiment attachments)
 
 ## Environment variables
 - `ELAB_BASE_URL` (default: `https://web/api/v2`)
@@ -42,15 +70,16 @@ Python gRPC service that integrates devices with eLabFTW for Wi-Fi sensing autom
 - `REQUIRED_MIN_AGENT_VERSION` (empty by default)
 - `ALLOW_LIVE_EVENTS` (`false`)
 - `ENABLE_V2_DEVICE_STATE_PATCH` (`true`; set `false` to disable v2 item metadata runtime-state patching)
-- `RESOURCE_STATUS_ID_MAP_JSON` (optional JSON object for runtime-state -> eLab status id resolution by status title, e.g. `{\"waiting\":7,\"operational\":2,\"open\":8,\"processed\":6,\"maintenance mode\":1}`)
+- `RESOURCE_STATUS_ID_MAP_JSON` (optional JSON object for runtime-state -> eLab status id resolution by status title, e.g. `{"waiting":7,"operational":2,"open":8,"processed":6,"maintenance mode":1}`)
 - `METRICS_BIND` (`0.0.0.0`)
 - `METRICS_PORT` (`9108`)
 - `INGEST_API_TOKEN` (empty by default; set to require `x-ingest-token` on HTTP ingest)
 - `ARTIFACT_MAX_BYTES` (max accepted artifact bytes for `/ingest/v1/artifacts`, default `20971520`)
 
 ## Build/run
-The protobuf code is generated during Docker build:
+Protobuf code is generated during Docker build from repo-root context (`shared/proto` is copied directly):
+
 ```bash
-docker compose build monad-fleet-service
-docker compose up monad-fleet-service
+docker compose -f infrastructure/docker-compose.yml build monad-fleet-service model-device
+docker compose -f infrastructure/docker-compose.yml up -d monad-fleet-service model-device
 ```
