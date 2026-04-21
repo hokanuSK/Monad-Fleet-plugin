@@ -37,11 +37,16 @@ run_scp() {
 }
 
 AGENT_SRC="${ROOT_DIR}/src/device-sim/agent_v2_client.py"
+AGENT_PKG_SRC="${ROOT_DIR}/src/device-sim/agent_v2"
 PROTO_V2_SRC="${ROOT_DIR}/shared/proto/fleet_gateway_v2.proto"
 PROTO_V3_SRC="${ROOT_DIR}/shared/proto/fleet_gateway_v3.proto"
 
 if [[ ! -f "${AGENT_SRC}" ]]; then
   echo "Missing file: ${AGENT_SRC}" >&2
+  exit 1
+fi
+if [[ ! -d "${AGENT_PKG_SRC}" ]]; then
+  echo "Missing directory: ${AGENT_PKG_SRC}" >&2
   exit 1
 fi
 if [[ ! -f "${PROTO_V2_SRC}" ]]; then
@@ -58,6 +63,7 @@ run_ssh "${PI_USER}@${PI_HOST}" "mkdir -p '${PI_DIR}'"
 
 echo "[2/4] Copying agent and proto"
 run_scp "${AGENT_SRC}" "${PI_USER}@${PI_HOST}:${PI_DIR}/agent_v2_client.py"
+run_scp -r "${AGENT_PKG_SRC}" "${PI_USER}@${PI_HOST}:${PI_DIR}/"
 run_scp "${PROTO_V2_SRC}" "${PI_USER}@${PI_HOST}:${PI_DIR}/fleet_gateway_v2.proto"
 run_scp "${PROTO_V3_SRC}" "${PI_USER}@${PI_HOST}:${PI_DIR}/fleet_gateway_v3.proto"
 

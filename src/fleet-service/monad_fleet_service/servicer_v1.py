@@ -384,6 +384,9 @@ class FleetManagerServicer(fleet_gateway_pb2_grpc.FleetManagerServicer):
         item_id = int(item["id"])
         now = utc_now()
         end = now + timedelta(minutes=int(self._cfg["event_duration_minutes"]))
+        # eLab scheduler rejects fractional seconds for event start/end.
+        start_ts = now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        end_ts = end.replace(microsecond=0).isoformat().replace("+00:00", "Z")
         metadata = {
             "status": "RUNNING" if status != "PLANNED" else "PLANNED",
             "experiment_id": event.experiment_id,
@@ -405,8 +408,8 @@ class FleetManagerServicer(fleet_gateway_pb2_grpc.FleetManagerServicer):
 
         payload = {
             "title": f"Fleet run {event.experiment_id} ({event.device_id})",
-            "start": now.isoformat().replace("+00:00", "Z"),
-            "end": end.isoformat().replace("+00:00", "Z"),
+            "start": start_ts,
+            "end": end_ts,
             "metadata": metadata,
         }
 
@@ -468,7 +471,12 @@ class FleetManagerServicer(fleet_gateway_pb2_grpc.FleetManagerServicer):
         if merged_status in TERMINAL_STATUSES:
             metadata["completed_at"] = utc_now_iso()
 
-        self._elab_client.patch_event_metadata(event_id, metadata)
+        # Some eLabFTW builds expose /event/{id} PATCH only for limited "target"
+        # field mutations and reject metadata updates. Keep ingestion non-fatal.
+        try:
+            self._elab_client.patch_event_metadata(event_id, metadata)
+        except Exception as exc:
+            log.warning("Skipping run-event metadata patch event_id=%s: %s", event_id, exc)
         return merged_status
 
     def Hello(self, request, context):
@@ -562,4 +570,3 @@ class FleetManagerServicer(fleet_gateway_pb2_grpc.FleetManagerServicer):
         except Exception as exc:
             log.exception("PublishEvent failed for device_id=%s", device_id)
             return fleet_gateway_pb2.Ack(ok=False, message=f"PublishEvent failed: {exc}")
-
