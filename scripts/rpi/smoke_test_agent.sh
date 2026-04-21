@@ -308,7 +308,8 @@ SYSTEMD_AGENT_WAS_ACTIVE="false"
 
 cleanup_remote_agent_processes() {
   local reason="${1:-before-manual-run}"
-  if ! run_ssh "${PI_USER}@${PI_HOST}" "bash -lc '
+  local cleanup_output=""
+  if cleanup_output="$(run_ssh "${PI_USER}@${PI_HOST}" "bash -lc '
 set -euo pipefail
 pids=\$(
   {
@@ -334,9 +335,20 @@ if [[ -n \"\${pids}\" ]]; then
   echo \"Force-killing stale agent process(es) (${reason}) on ${PI_HOST}: \${pids}\"
   kill -9 \${pids} 2>/dev/null || true
 fi
-'"; then
-    echo "WARNING: stale-agent cleanup failed on ${PI_HOST} (${reason}); continuing."
+'" 2>&1)"; then
+    if [[ -n "${cleanup_output}" ]]; then
+      printf '%s\n' "${cleanup_output}"
+    fi
+    return 0
   fi
+
+  cleanup_output="${cleanup_output//$'\r'/}"
+  if [[ -z "${cleanup_output//$'\n'/}" ]]; then
+    return 0
+  fi
+
+  echo "WARNING: stale-agent cleanup failed on ${PI_HOST} (${reason}); continuing." >&2
+  printf '%s\n' "${cleanup_output}" >&2
 }
 
 prepare_systemd_agent_for_manual_run() {
