@@ -1,5 +1,5 @@
 %% NOTE: Keep this diagram updated with any protocol or flow changes!
-%% Last updated: 2026-03-28
+%% Last updated: 2026-04-22
 sequenceDiagram
     title: Fleet v2 Lifecycle with Execution + Maintenance Windows
     autonumber
@@ -47,65 +47,47 @@ sequenceDiagram
         Note over Agent,Mimir: High-level view of Process B
         Agent->>Agent: Parse policy_json.command_groups
         loop each command from policy JSON
-            alt command = hello
-                rect rgb(220,252,231)
-                    CmdExec->>RunStore: Append HELLO ping event
-                    Agent->>Fleet: ReportCommandStatus(COMMAND_STARTED/FINISHED, command_type=hello)
-                    Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>hello command state
-                end
-            else command = upload
+            alt command = SYNC
                 rect rgb(255,228,230)
-                    CmdExec->>RunStore: Stage maintenance window + upload params
-                    CmdExec->>Mimir: Probe Mimir connectivity (health/ping)
-                    alt Mimir reachable
-                        Mimir-->>CmdExec: reachable
-                        Agent->>Fleet: ReportCommandStatus(COMMAND_STARTED/FINISHED, command_type=upload, mimir=UP)
-                    else Mimir unreachable
-                        Mimir-->>CmdExec: timeout/err
-                        Agent->>Fleet: ReportCommandStatus(COMMAND_STARTED/FINISHED, command_type=upload, mimir=DOWN)
-                    end
-                    Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>upload window, flags, mimir status
+                    CmdExec->>RunStore: Stage maintenance window + slot/jitter policy
+                    Agent->>Fleet: ReportCommandStatus(COMMAND_STARTED/FINISHED, command_type=SYNC)
+                    Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>SYNC window/slot policy
                 end
-            else command = Metrics
+            else command = OBSERVE
                 rect rgb(254,249,195)
-                    CmdExec->>CmdExec: Run Metrics command
-                    loop async Metrics sampling
-                        CmdExec-)LocalTSDB: Collect/store metrics snapshots
-                    end
-                    CmdExec->>RunStore: Append Metrics outputs
-                    Agent->>Fleet: ReportCommandStatus(<br/>COMMAND_STARTED/FINISHED/FAILED,<br/>command_type=Metrics)
+                    CmdExec->>CmdExec: Apply observability sinks + remote_write settings
+                    CmdExec->>Mimir: Probe Mimir metrics path
+                    Agent->>Fleet: ReportCommandStatus(<br/>COMMAND_STARTED/FINISHED/FAILED,<br/>command_type=OBSERVE)
                     Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>command state + last exit
                 end
-            else command = Log
+            else command = WIFI_SCAN
+                rect rgb(220,252,231)
+                    CmdExec->>CmdExec: Run WIFI_SCAN with RF setup env
+                    CmdExec->>RunStore: Persist WiFi outputs + RF context metrics
+                    CmdExec-)Mimir: Emit numeric observability metrics
+                    Agent->>Fleet: ReportCommandStatus(<br/>COMMAND_STARTED/FINISHED/FAILED,<br/>command_type=WIFI_SCAN, measure_type=WIFI)
+                    Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>WIFI command state + RF context
+                end
+            else command = BLE_SCAN
                 rect rgb(237,233,254)
-                    CmdExec->>CmdExec: Run Log command
-                    loop async Log sampling
-                        CmdExec-)RunStore: Collect log snapshots
-                    end
-                    CmdExec->>RunStore: Append Log outputs
-                    Agent->>Fleet: ReportCommandStatus(<br/>COMMAND_STARTED/FINISHED/FAILED,<br/>command_type=Log)
-                    Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>command state + last exit
+                    CmdExec->>CmdExec: Run BLE_SCAN with RF setup env
+                    CmdExec->>RunStore: Persist BLE outputs + RF context metrics
+                    CmdExec-)Mimir: Emit numeric observability metrics
+                    Agent->>Fleet: ReportCommandStatus(<br/>COMMAND_STARTED/FINISHED/FAILED,<br/>command_type=BLE_SCAN, measure_type=BLE)
+                    Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>BLE command state + RF context
                 end
-            else command = measure (WIFI/BLE/CSI)
+            else command = CAPTURE_CSI
                 rect rgb(255,237,213)
-                    alt measure.type = WIFI
-                        CmdExec->>CmdExec: Set WIFI measurements
-                    else measure.type = BLE
-                        CmdExec->>CmdExec: Set BLE measurements
-                    else measure.type = CSI
-                        CmdExec->>CmdExec: Set CSI measurements
-                    end
-                    loop async Measurements sampling
-                        CmdExec-)RunStore: Collect measurement snapshot
-                        CmdExec-)RunStore: Save iteration measurement data in artifacts for MAINTENANCE upload
-                    end
-                    Agent->>Fleet: ReportCommandStatus(<br/>COMMAND_STARTED/FINISHED/FAILED,<br/>command_type=measure, measure_type)
-                    Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>measure type + command state
+                    CmdExec->>CmdExec: Run CAPTURE_CSI with RF setup env
+                    CmdExec->>RunStore: Save CSI outputs/evidence + RF context metrics
+                    CmdExec-)Mimir: Emit numeric observability metrics
+                    Agent->>Fleet: ReportCommandStatus(<br/>COMMAND_STARTED/FINISHED/FAILED,<br/>command_type=CAPTURE_CSI, measure_type=CSI)
+                    Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>CSI command state + evidence
                 end
-            else command = ExecuteShell
+            else command = SHELL
                 rect rgb(226,232,240)
                     CmdExec->>RunStore: Record stdout/stderr/exit_code
-                    Agent->>Fleet: ReportCommandStatus(<br/>COMMAND_STARTED/FINISHED/FAILED,<br/>command_type=ExecuteShell)
+                    Agent->>Fleet: ReportCommandStatus(<br/>COMMAND_STARTED/FINISHED/FAILED,<br/>command_type=SHELL)
                     Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>command state + last exit
                 end
             end

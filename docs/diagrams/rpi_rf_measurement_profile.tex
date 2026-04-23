@@ -1,0 +1,232 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{titlesec}
+
+\title{Raspberry Pi RF Measurement Experiment Profile\\
+Wi-Fi / BLE Crowd Monitoring Agent Specification}
+\author{Prepared for Fleet Agent Implementation}
+\date{2026-04-22}
+
+\definecolor{codegray}{rgb}{0.95,0.95,0.95}
+
+\lstset{
+basicstyle=\ttfamily\small,
+backgroundcolor=\color{codegray},
+breaklines=true,
+frame=single
+}
+
+\begin{document}
+\maketitle
+
+\section{Objective}
+
+This document defines the Raspberry Pi profile required for the current RF measurement experiments involving Wi-Fi crowd monitoring, BLE discovery, telemetry upload, and fleet orchestration.
+
+The purpose is to give an autonomous agent enough detail to provision, configure, validate, and operate Raspberry Pi nodes in a reproducible research deployment.
+
+\section{Target Hardware Profile}
+
+\begin{longtable}{|p{5cm}|p{9cm}|}
+\hline
+Device & Raspberry Pi 4B or Raspberry Pi 5 \\
+\hline
+RAM & 4GB minimum \\
+\hline
+Storage & 64GB industrial microSD or SSD \\
+\hline
+Power & Stable 5V/3A PSU or UPS HAT \\
+\hline
+Wi-Fi Adapter & Onboard or USB adapter supporting the required scan mode \\
+\hline
+BLE & Onboard BLE 5.x or USB dongle \\
+\hline
+RTC/GPS (optional) & Recommended for timestamp precision \\
+\hline
+Antenna & External antenna recommended for consistency \\
+\hline
+\end{longtable}
+
+\section{Operating System}
+
+Use Raspberry Pi OS Lite (64-bit).
+
+\begin{lstlisting}
+sudo apt update && sudo apt upgrade -y
+sudo apt install tcpdump tshark aircrack-ng bluez python3-pip chrony git jq sqlite3
+\end{lstlisting}
+
+\section{Required Network Interfaces}
+
+\begin{longtable}{|p{4cm}|p{10cm}|}
+\hline
+wlan0 & Management / gRPC control plane / uploads / current Wi-Fi scan interface \\
+\hline
+hci0 & BLE scan interface \\
+\hline
+eth0 & Optional wired backhaul \\
+\hline
+\end{longtable}
+
+\section{RF Metrics To Capture}
+
+\subsection{Wi-Fi Logs}
+
+\begin{longtable}{|p{5cm}|p{8cm}|}
+\hline
+timestamp\_utc & millisecond precision UTC \\
+\hline
+hashed\_mac & SHA256 salted identifier \\
+\hline
+rssi\_dbm & signal strength \\
+\hline
+channel & RF channel \\
+\hline
+frequency\_mhz & center frequency \\
+\hline
+frame\_type & probe / beacon / assoc / data \\
+\hline
+ssid & if present \\
+\hline
+vendor\_oui & manufacturer prefix \\
+\hline
+retry\_flag & congestion signal \\
+\hline
+phy\_rate & modulation rate if available \\
+\hline
+antenna\_id & source antenna \\
+\hline
+\end{longtable}
+
+\subsection{BLE Logs}
+
+\begin{longtable}{|p{5cm}|p{8cm}|}
+\hline
+timestamp\_utc & event time \\
+\hline
+hashed\_mac & randomized or public address hashed \\
+\hline
+rssi\_dbm & signal level \\
+\hline
+adv\_type & advertisement type \\
+\hline
+uuid & beacon uuid if present \\
+\hline
+major\_minor & beacon fields \\
+\hline
+tx\_power & if advertised \\
+\hline
+manufacturer\_data & optional parse field \\
+\hline
+\end{longtable}
+
+\section{Environment Metrics}
+
+Capture every 60 seconds:
+
+\begin{itemize}
+\item CPU load
+\item Memory usage
+\item Disk free
+\item Device temperature
+\item Interface errors
+\item NTP offset
+\item Uptime
+\item Channel utilization
+\end{itemize}
+
+\section{Recommended Scan Policy}
+
+\begin{lstlisting}
+wifi_scan_interval = 1s
+wifi_channels = [1,6,11]
+wifi_iface = wlan0
+ble_scan = continuous
+ble_iface = hci0
+hash_mac = sha256 + daily_salt
+flush_metrics = 60s
+upload_window = scheduled maintenance window
+\end{lstlisting}
+
+\section{Fleet Agent Command Mapping}
+
+\begin{longtable}{|p{4cm}|p{10cm}|}
+\hline
+SYNC & design-time upload scheduling normalized into runtime reporting windows \\
+\hline
+OBSERVE & design-time observability settings normalized into executable commands \\
+\hline
+WIFI\_SCAN & run passive monitor mode capture \\
+\hline
+BLE\_SCAN & BLE discovery logging \\
+\hline
+SHELL & maintenance command execution \\
+\hline
+\end{longtable}
+
+CSI is expected to return later as an optional `CAPTURE_CSI` executable command when the hardware flow is ready, but it is not part of the current checked-in single-radio example.
+
+\section{Compliance Requirements}
+
+\begin{itemize}
+\item No payload capture unless explicitly approved
+\item MAC addresses hashed immediately
+\item Accurate UTC timestamps
+\item Fixed antenna orientation documented
+\item Hardware serial + software versions logged
+\item Ground-truth occupancy counts recommended
+\item Reproducible channel hopping policy
+\end{itemize}
+
+\section{Example Local Storage Schema}
+
+\begin{lstlisting}
+runs/
+  wifi/YYYY/MM/DD/*.pcap
+  ble/YYYY/MM/DD/*.jsonl
+  metrics/*.prom
+  reports/*.json
+\end{lstlisting}
+
+\section{gRPC Lifecycle Integration}
+
+Use your Fleet v2 lifecycle:
+
+\begin{itemize}
+\item GetPolicy()
+\item ReportCommandStatus()
+\item ReportUploadStatus()
+\item UploadArtifact()
+\item PublishReport()
+\end{itemize}
+
+Execution phase performs measurements.
+
+Maintenance phase uploads buffered logs/artifacts only inside approved windows.
+
+\section{Success Criteria}
+
+A compliant node must:
+
+\begin{itemize}
+\item Join fleet
+\item Receive policy
+\item Execute scans
+\item Buffer outputs locally
+\item Upload during maintenance window
+\item Emit observability metrics
+\item Recover after reboot automatically
+\end{itemize}
+
+\section{Conclusion}
+
+This profile defines a production-grade Raspberry Pi RF measurement node suitable for academic or industrial Wi-Fi/BLE crowd sensing experiments with fleet-scale orchestration.
+
+\end{document}
