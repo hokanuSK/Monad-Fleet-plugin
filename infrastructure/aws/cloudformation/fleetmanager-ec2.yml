@@ -80,9 +80,9 @@ Parameters:
 
   BuildElabImage:
     Type: String
-    Default: "false"
+    Default: "true"
     AllowedValues: ["true", "false"]
-    Description: Whether deploy script should build custom eLab image.
+    Description: Whether deploy script should build the custom eLab image from the configured fork/branch.
 
   EnableReverseProxy:
     Type: String
