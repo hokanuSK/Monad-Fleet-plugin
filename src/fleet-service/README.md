@@ -22,6 +22,7 @@ Python gRPC service that integrates devices with eLabFTW for Wi-Fi/BLE/CSI fleet
   - periodic presence updates (`last_seen_at`, capabilities, `fleet_v2_runtime` metadata)
   - policy selection from fleet-tagged experiments (`fleet` by default)
   - canonical policy hashing (`policy_revision = sha256:<hash>`)
+  - diagram-first design commands (`SYNC`, `OBSERVE`) are normalized into executable runtime policy before dispatch
 - EXECUTION:
   - `ReportCommandStatus` records command start/finish/failure in near-real-time
   - status calls are normalized into legacy event ingestion path (`_ingest_v1_event`) to keep one metadata/update pipeline

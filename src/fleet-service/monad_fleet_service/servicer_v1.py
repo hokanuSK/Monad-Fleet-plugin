@@ -1,4 +1,5 @@
 from .core import *  # noqa: F401,F403
+from .policy_design import runtime_policy_from_design
 
 class FleetManagerServicer(fleet_gateway_pb2_grpc.FleetManagerServicer):
     def __init__(self, elab_client: ElabFTWClient, local_state: LocalState, cfg: dict[str, Any]):
@@ -193,7 +194,7 @@ class FleetManagerServicer(fleet_gateway_pb2_grpc.FleetManagerServicer):
         if policy_raw is None:
             return None
 
-        canonical_payload = json.loads(json.dumps(policy_raw))
+        canonical_payload = runtime_policy_from_design(policy_raw)
         canonical_payload["experiment_id"] = f"elabftw:{experiment['id']}"
         canonical_payload.pop("policy_revision", None)
 
