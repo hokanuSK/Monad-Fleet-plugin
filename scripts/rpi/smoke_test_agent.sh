@@ -2,12 +2,15 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+DEFAULT_FLEET_MANAGER_HOST="$(bash "${ROOT_DIR}/scripts/rpi/default_fleet_manager_host.sh")"
+DEFAULT_FLEET_MANAGER_PORT="$(bash "${ROOT_DIR}/scripts/rpi/default_fleet_manager_port.sh")"
 
 PI_HOST="${PI_HOST:-${1:-monad-rpi5.local}}"
 PI_HOSTS_CSV="${PI_HOSTS_CSV:-}"
 PI_RECOVERY_HOSTS_CSV="${PI_RECOVERY_HOSTS_CSV:-${PI_HOSTS_CSV:-${PI_HOST}}}"
 PI_USER="${PI_USER:-admin}"
 PI_DIR="${PI_DIR:-/home/${PI_USER}/monad-fleet-agent}"
+DATA_ROOT="${DATA_ROOT:-${PI_DIR}/data}"
 SSH_IDENTITY_FILE="${SSH_IDENTITY_FILE:-}"
 USE_DEFAULT_SSH_KEY="${USE_DEFAULT_SSH_KEY:-false}"
 DEFAULT_SSH_KEY="${ROOT_DIR}/scripts/rpi/keys/monad_rpi5_ed25519"
@@ -143,8 +146,9 @@ wait_for_ssh() {
   done
 }
 
-FLEET_MANAGER_HOST="${FLEET_MANAGER_HOST:-192.168.0.70}"
-FLEET_MANAGER_PORT="${FLEET_MANAGER_PORT:-50060}"
+FLEET_MANAGER_HOST="${FLEET_MANAGER_HOST:-${DEFAULT_FLEET_MANAGER_HOST}}"
+FLEET_MANAGER_PORT="${FLEET_MANAGER_PORT:-${DEFAULT_FLEET_MANAGER_PORT}}"
+GRPC_DNS_RESOLVER="${GRPC_DNS_RESOLVER:-native}"
 AGENT_ID="${AGENT_ID:-}"
 CONTROL_PLANE_MODE="${CONTROL_PLANE_MODE:-RF_SHARING}"
 CONTROL_PLANE_IFACE="${CONTROL_PLANE_IFACE:-wlan0}"
@@ -302,9 +306,55 @@ fi
 
 SYSTEMD_AGENT_WAS_ACTIVE="false"
 
+cleanup_remote_agent_processes() {
+  local reason="${1:-before-manual-run}"
+  local cleanup_output=""
+  if cleanup_output="$(run_ssh "${PI_USER}@${PI_HOST}" "bash -lc '
+set -euo pipefail
+pids=\$(
+  {
+    pgrep -f \"${PI_DIR}/agent_v2_client.py\$\" || true
+    pgrep -f \"${PI_DIR}/agent_v3_client.py\$\" || true
+  } | xargs 2>/dev/null || true
+)
+if [[ -z \"\${pids}\" ]]; then
+  exit 0
+fi
+
+echo \"Cleaning stale agent process(es) (${reason}) on ${PI_HOST}: \${pids}\"
+kill \${pids} 2>/dev/null || true
+sleep 2
+
+pids=\$(
+  {
+    pgrep -f \"${PI_DIR}/agent_v2_client.py\$\" || true
+    pgrep -f \"${PI_DIR}/agent_v3_client.py\$\" || true
+  } | xargs 2>/dev/null || true
+)
+if [[ -n \"\${pids}\" ]]; then
+  echo \"Force-killing stale agent process(es) (${reason}) on ${PI_HOST}: \${pids}\"
+  kill -9 \${pids} 2>/dev/null || true
+fi
+'" 2>&1)"; then
+    if [[ -n "${cleanup_output}" ]]; then
+      printf '%s\n' "${cleanup_output}"
+    fi
+    return 0
+  fi
+
+  cleanup_output="${cleanup_output//$'\r'/}"
+  if [[ -z "${cleanup_output//$'\n'/}" ]]; then
+    return 0
+  fi
+
+  echo "WARNING: stale-agent cleanup failed on ${PI_HOST} (${reason}); continuing." >&2
+  printf '%s\n' "${cleanup_output}" >&2
+}
+
 prepare_systemd_agent_for_manual_run() {
   local state=""
   if [[ "${MANAGE_SYSTEMD_AGENT}" != "true" ]]; then
+    cleanup_remote_agent_processes "pre-run"
     return 0
   fi
   state="$(
@@ -329,6 +379,7 @@ sudo -n systemctl reset-failed \"${SYSTEMD_AGENT_SERVICE}\" || true
       SYSTEMD_AGENT_WAS_ACTIVE="false"
       ;;
   esac
+  cleanup_remote_agent_processes "pre-run"
 }
 
 restore_systemd_agent_after_manual_run() {
@@ -338,6 +389,7 @@ restore_systemd_agent_after_manual_run() {
   if [[ "${SYSTEMD_AGENT_WAS_ACTIVE}" != "true" ]]; then
     return 0
   fi
+  cleanup_remote_agent_processes "restore"
   echo "Restoring ${SYSTEMD_AGENT_SERVICE} on ${PI_HOST}..."
   run_ssh "${PI_USER}@${PI_HOST}" "bash -lc '
 set -euo pipefail
@@ -383,24 +435,61 @@ fi
 '"
 }
 
-resolve_control_plane_iface() {
+route_iface_for_target() {
+  local target_host="$1"
   run_ssh "${PI_USER}@${PI_HOST}" "bash -lc '
 set -euo pipefail
-target=\"${FLEET_MANAGER_HOST}\"
-requested=\"${CONTROL_PLANE_IFACE}\"
+target=\"${target_host}\"
 
-if [[ -n \"\${requested}\" && -d /sys/class/net/\"\${requested}\" ]]; then
-  printf \"%s\" \"\${requested}\"
+resolve_route_target() {
+  local raw=\"\${1:-}\"
+  local resolved=\"\"
+  if [[ -z \"\${raw}\" ]]; then
+    return 0
+  fi
+  if [[ \"\${raw}\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$ ]] || [[ \"\${raw}\" == *:* ]]; then
+    printf \"%s\" \"\${raw}\"
+    return 0
+  fi
+  if command -v getent >/dev/null 2>&1; then
+    resolved=\$(getent ahostsv4 \"\${raw}\" 2>/dev/null | awk \"NR==1 {print \\\$1; exit}\")
+    if [[ -z \"\${resolved}\" ]]; then
+      resolved=\$(getent hosts \"\${raw}\" 2>/dev/null | awk \"NR==1 {print \\\$1; exit}\")
+    fi
+  fi
+  if [[ -z \"\${resolved}\" ]]; then
+    resolved=\"\${raw}\"
+  fi
+  printf \"%s\" \"\${resolved}\"
+}
+
+target=\$(resolve_route_target \"\${target}\")
+if [[ -z \"\${target}\" ]]; then
   exit 0
 fi
-
 line=\$(ip route get \"\${target}\" 2>/dev/null | head -n1 || true)
-route_iface=\$(printf \"%s\\n\" \"\${line}\" | sed -n \"s/.* dev \\([^ ]*\\).*/\\1/p\")
-if [[ -n \"\${route_iface}\" && -d /sys/class/net/\"\${route_iface}\" ]]; then
-  printf \"%s\" \"\${route_iface}\"
-  exit 0
-fi
+iface=\$(printf \"%s\\n\" \"\${line}\" | sed -n \"s/.* dev \\([^ ]*\\).*/\\1/p\")
+printf \"%s\" \"\${iface}\"
+'"
+}
 
+resolve_control_plane_iface() {
+  local requested="${CONTROL_PLANE_IFACE}"
+  local route_iface=""
+
+  if [[ -n "${requested}" ]] && run_ssh "${PI_USER}@${PI_HOST}" "test -d /sys/class/net/${requested}" >/dev/null 2>&1; then
+    printf '%s' "${requested}"
+    return 0
+  fi
+
+  route_iface="$(route_iface_for_target "${FLEET_MANAGER_HOST}" || true)"
+  if [[ -n "${route_iface}" ]] && run_ssh "${PI_USER}@${PI_HOST}" "test -d /sys/class/net/${route_iface}" >/dev/null 2>&1; then
+    printf '%s' "${route_iface}"
+    return 0
+  fi
+
+  run_ssh "${PI_USER}@${PI_HOST}" "bash -lc '
+set -euo pipefail
 for cand in eth0 en0 wlan0 wlan1; do
   if [[ -d /sys/class/net/\"\${cand}\" ]]; then
     printf \"%s\" \"\${cand}\"
@@ -814,15 +903,7 @@ if [[ -z "${AGENT_ID}" ]]; then
   exit 2
 fi
 
-ROUTE_IFACE="$(
-  run_ssh "${PI_USER}@${PI_HOST}" "bash -lc '
-set -euo pipefail
-target=\"${FLEET_MANAGER_HOST}\"
-line=\$(ip route get \"\${target}\" 2>/dev/null | head -n1 || true)
-iface=\$(printf \"%s\\n\" \"\${line}\" | sed -n \"s/.* dev \\([^ ]*\\).*/\\1/p\")
-printf \"%s\" \"\${iface}\"
-'"
-)"
+ROUTE_IFACE="$(route_iface_for_target "${FLEET_MANAGER_HOST}" || true)"
 
 if [[ -n "${CONTROL_PLANE_BAND_EXPECT}" ]]; then
   CONTROL_FREQ_MHZ="$(remote_iface_freq_mhz "${CONTROL_PLANE_IFACE}" || true)"
@@ -1066,6 +1147,8 @@ nohup bash -lc \"set +e
 cd \\\"${PI_DIR}\\\"
 FLEET_MANAGER_HOST=\\\"${FLEET_MANAGER_HOST}\\\" \\
 FLEET_MANAGER_PORT=\\\"${FLEET_MANAGER_PORT}\\\" \\
+GRPC_DNS_RESOLVER=\\\"${GRPC_DNS_RESOLVER}\\\" \\
+DATA_ROOT=\\\"${DATA_ROOT}\\\" \\
 AGENT_ID=\\\"${AGENT_ID}\\\" \\
 CONTROL_PLANE_MODE=\\\"${CONTROL_PLANE_MODE}\\\" \\
 CONTROL_PLANE_IFACE=\\\"${CONTROL_PLANE_IFACE}\\\" \\
@@ -1144,7 +1227,7 @@ echo \"STARTED pid=\$(cat \"${REMOTE_PID}\") log=${REMOTE_LOG} exit=${REMOTE_EXI
 audit_latest_sent_run() {
   run_ssh "${PI_USER}@${PI_HOST}" "bash -lc '
 set -euo pipefail
-data_root=\"${PI_DIR}/data\"
+data_root=\"${DATA_ROOT}\"
 sent_root=\"\${data_root}/sent\"
 pending_root=\"\${data_root}/pending\"
 latest_sent=\$(ls -1t \"\${sent_root}\" 2>/dev/null | head -n1 || true)

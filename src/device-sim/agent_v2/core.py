@@ -366,12 +366,56 @@ def _upload_window_send_allowed(
 def route_interface_for_target(target_host: str) -> str:
     if not target_host:
         return ""
+    route_target = _resolve_route_probe_target(target_host)
+    if not route_target:
+        return ""
     try:
-        out = subprocess.check_output(["ip", "route", "get", target_host], text=True, stderr=subprocess.DEVNULL)
+        out = subprocess.check_output(["ip", "route", "get", route_target], text=True, stderr=subprocess.DEVNULL)
     except Exception:
         return ""
     match = re.search(r"\bdev\s+(\S+)", out)
     return match.group(1) if match else ""
+
+
+def _resolve_route_probe_target(target_host: str) -> str:
+    target = normalize(target_host)
+    if not target:
+        return ""
+    if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", target) or ":" in target:
+        return target
+    ipv6_candidate = ""
+    try:
+        infos = socket.getaddrinfo(target, None, type=socket.SOCK_STREAM)
+    except Exception:
+        infos = []
+    for family, _, _, _, sockaddr in infos:
+        if not sockaddr:
+            continue
+        candidate = normalize(sockaddr[0])
+        if not candidate:
+            continue
+        if family == socket.AF_INET:
+            return candidate
+        if family == socket.AF_INET6 and not ipv6_candidate:
+            ipv6_candidate = candidate
+    if ipv6_candidate:
+        return ipv6_candidate
+
+    for cmd in (["getent", "ahostsv4", target], ["getent", "hosts", target]):
+        try:
+            out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL)
+        except Exception:
+            continue
+        for raw in (out or "").splitlines():
+            line = normalize(raw)
+            if not line:
+                continue
+            candidate = normalize(line.split()[0])
+            if not candidate:
+                continue
+            if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", candidate) or ":" in candidate:
+                return candidate
+    return target
 
 
 def default_ipv4_gateway(*, iface: str = "") -> str:
