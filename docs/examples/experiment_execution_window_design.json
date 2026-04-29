@@ -1,0 +1,108 @@
+{
+  "fleet": {
+    "policy": {
+      "experiment_id": "exp-execution-window-design-demo",
+      "command_groups": [
+        {
+          "id": "execution-window-demo",
+          "failure_mode": "FAIL_FAST",
+          "commands": [
+            {
+              "id": "sync-maintenance-window",
+              "type": "SYNC",
+              "timeout_s": 5,
+              "retries": 0,
+              "target_selector": {
+                "device_ids": [
+                  "ag-pi-01"
+                ]
+              },
+              "validity_policy_window": {
+                "from": "2026-04-22T03:00:00Z",
+                "to": "2026-04-22T04:15:00Z"
+              },
+              "measure_window": {
+                "from": "2026-04-22T03:00:00Z",
+                "to": "2026-04-22T03:30:00Z"
+              },
+              "env": {
+                "SYNC_TIMEZONE": "UTC",
+                "SYNC_CRON": "30 3 * * *",
+                "SYNC_CRON_DESCRIPTION": "Every day at 3:30 AM UTC",
+                "SYNC_REQUIRE_UPLOAD_WINDOW": "true"
+              }
+            },
+            {
+              "id": "observe-maintenance-sinks",
+              "type": "OBSERVE",
+              "timeout_s": 10,
+              "retries": 0,
+              "env": {
+                "OBSERVE_METRICS_FLUSH_INTERVAL_S": "1",
+                "OBSERVE_EXPECTED_WIFI_METRICS": "rssi_dbm,channel,frequency_mhz,frame_type,retry_flag,phy_rate,channel_utilization",
+                "OBSERVE_EXPECTED_BLE_METRICS": "rssi_dbm,adv_type,uuid,major_minor,tx_power",
+                "OBSERVE_EXPECTED_DEVICE_METRICS": "cpu_load,memory_free,disk_free,temp_c,uptime_s,interface_errors,ntp_offset_ms",
+                "OBSERVE_METRICS_PROBE_URL": "http://mimir:9009/ready",
+                "OBSERVE_LOG_SOURCES": "command_stdout,command_stderr,journal,file",
+                "OBSERVE_LOG_JOURNAL_UNITS": "monad-fleet-agent.service,vmagent.service",
+                "OBSERVE_LOG_FILES": "/var/log/syslog,/var/log/messages,/tmp/runs/wifi/*.pcap,/tmp/runs/ble/*.jsonl"
+              }
+            },
+            {
+              "id": "wifi-scan-baseline",
+              "type": "WIFI_SCAN",
+              "timeout_s": 70,
+              "retries": 0,
+              "env": {
+                "WIFI_SCAN_IFACE": "wlan0",
+                "WIFI_SCAN_MODE": "passive_monitor",
+                "WIFI_SCAN_CHANNELS": "1,6,11",
+                "WIFI_SCAN_CHANNEL_DWELL_S": "1",
+                "WIFI_SCAN_CHANNEL_WIDTH_MHZ": "20",
+                "WIFI_SCAN_DURATION_S": "60",
+                "WIFI_SCAN_HASH_MAC_ADDRESSES": "true",
+                "WIFI_SCAN_HASH_ROTATION": "daily_salt",
+                "WIFI_SCAN_CAPTURE_PAYLOADS": "false",
+                "WIFI_SCAN_LOG_FIELDS": "timestamp_utc,hashed_mac,rssi_dbm,channel,frequency_mhz,frame_type,ssid,vendor_oui,retry_flag,phy_rate,antenna_id",
+                "WIFI_SCAN_OUTPUT_FORMAT": "pcap"
+              }
+            },
+            {
+              "id": "ble-scan-baseline",
+              "type": "BLE_SCAN",
+              "timeout_s": 25,
+              "retries": 0,
+              "env": {
+                "RF_PROFILE": "rpi-rf-measurement",
+                "RF_PHASE": "baseline",
+                "RF_ACTIVITY_LABEL": "empty-room",
+                "RF_ROOM_ID": "room-lab-01",
+                "RF_SCENARIO_ID": "crowd-monitoring-v1",
+                "RF_RUN_LABEL": "run-2026-04-22-a",
+                "BLE_SCAN_IFACE": "hci0",
+                "BLE_SCAN_MODE": "continuous",
+                "BLE_SCAN_DURATION_S": "60",
+                "BLE_SCAN_HASH_MAC_ADDRESSES": "true",
+                "BLE_SCAN_HASH_ROTATION": "daily_salt",
+                "BLE_SCAN_LOG_FIELDS": "timestamp_utc,hashed_mac,rssi_dbm,adv_type,uuid,major_minor,tx_power,manufacturer_data",
+                "BLE_SCAN_OUTPUT_FORMAT": "jsonl"
+              }
+            },
+            {
+              "id": "shell-device-capabilities",
+              "type": "SHELL",
+              "timeout_s": 20,
+              "retries": 0,
+              "cmdline": "sh -lc 'echo === hostname ===; hostname; echo === kernel ===; uname -a; echo === interfaces ===; ip -br link; echo === wifi ===; iw dev || true; echo === bluetooth ===; bluetoothctl list || true'",
+              "env": {
+                "SHELL_EXPECTED_INTERFACES": "wlan0,hci0",
+                "SHELL_CAPTURE_HARDWARE_SERIAL": "true",
+                "SHELL_CAPTURE_SOFTWARE_VERSIONS": "true"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

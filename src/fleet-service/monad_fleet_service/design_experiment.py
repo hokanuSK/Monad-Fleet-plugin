@@ -108,50 +108,112 @@ def _shift_window_dict(window: dict[str, Any], *, delta: timedelta, start_key: s
         window[end_key] = _to_iso(end_dt + delta)
 
 
+def _window_has_times(window: Any) -> bool:
+    if not isinstance(window, dict):
+        return False
+    return bool(
+        _normalize(window.get("from"))
+        or _normalize(window.get("to"))
+        or _normalize(window.get("start"))
+        or _normalize(window.get("end"))
+    )
+
+
+def _shift_flexible_window(window: dict[str, Any], *, delta: timedelta) -> None:
+    start_key = "from" if "from" in window or "to" in window else "start"
+    end_key = "to" if start_key == "from" else "end"
+    _shift_window_dict(window, delta=delta, start_key=start_key, end_key=end_key)
+
+
+def _iter_sync_commands(policy: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    groups = policy.get("command_groups")
+    if not isinstance(groups, list):
+        return out
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        commands = _iter_group_commands(group)
+        for command in commands:
+            cmd_type = _normalize(command.get("type") or command.get("command_type")).upper()
+            if cmd_type == "SYNC":
+                out.append(command)
+        group["commands"] = commands
+    return out
+
+
+def _sync_measure_window(command: dict[str, Any]) -> dict[str, Any] | None:
+    for key in ("measure_window", "measurement_window", "reporting"):
+        window = command.get(key)
+        if _window_has_times(window):
+            return window
+    return None
+
+
 def _retime_policy(policy: dict[str, Any], *, now: datetime) -> None:
     start_offset_minutes = _parse_int(os.environ.get("EXPERIMENT_TIME_SHIFT_START_MINUTES"), -2)
     desired_start = now + timedelta(minutes=start_offset_minutes)
 
     range_obj = policy.get("range")
     if not isinstance(range_obj, dict):
-        range_obj = {}
-        policy["range"] = range_obj
+        range_obj = None
 
     reporting = policy.get("reporting")
     if not isinstance(reporting, dict):
-        reporting = {}
-        policy["reporting"] = reporting
+        reporting = None
 
-    measure_window = reporting.get("measure_window")
-    if not isinstance(measure_window, dict):
-        measure_window = reporting.get("measurement_window") if isinstance(reporting.get("measurement_window"), dict) else {}
+    measure_window = None
+    if isinstance(reporting, dict):
+        candidate = reporting.get("measure_window")
+        if isinstance(candidate, dict):
+            measure_window = candidate
+        elif isinstance(reporting.get("measurement_window"), dict):
+            measure_window = reporting["measurement_window"]
+
+    sync_commands = _iter_sync_commands(policy)
+    sync_validity_windows = [
+        cmd["validity_policy_window"]
+        for cmd in sync_commands
+        if _window_has_times(cmd.get("validity_policy_window"))
+    ]
+    sync_measure_windows = [
+        window
+        for cmd in sync_commands
+        for window in [_sync_measure_window(cmd)]
+        if window is not None
+    ]
 
     reference_start = (
-        _parse_iso(range_obj.get("from"))
-        or _parse_iso(measure_window.get("from") or measure_window.get("start"))
+        (_parse_iso(range_obj.get("from")) if isinstance(range_obj, dict) else None)
+        or (_parse_iso(measure_window.get("from") or measure_window.get("start")) if isinstance(measure_window, dict) else None)
+        or (_parse_iso(sync_validity_windows[0].get("from") or sync_validity_windows[0].get("start")) if sync_validity_windows else None)
+        or (_parse_iso(sync_measure_windows[0].get("from") or sync_measure_windows[0].get("start")) if sync_measure_windows else None)
     )
 
     if reference_start is None:
         reference_start = desired_start
     delta = desired_start - reference_start
 
-    if range_obj:
+    if isinstance(range_obj, dict):
         _shift_window_dict(range_obj, delta=delta)
 
-    if measure_window:
-        start_key = "from" if "from" in measure_window or "to" in measure_window else "start"
-        end_key = "to" if start_key == "from" else "end"
-        _shift_window_dict(measure_window, delta=delta, start_key=start_key, end_key=end_key)
-        if reporting.get("measure_window") is measure_window:
+    if isinstance(measure_window, dict):
+        _shift_flexible_window(measure_window, delta=delta)
+        if isinstance(reporting, dict) and reporting.get("measure_window") is measure_window:
             reporting["measure_window"] = measure_window
-        elif reporting.get("measurement_window") is measure_window:
+        elif isinstance(reporting, dict) and reporting.get("measurement_window") is measure_window:
             reporting["measurement_window"] = measure_window
 
-    upload_window = reporting.get("upload_window")
-    if isinstance(upload_window, dict):
-        start_key = "from" if "from" in upload_window or "to" in upload_window else "start"
-        end_key = "to" if start_key == "from" else "end"
-        _shift_window_dict(upload_window, delta=delta, start_key=start_key, end_key=end_key)
+    if isinstance(reporting, dict):
+        upload_window = reporting.get("upload_window")
+        if isinstance(upload_window, dict):
+            _shift_flexible_window(upload_window, delta=delta)
+
+    for command in sync_commands:
+        for key in ("validity_policy_window", "measure_window", "measurement_window", "reporting", "upload_window"):
+            window = command.get(key)
+            if isinstance(window, dict):
+                _shift_flexible_window(window, delta=delta)
 
     groups = policy.get("command_groups")
     if isinstance(groups, list):
@@ -160,17 +222,30 @@ def _retime_policy(policy: dict[str, Any], *, now: datetime) -> None:
                 continue
             group_range = group.get("range")
             if isinstance(group_range, dict):
-                _shift_window_dict(group_range, delta=delta)
+                _shift_flexible_window(group_range, delta=delta)
 
-    if not _normalize(range_obj.get("from")):
+    if range_obj is None and not sync_validity_windows:
+        range_obj = {}
+        policy["range"] = range_obj
+
+    if isinstance(range_obj, dict) and not _normalize(range_obj.get("from")):
         range_obj["from"] = _to_iso(desired_start)
-    if not _normalize(range_obj.get("to")):
+    if isinstance(range_obj, dict) and not _normalize(range_obj.get("to")):
         default_end = desired_start + timedelta(minutes=75)
         range_obj["to"] = _to_iso(default_end)
 
-    if not isinstance(reporting.get("measure_window"), dict) and not isinstance(reporting.get("measurement_window"), dict):
+    if reporting is None and not sync_measure_windows:
+        reporting = {}
+        policy["reporting"] = reporting
+
+    if (
+        isinstance(reporting, dict)
+        and not isinstance(reporting.get("measure_window"), dict)
+        and not isinstance(reporting.get("measurement_window"), dict)
+    ):
+        start_iso = _normalize(range_obj.get("from")) if isinstance(range_obj, dict) else _to_iso(desired_start)
         reporting["measure_window"] = {
-            "from": range_obj["from"],
+            "from": start_iso,
             "to": _to_iso(desired_start + timedelta(minutes=30)),
         }
 
@@ -188,8 +263,19 @@ def _apply_target_overrides(policy: dict[str, Any]) -> None:
 
     selector = policy.get("target_selector")
     if not isinstance(selector, dict):
+        selector = None
+        for command in _iter_sync_commands(policy):
+            candidate = command.get("target_selector")
+            if isinstance(candidate, dict):
+                selector = candidate
+                break
+    if selector is None:
         selector = {}
-        policy["target_selector"] = selector
+        sync_commands = _iter_sync_commands(policy)
+        if sync_commands:
+            sync_commands[0]["target_selector"] = selector
+        else:
+            policy["target_selector"] = selector
     selector["device_ids"] = device_ids
 
 

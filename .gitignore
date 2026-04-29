@@ -27,6 +27,9 @@ AGENT.MD
 
 # Local editor / generated deps
 .vscode/
+node_modules/
+.playwright-cli/
+.claude/
 docs/diagrams/node_modules/
 docs/diagrams/legacy/
 docs/diagrams/scripts/
