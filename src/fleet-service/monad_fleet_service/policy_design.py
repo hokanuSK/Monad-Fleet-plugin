@@ -79,6 +79,52 @@ def _ensure_reporting(policy: dict[str, Any]) -> dict[str, Any]:
     return reporting
 
 
+def _window_has_times(window: Any) -> bool:
+    if not isinstance(window, dict):
+        return False
+    return bool(
+        _normalize(window.get("from"))
+        or _normalize(window.get("to"))
+        or _normalize(window.get("start"))
+        or _normalize(window.get("end"))
+    )
+
+
+def _copy_window(window: dict[str, Any]) -> dict[str, str]:
+    start = _normalize(window.get("from") or window.get("start"))
+    end = _normalize(window.get("to") or window.get("end"))
+    out: dict[str, str] = {}
+    if start:
+        out["from"] = start
+    if end:
+        out["to"] = end
+    return out
+
+
+def _apply_sync_windows(policy: dict[str, Any], sync_cmd: dict[str, Any]) -> None:
+    selector = sync_cmd.get("target_selector")
+    if isinstance(selector, dict):
+        policy["target_selector"] = _deep_copy_json(selector)
+
+    validity_window = sync_cmd.get("validity_policy_window")
+    if _window_has_times(validity_window):
+        policy["range"] = _copy_window(validity_window)
+
+    measure_window = sync_cmd.get("measure_window")
+    if not _window_has_times(measure_window):
+        measure_window = sync_cmd.get("measurement_window")
+    if not _window_has_times(measure_window):
+        measure_window = sync_cmd.get("reporting")
+    if _window_has_times(measure_window):
+        reporting = _ensure_reporting(policy)
+        reporting["measure_window"] = _copy_window(measure_window)
+
+    upload_window = sync_cmd.get("upload_window")
+    if _window_has_times(upload_window):
+        reporting = _ensure_reporting(policy)
+        reporting["upload_window"] = _copy_window(upload_window)
+
+
 def _reporting_measure_window(policy: dict[str, Any]) -> tuple[datetime | None, datetime | None]:
     reporting = policy.get("reporting")
     if isinstance(reporting, dict):
@@ -98,8 +144,6 @@ def _reporting_measure_window(policy: dict[str, Any]) -> tuple[datetime | None, 
 
 def _apply_sync_reporting(policy: dict[str, Any], sync_env: dict[str, str]) -> dict[str, str]:
     derived_env: dict[str, str] = {}
-    if not sync_env:
-        return derived_env
 
     reporting = _ensure_reporting(policy)
     measure_from_dt, measure_to_dt = _reporting_measure_window(policy)
@@ -183,6 +227,24 @@ def _iter_group_commands(group: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def _promote_shell_env_cmdline(cmd: dict[str, Any], cmd_env: dict[str, str]) -> dict[str, str]:
+    if _normalize(cmd.get("cmdline") or cmd.get("cmd")):
+        return cmd_env
+
+    env_cmdline_key = ""
+    for key in ("cmdline", "CMDLINE"):
+        if _normalize(cmd_env.get(key)):
+            env_cmdline_key = key
+            break
+    if not env_cmdline_key:
+        return cmd_env
+
+    cmd["cmdline"] = cmd_env[env_cmdline_key]
+    cleaned_env = dict(cmd_env)
+    cleaned_env.pop(env_cmdline_key, None)
+    return cleaned_env
+
+
 def policy_uses_design_commands(policy: dict[str, Any]) -> bool:
     if not isinstance(policy, dict):
         return False
@@ -218,6 +280,7 @@ def runtime_policy_from_design(policy: dict[str, Any]) -> dict[str, Any]:
             cmd_env = _normalize_env(cmd.get("env"))
 
             if cmd_type == "SYNC":
+                _apply_sync_windows(result, cmd)
                 inherited_env.update(cmd_env)
                 inherited_env.update(_apply_sync_reporting(result, cmd_env))
                 continue
@@ -228,6 +291,9 @@ def runtime_policy_from_design(policy: dict[str, Any]) -> dict[str, Any]:
 
             if cmd_type not in RUNTIME_COMMAND_TYPES:
                 continue
+
+            if cmd_type == "SHELL":
+                cmd_env = _promote_shell_env_cmdline(cmd, cmd_env)
 
             merged_env = dict(inherited_env)
             merged_env.update(cmd_env)

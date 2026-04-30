@@ -472,11 +472,15 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
                             mime=normalize_string(art.get("mime")),
                         )
                     )
+                command_type = self._command_type(cmd)
+                cmdline = normalize_string(cmd.get("cmdline") or cmd.get("cmd"))
+                if not cmdline and command_type == fleet_gateway_v2_pb2.SHELL:
+                    cmdline = normalize_string(env_map.get("cmdline") or env_map.get("CMDLINE"))
                 commands_msg.append(
                     fleet_gateway_v2_pb2.Command(
                         id=normalize_string(cmd.get("id") or cmd.get("name")),
-                        type=self._command_type(cmd),
-                        cmdline=normalize_string(cmd.get("cmdline") or cmd.get("cmd")),
+                        type=command_type,
+                        cmdline=cmdline,
                         argv=[normalize_string(arg) for arg in argv if normalize_string(arg)],
                         env=merged_env,
                         timeout_ms=max(0, timeout_ms),

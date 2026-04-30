@@ -27,6 +27,9 @@ AGENT.MD
 
 # Local editor / generated deps
 .vscode/
+node_modules/
+.playwright-cli/
+.claude/
 docs/diagrams/node_modules/
 docs/diagrams/legacy/
 docs/diagrams/scripts/
@@ -40,6 +43,7 @@ docs/diagrams/package.json
 docs/diagrams/svg/flowchart-docs-information-architecture.svg
 docs/diagrams/svg/flowchart-metadata-write-boundaries.svg
 docs/diagrams/svg/flowchart-windowed-upload-scheduler.svg
+docs/examples/
 docs/adr/
 docs/handoffs/
 docs/handoofs/
@@ -48,6 +52,9 @@ docs/research/
 docs/runbooks/
 docs/knowledge-base/
 docs/DOCS_MAP.md
+
+# Stale generated scaffold; canonical infra lives under infrastructure/.
+infra/
 docs/README.md
 
 # Python

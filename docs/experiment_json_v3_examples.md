@@ -3,7 +3,7 @@
 This document describes the current design-first experiment JSON entrypoint.
 The checked-in example is:
 
-- `docs/examples/experiment_execution_window_design.json`
+- `docs/experiment_execution_window_design.example.json`
 
 The current command order in that file is:
 
@@ -37,21 +37,6 @@ Main scheduling field:
   "fleet": {
     "policy": {
       "experiment_id": "exp-execution-window-design-demo",
-      "target_selector": {
-        "device_ids": [
-          "ag-pi-01"
-        ]
-      },
-      "range": {
-        "from": "2026-04-22T03:00:00Z",
-        "to": "2026-04-22T04:15:00Z"
-      },
-      "reporting": {
-        "measure_window": {
-          "from": "2026-04-22T03:00:00Z",
-          "to": "2026-04-22T03:30:00Z"
-        }
-      },
       "command_groups": [
         {
           "id": "execution-window-demo",
@@ -62,13 +47,23 @@ Main scheduling field:
               "type": "SYNC",
               "timeout_s": 5,
               "retries": 0,
+              "target_selector": {
+                "device_ids": [
+                  "ag-pi-01"
+                ]
+              },
+              "validity_policy_window": {
+                "from": "2026-04-22T03:00:00Z",
+                "to": "2026-04-22T04:15:00Z"
+              },
+              "measure_window": {
+                "from": "2026-04-22T03:00:00Z",
+                "to": "2026-04-22T03:30:00Z"
+              },
               "env": {
                 "SYNC_TIMEZONE": "UTC",
                 "SYNC_CRON": "30 3 * * *",
                 "SYNC_CRON_DESCRIPTION": "Every day at 3:30 AM UTC",
-                "SYNC_WINDOW_DURATION_MINUTES": "45",
-                "SYNC_SLOT_COUNT": "2",
-                "SYNC_SLOT_JITTER_S": "15",
                 "SYNC_REQUIRE_UPLOAD_WINDOW": "true"
               }
             },
@@ -78,43 +73,15 @@ Main scheduling field:
               "timeout_s": 10,
               "retries": 0,
               "env": {
-                "OBSERVE_METRICS_SINK": "mimir",
-                "OBSERVE_PROMETHEUS_JOB": "rpi-rf-measurement",
-                "OBSERVE_METRICS_FLUSH_INTERVAL_S": "60",
-                "OBSERVE_METRIC_GROUPS": "run,device,wifi,ble",
-                "OBSERVE_CAPTURE_CHANNEL_UTILIZATION": "true",
-                "OBSERVE_HASH_MAC_ADDRESSES": "true",
-                "OBSERVE_HASH_ROTATION": "daily_salt",
-                "OBSERVE_CAPTURE_PAYLOADS": "false",
+                "OBSERVE_METRICS_FLUSH_INTERVAL_S": "1",
                 "OBSERVE_EXPECTED_WIFI_METRICS": "rssi_dbm,channel,frequency_mhz,frame_type,retry_flag,phy_rate,channel_utilization",
                 "OBSERVE_EXPECTED_BLE_METRICS": "rssi_dbm,adv_type,uuid,major_minor,tx_power",
                 "OBSERVE_EXPECTED_DEVICE_METRICS": "cpu_load,memory_free,disk_free,temp_c,uptime_s,interface_errors,ntp_offset_ms",
                 "OBSERVE_METRICS_PROBE_URL": "http://mimir:9009/ready",
-                "PROM_REMOTE_WRITE_ON_CMD": "sudo systemctl start vmagent",
-                "PROM_REMOTE_WRITE_OFF_CMD": "sudo systemctl stop vmagent",
-                "PROM_REMOTE_WRITE_CMD_TIMEOUT_S": "12",
                 "OBSERVE_LOG_SOURCES": "command_stdout,command_stderr,journal,file",
                 "OBSERVE_LOG_JOURNAL_UNITS": "monad-fleet-agent.service,vmagent.service",
-                "OBSERVE_LOG_FILES": "/var/log/syslog,/var/log/messages,/tmp/runs/wifi/*.pcap,/tmp/runs/ble/*.jsonl",
-                "OBSERVE_LOG_FORMAT": "jsonl",
-                "OBSERVE_LOG_OUTPUT_DIR": "/tmp/observe-logs",
-                "OBSERVE_LOG_BUNDLE_NAME": "observe-logs-bundle",
-                "OBSERVE_LOG_UPLOAD_TARGET": "elabftw",
-                "OBSERVE_LOG_CAPTURE_COMMAND_OUTPUT": "true",
-                "OBSERVE_LOG_CAPTURE_WINDOW": "measure_window"
-              },
-              "expected_artifacts": [
-                {
-                  "name": "observe-logs-bundle",
-                  "path_or_glob": "/tmp/observe-logs/observe-logs-bundle.tar.gz",
-                  "mime": "application/gzip"
-                },
-                {
-                  "name": "observe-logs-index",
-                  "path_or_glob": "/tmp/observe-logs/*.jsonl",
-                  "mime": "application/x-ndjson"
-                }
-              ]
+                "OBSERVE_LOG_FILES": "/var/log/syslog,/var/log/messages,/tmp/runs/wifi/*.pcap,/tmp/runs/ble/*.jsonl"
+              }
             },
             {
               "id": "wifi-scan-baseline",
@@ -122,12 +89,6 @@ Main scheduling field:
               "timeout_s": 70,
               "retries": 0,
               "env": {
-                "RF_PROFILE": "rpi-rf-measurement",
-                "RF_PHASE": "baseline",
-                "RF_ACTIVITY_LABEL": "empty-room",
-                "RF_ROOM_ID": "room-lab-01",
-                "RF_SCENARIO_ID": "crowd-monitoring-v1",
-                "RF_RUN_LABEL": "run-2026-04-22-a",
                 "WIFI_SCAN_IFACE": "wlan0",
                 "WIFI_SCAN_MODE": "passive_monitor",
                 "WIFI_SCAN_CHANNELS": "1,6,11",
@@ -187,13 +148,18 @@ Main scheduling field:
 - `fleet.policy`: the experiment policy object stored in eLabFTW
 - `experiment_id`: stable identifier for this experiment definition
 - `target_selector.device_ids`: which device or devices should receive the policy
-- `range`: overall time range in which this policy is valid for selection
-- `reporting.measure_window`: when the measurement part of the run is expected to happen
+- `SYNC.validity_policy_window`: overall time range in which this policy is valid for selection
+- `SYNC.measure_window`: when the measurement part of the run is expected to happen
 - `command_groups`: ordered execution steps in the design JSON
 - `timeout_s`: hard per-command runtime limit
 - `retries`: how many retries the command gets after the first attempt
 - `env`: command-specific configuration values
 - `expected_artifacts`: files the command should leave behind for later upload and verification
+
+Compatibility aliases:
+
+- `SYNC.reporting` is accepted as an alias for `SYNC.measure_window` in draft JSON.
+- `SHELL.env.cmdline` is accepted and promoted to top-level `SHELL.cmdline`, but top-level `cmdline` is preferred.
 
 ## Command-By-Command Explanation
 
@@ -220,7 +186,8 @@ Main scheduling field:
 
 - Metrics from `WIFI_SCAN` and `BLE_SCAN` are intended for Prometheus and then Mimir/Grafana.
 - Logs are not sent to Mimir. In this design they are bundled by the observability configuration and uploaded as eLabFTW artifacts.
-- `expected_artifacts` on `observe-maintenance-sinks` shows the intended log bundle outputs.
+- eLabFTW uploads should stay coarse-grained: measurement evidence artifacts, one merged text/log bundle, and one `run-summary.json`.
+- Keep `ARTIFACT_UPLOAD_DURING_MEASURE=false` for Pi design runs so text logs are merged before upload.
 
 ## Adding CSI Later
 
