@@ -51,11 +51,19 @@ def flush_pending_reports(
             artifact_status_hook=artifact_upload_status_hook,
         )
         if uploaded_count or failed_count:
+            report.summary_metrics["artifacts_transferred_fleet_or_elab"] = str(uploaded_count)
             report.summary_metrics["artifacts_uploaded_elab"] = str(uploaded_count)
             report.summary_metrics["artifacts_upload_failed"] = str(failed_count)
             report_changed = True
         if report_changed:
             store.persist_report(report)
+        if failed_count > 0 and _server_side_artifact_bundling_enabled():
+            log.warning(
+                "Deferring PublishReport until artifact finalization succeeds run_id=%s failed_artifacts=%d",
+                normalize(report.run_id),
+                failed_count,
+            )
+            continue
         try:
             resp = stub.PublishReport(
                 fleet_gateway_v2_pb2.PublishReportRequest(agent_id=agent_id, report=report),
@@ -245,10 +253,24 @@ def _upload_spool_artifact_to_elab(
                 path.unlink(missing_ok=True)
             except Exception:
                 pass
-        return "uploaded"
+        return "spooled" if response.get("spooled") else "uploaded"
     except Exception as exc:
         log.warning("artifact upload failed run_id=%s name=%s err=%s", run_id, artifact.name, exc)
         return "failed"
+
+
+def _artifact_transfer_ok(status: str) -> bool:
+    return status in {"uploaded", "spooled"}
+
+
+def _artifact_status_reason(status: str) -> str:
+    if status == "uploaded":
+        return "uploaded_to_elab"
+    if status == "spooled":
+        return "spooled_to_fleet"
+    if status == "failed":
+        return "upload_failed"
+    return "skipped"
 
 
 def opportunistic_upload_artifacts_to_elab(
@@ -298,7 +320,7 @@ def opportunistic_upload_artifacts_to_elab(
             timeout_s=timeout_s,
             ingest_token=ingest_token,
         )
-        if status == "uploaded":
+        if _artifact_transfer_ok(status):
             uploaded += 1
         elif status == "failed":
             failed += 1
@@ -349,7 +371,7 @@ def upload_report_artifacts_to_elab(
         )
         if callable(artifact_status_hook):
             try:
-                reason = "uploaded_to_elab" if status == "uploaded" else "upload_failed" if status == "failed" else "skipped"
+                reason = _artifact_status_reason(status)
                 artifact_status_hook(report, artifact, status, reason)
             except Exception:
                 log.debug(
@@ -358,7 +380,7 @@ def upload_report_artifacts_to_elab(
                     normalize(artifact.name),
                     exc_info=True,
                 )
-        if status == "uploaded":
+        if _artifact_transfer_ok(status):
             uploaded += 1
         elif status == "failed":
             failed += 1
@@ -621,7 +643,7 @@ def _upload_artifacts_for_command_sink(
             timeout_s=timeout_s,
             ingest_token=ingest_token,
         )
-        if status == "uploaded":
+        if _artifact_transfer_ok(status):
             uploaded += 1
         elif status == "failed":
             failed += 1
@@ -763,8 +785,43 @@ def _merge_text_artifacts_enabled() -> bool:
     return parse_bool(os.environ.get("MERGE_TEXT_ARTIFACTS"), True)
 
 
+def _server_side_artifact_bundling_enabled() -> bool:
+    return parse_bool(os.environ.get("SERVER_SIDE_ARTIFACT_BUNDLING"), True)
+
+
 def _merge_text_artifacts_delete_sources() -> bool:
     return parse_bool(os.environ.get("MERGE_TEXT_ARTIFACTS_DELETE_SOURCES"), True)
+
+
+def _artifact_description(name: str) -> str:
+    stem = Path(normalize(name)).stem.lower()
+    if stem == "run-summary":
+        return "Machine-readable summary of run status, command counts, and aggregate metrics."
+    if stem.startswith("command-") and stem.endswith("-execution-status"):
+        return "Command wrapper log with command id, command line, exit code, duration, and short message."
+    if stem.startswith("wifi-link-status"):
+        return "Wi-Fi link snapshot from iw, including SSID, channel/frequency, RSSI, and bitrate when available."
+    if stem.startswith("wifi-access-point-scan"):
+        return "Wi-Fi access point scan output from iw."
+    if stem.startswith("wifi-proc-wireless-status"):
+        return "Fallback Wi-Fi status from /proc/net/wireless."
+    if stem.startswith("wifi-diagnostics-debug"):
+        return "Wi-Fi diagnostic output captured when scan/link evidence was missing."
+    if stem.startswith("ble-discovery-raw-bluetoothctl-scan"):
+        return "Raw bluetoothctl discovery output captured during the BLE scan window."
+    if stem.startswith("csi-status-disabled"):
+        return "CSI status note showing capture was disabled by configuration."
+    if stem.startswith("csi-status-not-configured"):
+        return "CSI status note showing no collector command or output path was configured."
+    if stem.startswith("csi-collector-output"):
+        return "CSI collector stdout/stderr and timeout/evidence notes."
+    if stem.startswith("csi-capture-raw-data-file"):
+        return "Raw CSI capture output file imported from the collector."
+    if stem.startswith("device-rf-environment-snapshot"):
+        return "Device RF environment snapshot with kernel, Wi-Fi interface, link, wireless, and Bluetooth state."
+    if stem.startswith("command-") and stem.endswith("-raw-output"):
+        return "Raw stdout/stderr from a shell command artifact."
+    return "Run evidence artifact captured by the device agent."
 
 
 def merge_text_artifacts_for_run(
@@ -808,6 +865,7 @@ def merge_text_artifacts_for_run(
             "name": normalize(artifact.name),
             "sha256": normalize(artifact.sha256),
             "size_bytes": int(artifact.size_bytes or 0),
+            "description": _artifact_description(normalize(artifact.name)),
         }
         for artifact, _ in merge_candidates
     ]
@@ -821,9 +879,12 @@ def merge_text_artifacts_for_run(
     }
 
     artifacts_dir = merge_candidates[0][1].parent
-    stamp = int(time.time() * 1000)
-    bundle_name = f"wifi-ble-csi-artifacts-bundle-{stamp}.tar.gz"
+    bundle_name = "wireless-run-evidence-bundle.tar.gz"
     bundle_path = artifacts_dir / bundle_name
+    if bundle_path.exists():
+        stamp = int(time.time() * 1000)
+        bundle_name = f"wireless-run-evidence-bundle-{stamp}.tar.gz"
+        bundle_path = artifacts_dir / bundle_name
     bundle_tmp_path = artifacts_dir / f"{bundle_name}.tmp"
 
     try:

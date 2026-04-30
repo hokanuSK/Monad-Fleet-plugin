@@ -153,14 +153,17 @@ def metric(key: str) -> str:
     return ""
 
 
-def has_command_event(prefix: str) -> bool:
+def has_command_event(prefix: str, command_type: str) -> bool:
     prefix = prefix.lower().strip()
+    command_type = command_type.upper().strip()
     for event in events:
         command_id = str(event.get("command_id") or "").lower().strip()
         event_type_raw = event.get("type")
         event_type = str(event_type_raw or "").upper().strip()
         event_type_num = to_int(event_type_raw, -1)
-        if not command_id.startswith(prefix):
+        metrics = as_map(event.get("metrics"))
+        metric_command_type = str(metrics.get("command_type") or "").upper().strip()
+        if not command_id.startswith(prefix) and metric_command_type != command_type:
             continue
         # v2 reports may store enum values either as names or numeric ids.
         if event_type_num in {3, 4, 5, 6}:
@@ -216,9 +219,9 @@ result = {
         "has_run_summary": has_summary_artifact,
     },
     "commands": {
-        "has_wifi_command_event": has_command_event("wifi"),
-        "has_ble_command_event": has_command_event("ble"),
-        "has_csi_command_event": has_command_event("csi"),
+        "has_wifi_command_event": has_command_event("wifi", "WIFI_SCAN"),
+        "has_ble_command_event": has_command_event("ble", "BLE_SCAN"),
+        "has_csi_command_event": has_command_event("csi", "CAPTURE_CSI"),
     },
 }
 

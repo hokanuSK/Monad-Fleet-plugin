@@ -366,12 +366,56 @@ def _upload_window_send_allowed(
 def route_interface_for_target(target_host: str) -> str:
     if not target_host:
         return ""
+    route_target = _resolve_route_probe_target(target_host)
+    if not route_target:
+        return ""
     try:
-        out = subprocess.check_output(["ip", "route", "get", target_host], text=True, stderr=subprocess.DEVNULL)
+        out = subprocess.check_output(["ip", "route", "get", route_target], text=True, stderr=subprocess.DEVNULL)
     except Exception:
         return ""
     match = re.search(r"\bdev\s+(\S+)", out)
     return match.group(1) if match else ""
+
+
+def _resolve_route_probe_target(target_host: str) -> str:
+    target = normalize(target_host)
+    if not target:
+        return ""
+    if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", target) or ":" in target:
+        return target
+    ipv6_candidate = ""
+    try:
+        infos = socket.getaddrinfo(target, None, type=socket.SOCK_STREAM)
+    except Exception:
+        infos = []
+    for family, _, _, _, sockaddr in infos:
+        if not sockaddr:
+            continue
+        candidate = normalize(sockaddr[0])
+        if not candidate:
+            continue
+        if family == socket.AF_INET:
+            return candidate
+        if family == socket.AF_INET6 and not ipv6_candidate:
+            ipv6_candidate = candidate
+    if ipv6_candidate:
+        return ipv6_candidate
+
+    for cmd in (["getent", "ahostsv4", target], ["getent", "hosts", target]):
+        try:
+            out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL)
+        except Exception:
+            continue
+        for raw in (out or "").splitlines():
+            line = normalize(raw)
+            if not line:
+                continue
+            candidate = normalize(line.split()[0])
+            if not candidate:
+                continue
+            if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", candidate) or ":" in candidate:
+                return candidate
+    return target
 
 
 def default_ipv4_gateway(*, iface: str = "") -> str:
@@ -1757,8 +1801,12 @@ class RunStore:
         artifacts_dir = self._run_dir(run_id) / "artifacts"
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         safe_cmd = sanitize_name(cmd_id, "command")
-        file_name = f"{safe_cmd}-{int(time.time() * 1000)}.log"
+        stem = f"command-{safe_cmd}-execution-status"
+        file_name = f"{stem}.log"
         path = artifacts_dir / file_name
+        if path.exists():
+            file_name = f"{stem}-{int(time.time() * 1000)}.log"
+            path = artifacts_dir / file_name
         self._write_text_atomic(
             path,
             "\n".join(
@@ -1782,12 +1830,26 @@ class RunStore:
         self._write_text_atomic(path, json.dumps(payload, indent=2, sort_keys=True))
         return artifact_from_path("run-summary.json", path, run_id)
 
-    def write_text_artifact(self, run_id: str, prefix: str, content: str, *, suffix: str = ".txt") -> fleet_gateway_v2_pb2.ArtifactRef:
+    def write_text_artifact(
+        self,
+        run_id: str,
+        prefix: str,
+        content: str,
+        *,
+        suffix: str = ".txt",
+        include_timestamp: bool = True,
+    ) -> fleet_gateway_v2_pb2.ArtifactRef:
         artifacts_dir = self._run_dir(run_id) / "artifacts"
         artifacts_dir.mkdir(parents=True, exist_ok=True)
-        stamp = int(time.time() * 1000)
-        file_name = f"{sanitize_name(prefix, 'artifact')}-{stamp}{suffix}"
+        stem = sanitize_name(prefix, "artifact")
+        if include_timestamp:
+            file_name = f"{stem}-{int(time.time() * 1000)}{suffix}"
+        else:
+            file_name = f"{stem}{suffix}"
         path = artifacts_dir / file_name
+        if path.exists():
+            file_name = f"{stem}-{int(time.time() * 1000)}{suffix}"
+            path = artifacts_dir / file_name
         self._write_text_atomic(path, content or "")
         return artifact_from_path(file_name, path, run_id)
 
