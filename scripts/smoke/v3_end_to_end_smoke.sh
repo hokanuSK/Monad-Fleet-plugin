@@ -1354,6 +1354,8 @@ echo "[8b/8] Verify artifact uploads in eLabFTW experiment"
 run_elab_upload_check() {
 docker compose exec -T monad-fleet-service sh -lc "EXPERIMENT_ID='${SMOKE_EXPERIMENT_ID}' REAL_DATA_ENFORCE='${REAL_DATA_ENFORCE}' REQUIRE_REAL_WIFI='${REQUIRE_REAL_WIFI}' REQUIRE_REAL_BLE='${REQUIRE_REAL_BLE}' REQUIRE_REAL_CSI='${REQUIRE_REAL_CSI}' python - <<'PY'
 import os
+import io
+import tarfile
 import requests
 import urllib3
 
@@ -1379,6 +1381,27 @@ for row in rows[:12]:
     print('upload', row.get('id'), row.get('real_name'), row.get('comment', '')[:80])
 
 name_tokens = [(str(row.get('real_name') or '').lower(), str(row.get('comment') or '').lower()) for row in rows]
+for row in rows:
+    real_name = str(row.get('real_name') or '').lower()
+    comment = str(row.get('comment') or '').lower()
+    if 'wireless-run-evidence-bundle' not in real_name and 'artifact=wireless-run-evidence-bundle' not in comment:
+        continue
+    upload_id = row.get('id')
+    if not upload_id:
+        continue
+    try:
+        bundle_resp = requests.get(
+            f'{base}/experiments/{exp_id}/uploads/{upload_id}?format=binary',
+            headers={'Authorization': key},
+            verify=False,
+            timeout=20,
+        )
+        bundle_resp.raise_for_status()
+        with tarfile.open(fileobj=io.BytesIO(bundle_resp.content), mode='r:gz') as bundle:
+            for member in bundle.getmembers():
+                name_tokens.append((str(member.name or '').lower(), comment))
+    except Exception as exc:
+        print(f'upload_bundle_inspect_warning id={upload_id} error={type(exc).__name__}: {exc}')
 has_wifi = any(('wifi' in name) or ('artifact=wifi' in comment) for name, comment in name_tokens)
 has_ble = any(('ble' in name) or ('artifact=ble' in comment) for name, comment in name_tokens)
 has_csi = any(('csi' in name) or ('artifact=csi' in comment) for name, comment in name_tokens)

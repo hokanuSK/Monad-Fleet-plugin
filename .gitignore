@@ -11,6 +11,7 @@ tools/
 
 # Local scratch / secrets
 scripts/rpi/keys/
+tests/e2e/.auth/
 .env.aws
 .env.aws.local
 Poznamky.md
