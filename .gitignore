@@ -46,11 +46,13 @@ docs/diagrams/svg/flowchart-windowed-upload-scheduler.svg
 docs/adr/
 docs/handoffs/
 docs/handoofs/
-docs/ops/
 docs/research/
 docs/runbooks/
 docs/knowledge-base/
 docs/DOCS_MAP.md
+
+# Stale generated scaffold; canonical infra lives under infrastructure/.
+infra/
 docs/README.md
 
 # Python
