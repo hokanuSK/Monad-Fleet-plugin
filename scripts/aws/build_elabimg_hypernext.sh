@@ -127,7 +127,7 @@ RUN php -d open_basedir='' /usr/local/bin/composer dump-autoload -o --working-di
 # Patch schema version: scheduler-json-editor-fix branch has REQUIRED_SCHEMA=187 but DB is at 208
 RUN sed -i 's/REQUIRED_SCHEMA = 187/REQUIRED_SCHEMA = 208/' /elabftw/src/Elabftw/Update.php
 COPY patch_scheduler_datetime.php /tmp/patch_scheduler_datetime.php
-RUN php /tmp/patch_scheduler_datetime.php
+RUN php -d open_basedir='' /tmp/patch_scheduler_datetime.php
 DOCKERFILE_APPEND
 
 docker build \
