@@ -9,7 +9,7 @@ WIFI_SCAN_IFACE="${WIFI_SCAN_IFACE:-${CONTROL_PLANE_IFACE}}"
 BLE_SCAN_IFACE="${BLE_SCAN_IFACE:-hci0}"
 CSI_MEASURE_IFACE="${CSI_MEASURE_IFACE:-${CONTROL_PLANE_IFACE}}"
 
-EXPERIMENT_JSON_FILE="${EXPERIMENT_JSON_FILE:-${ROOT_DIR}/docs/examples/experiment_execution_window_design.json}"
+EXPERIMENT_JSON_FILE="${EXPERIMENT_JSON_FILE:-${ROOT_DIR}/docs/experiment_execution_window_design.example.json}"
 SMOKE_PROFILE="${SMOKE_PROFILE:-design-json}"
 SMOKE_TITLE_PREFIX="${SMOKE_TITLE_PREFIX:-Fleet Design JSON}"
 SMOKE_TAGS_CSV="${SMOKE_TAGS_CSV:-fleet,smoke:v3,design-json,created-by:monad-fleet}"

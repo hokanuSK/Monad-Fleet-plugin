@@ -4,7 +4,7 @@ This guide explains how to create a FleetManager experiment from JSON, what each
 
 Use this together with:
 
-- [docs/examples/experiment_execution_window_design.json](/Users/admin/FleetManager/docs/examples/experiment_execution_window_design.json:1)
+- [docs/experiment_execution_window_design.example.json](/Users/admin/FleetManager/docs/experiment_execution_window_design.example.json:1)
 - [docs/experiment_json_v3_examples.md](/Users/admin/FleetManager/docs/experiment_json_v3_examples.md:1)
 
 ## Mental Model
@@ -27,7 +27,7 @@ The current normalizer lives in [policy_design.py](/Users/admin/FleetManager/src
 Copy the current example and edit it for your run:
 
 ```bash
-cp docs/examples/experiment_execution_window_design.json /tmp/my_experiment.json
+cp docs/experiment_execution_window_design.example.json /tmp/my_experiment.json
 ```
 
 The checked-in example is intentionally conservative:
@@ -158,7 +158,7 @@ The easiest supported full-flow entrypoint is:
 
 ```bash
 PI_HOST=monad-rpi5.local \
-EXPERIMENT_JSON_FILE=docs/examples/experiment_execution_window_design.json \
+EXPERIMENT_JSON_FILE=docs/experiment_execution_window_design.example.json \
 scripts/smoke/pi_execution_window_design.sh
 ```
 

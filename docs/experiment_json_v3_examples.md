@@ -3,7 +3,7 @@
 This document describes the current design-first experiment JSON entrypoint.
 The checked-in example is:
 
-- `docs/examples/experiment_execution_window_design.json`
+- `docs/experiment_execution_window_design.example.json`
 
 The current command order in that file is:
 

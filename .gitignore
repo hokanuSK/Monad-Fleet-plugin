@@ -43,6 +43,7 @@ docs/diagrams/package.json
 docs/diagrams/svg/flowchart-docs-information-architecture.svg
 docs/diagrams/svg/flowchart-metadata-write-boundaries.svg
 docs/diagrams/svg/flowchart-windowed-upload-scheduler.svg
+docs/examples/
 docs/adr/
 docs/handoffs/
 docs/handoofs/
