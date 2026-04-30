@@ -299,10 +299,12 @@ Metrics are not eLabFTW artifacts. Wi-Fi RSSI, BLE RSSI, command status, and dev
 eLabFTW should receive coarse run evidence only:
 
 - measurement output artifacts, such as a Wi-Fi scan log or PCAP, a BLE scan JSONL/log, or CSI files when CSI is re-enabled
-- one merged text/log bundle named like `wifi-ble-csi-artifacts-bundle-*.tar.gz`
+- one merged text/log bundle named like `wireless-run-evidence-bundle.tar.gz`
 - one `run-summary.json`
 
-For Pi design runs, keep `ARTIFACT_UPLOAD_DURING_MEASURE=false`. That makes the agent merge text artifacts first and then upload the small normalized set during report replay.
+For Pi design runs, `ARTIFACT_UPLOAD_DURING_MEASURE=false` keeps pieces on the device until report replay. Fleet then stages those pieces server-side and uploads the same normalized eLabFTW artifact set.
+
+If a Pi needs to upload during measurement because local storage is limited, keep `ARTIFACT_UPLOAD_DURING_MEASURE=true` and set `ARTIFACT_EVICT_AFTER_UPLOAD=true`. Fleet stages those in-run artifacts under its data directory and uploads the same coarse `wireless-run-evidence-bundle.tar.gz` plus `run-summary.json` to eLabFTW when it receives the run summary.
 
 ### Runtime command filtering
 

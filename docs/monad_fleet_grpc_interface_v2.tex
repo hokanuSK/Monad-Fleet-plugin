@@ -831,27 +831,29 @@ elabftw://experiments/<id>/uploads/<upload_id>
 If upload fails or is disabled, URI remains \texttt{spool://...} and run reporting still succeeds.
 
 \subsection{Artifact bundling profile (current default)}
-To reduce artifact fan-out per run, the agent bundles text artifacts before final report upload:
+To reduce artifact fan-out per run, Fleet stages individual text artifacts and builds the final eLabFTW bundle when the run summary arrives:
 \begin{itemize}
   \item merge target: \texttt{.txt}, \texttt{.log}, \texttt{.json} (except \texttt{run-summary.json})
-  \item bundle artifact name: \texttt{wifi-ble-csi-artifacts-bundle-<timestamp>.tar.gz}
+  \item bundle artifact name: \texttt{wireless-run-evidence-bundle.tar.gz}
   \item bundle contents:
     \begin{itemize}
       \item \texttt{entries/<original-files>}
-      \item \texttt{manifest.json} (metadata only: name/checksum/size)
+      \item \texttt{manifest.json} (metadata only: name/checksum/size/description)
     \end{itemize}
   \item binary/raw capture outputs (for example CSI \texttt{.dat}) remain separate artifacts
-  \item by default, merged source text files are deleted locally after bundle creation
+  \item agents may delete source files after Fleet acknowledges staging when \texttt{ARTIFACT\_EVICT\_AFTER\_UPLOAD=true}
 \end{itemize}
 
-Bundle controls:
+Compatibility controls for the older agent-side merge path:
 \begin{itemize}
   \item \texttt{MERGE\_TEXT\_ARTIFACTS=true|false} (default \texttt{true})
   \item \texttt{MERGE\_TEXT\_ARTIFACTS\_DELETE\_SOURCES=true|false} (default \texttt{true})
 \end{itemize}
 
 With this profile enabled, a typical real Pi run publishes three primary artifacts:
-\texttt{wifi-ble-csi-artifacts-bundle-*.tar.gz}, CSI binary output, and \texttt{run-summary.json}.
+\texttt{wireless-run-evidence-bundle.tar.gz}, CSI binary output, and \texttt{run-summary.json}.
+
+In-run artifact upload is a server-side staging path, not direct eLabFTW fan-out. With \texttt{ARTIFACT\_UPLOAD\_DURING\_MEASURE=true} and \texttt{ARTIFACT\_EVICT\_AFTER\_UPLOAD=true}, the agent uploads individual files to Fleet during measurement and may delete local copies after acknowledgment. With \texttt{ARTIFACT\_UPLOAD\_DURING\_MEASURE=false}, the agent sends those same pieces during report replay. In both modes, Fleet stores the pieces under its data directory, then builds and uploads the same final bundle when \texttt{run-summary.json} arrives.
 
 Relevant artifact classes for experiment analysis:
 \begin{itemize}
@@ -1431,8 +1433,8 @@ monad_fleet_artifact_uploads_total
   \item metric forwarding target can change at Prometheus \texttt{remote\_write} without changing the device gRPC contract.
   \item this deployment sets \texttt{METRICS\_EXCLUDE\_PREFIXES=csi\_} on Fleet service, so CSI metrics are not exported to Grafana.
   \item artifact upload to eLabFTW is implemented through \texttt{/ingest/v1/artifacts}; upload can be disabled per-agent if needed.
-  \item default Pi profile bundles text artifacts into \texttt{wifi-ble-csi-artifacts-bundle-*.tar.gz} and uploads CSI binary + run summary as separate artifacts.
-  \item bundle manifest stores metadata only (no inlined artifact text payload fields); merged source text files are removed locally by default.
+  \item default Pi profile stages text artifacts in Fleet, bundles them into \texttt{wireless-run-evidence-bundle.tar.gz}, and uploads CSI binary + run summary as separate artifacts.
+  \item bundle manifest stores metadata only (no inlined artifact text payload fields); device source files can be evicted after Fleet staging acknowledgment.
   \item sampled Wi-Fi runs throttle artifact fan-out by default (first+last sample artifact retention) to prevent oversized report processing on long sampling windows.
   \item agent-side report replay timeout is configurable via \texttt{REPORT\_RPC\_TIMEOUT\_S} and defaults to a higher value for Pi smoke runs.
   \item control-plane RPC timeouts can be tuned globally via \texttt{CONTROL\_RPC\_TIMEOUT\_S} or per method via \texttt{HELLO\_RPC\_TIMEOUT\_S}, \texttt{ASSIGNMENT\_RPC\_TIMEOUT\_S}, \texttt{POLICY\_RPC\_TIMEOUT\_S}, and \texttt{ACK\_PREPARED\_RPC\_TIMEOUT\_S}.

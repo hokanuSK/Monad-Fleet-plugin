@@ -59,6 +59,7 @@ def serve() -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
     core.INGEST_JOURNAL_PATH = data_dir / "ingest-metrics.ndjson"
     core.ARTIFACT_INGEST_JOURNAL_PATH = data_dir / "ingest-artifacts.ndjson"
+    core.ARTIFACT_SERVER_SPOOL_DIR = data_dir / "artifact-spool"
     core.METRICS_EXCLUDE_PREFIXES = tuple(cfg.get("metrics_exclude_prefixes") or ())
     if core.METRICS_EXCLUDE_PREFIXES:
         core.log.info("Metrics export filter enabled, excluded prefixes: %s", ",".join(core.METRICS_EXCLUDE_PREFIXES))

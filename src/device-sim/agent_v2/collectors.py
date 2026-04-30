@@ -19,6 +19,28 @@ _safe_float = core_mod._safe_float
 _safe_int = core_mod._safe_int
 from .sinks import _ingest_metrics_http, opportunistic_upload_artifacts_to_elab
 
+
+def _artifact_stem(base: str, detail: str = "") -> str:
+    clean_base = sanitize_name(base, "artifact")
+    clean_detail = sanitize_name(detail, "")
+    if clean_detail:
+        return f"{clean_base}-{clean_detail}"
+    return clean_base
+
+
+def _wifi_sample_label(index: int, total: int) -> str:
+    index = max(1, int(index))
+    total = max(1, int(total))
+    if total <= 1:
+        return "single-sample"
+    if index == 1:
+        return "first-sample"
+    if index == total:
+        return "last-sample"
+    width = max(3, len(str(total)))
+    return f"sample-{index:0{width}d}-of-{total:0{width}d}"
+
+
 def collect_wifi_scan(
     iface: str,
     timeout_ms: int,
@@ -31,6 +53,7 @@ def collect_wifi_scan(
     override_cmdline: str = "",
     override_argv: list[str] | None = None,
     override_env: dict[str, str] | None = None,
+    artifact_label: str = "",
 ) -> tuple[int, int, str, dict[str, str], list[fleet_gateway_v2_pb2.ArtifactRef]]:
     metrics: dict[str, str] = {}
     artifacts: list[fleet_gateway_v2_pb2.ArtifactRef] = []
@@ -50,7 +73,14 @@ def collect_wifi_scan(
         )
         if persist_artifacts:
             try:
-                artifacts.append(store.write_text_artifact(run_id, f"wifi-{cmd_id}-override", full))
+                artifacts.append(
+                    store.write_text_artifact(
+                        run_id,
+                        _artifact_stem("wifi-command-override-output", artifact_label),
+                        full,
+                        include_timestamp=False,
+                    )
+                )
             except Exception:
                 log.exception("Failed to persist wifi override output artifact")
 
@@ -137,7 +167,14 @@ def collect_wifi_scan(
             msg = f"{msg}; {iface_note}"
         if persist_artifacts:
             try:
-                artifacts.append(store.write_text_artifact(run_id, f"wifi-{cmd_id}-scan", out))
+                artifacts.append(
+                    store.write_text_artifact(
+                        run_id,
+                        _artifact_stem("wifi-access-point-scan", artifact_label or "current"),
+                        out,
+                        include_timestamp=False,
+                    )
+                )
             except Exception:
                 log.exception("Failed to persist wifi scan artifact")
         return 0, duration_ms, msg, metrics, artifacts
@@ -159,7 +196,14 @@ def collect_wifi_scan(
         msg = f"{msg}; {iface_note}"
     if persist_artifacts:
         try:
-            artifacts.append(store.write_text_artifact(run_id, f"wifi-{cmd_id}-link", out2))
+            artifacts.append(
+                store.write_text_artifact(
+                    run_id,
+                    _artifact_stem("wifi-link-status", artifact_label or "current"),
+                    out2,
+                    include_timestamp=False,
+                )
+            )
         except Exception:
             log.exception("Failed to persist wifi link artifact")
 
@@ -191,7 +235,14 @@ def collect_wifi_scan(
             msg = f"{msg}; {iface_note}"
         if persist_artifacts:
             try:
-                artifacts.append(store.write_text_artifact(run_id, f"wifi-{cmd_id}-proc-wireless", proc_text))
+                artifacts.append(
+                    store.write_text_artifact(
+                        run_id,
+                        _artifact_stem("wifi-proc-wireless-status", artifact_label or "current"),
+                        proc_text,
+                        include_timestamp=False,
+                    )
+                )
             except Exception:
                 log.exception("Failed to persist proc wireless artifact")
         has_channel_context = metrics.get("wifi_channel") is not None or metrics.get("wifi_freq_mhz") is not None
@@ -221,7 +272,14 @@ def collect_wifi_scan(
                 f"iw_scan_output:\n{out or '<empty>'}\n\n"
                 f"iw_link_output:\n{out2 if 'out2' in locals() else '<empty>'}\n"
             )
-            artifacts.append(store.write_text_artifact(run_id, f"wifi-{cmd_id}-debug", debug_payload))
+            artifacts.append(
+                store.write_text_artifact(
+                    run_id,
+                    _artifact_stem("wifi-diagnostics-debug", artifact_label or "current"),
+                    debug_payload,
+                    include_timestamp=False,
+                )
+            )
         except Exception:
             log.exception("Failed to persist wifi debug artifact")
     return 65, duration_ms2 if "duration_ms2" in locals() else duration_ms, failure_msg, metrics, artifacts
@@ -329,6 +387,7 @@ def collect_wifi_scan_series(
             override_cmdline=override_cmdline,
             override_argv=override_argv,
             override_env=override_env,
+            artifact_label=_wifi_sample_label(idx, effective_points),
         )
         total_duration_ms += max(0, int(duration_ms))
         all_artifacts.extend(artifacts)
@@ -472,7 +531,14 @@ def collect_ble_scan(
             execute_policy=True,
         )
         try:
-            artifacts.append(store.write_text_artifact(run_id, f"ble-{cmd_id}-override", full))
+            artifacts.append(
+                store.write_text_artifact(
+                    run_id,
+                    "ble-command-override-output",
+                    full,
+                    include_timestamp=False,
+                )
+            )
         except Exception:
             log.exception("Failed to persist ble override output artifact")
 
@@ -513,7 +579,15 @@ def collect_ble_scan(
     metrics.update(_collect_device_status_metrics())
     msg = f"bluetoothctl scan {'ok' if exit_code in (0,124) else 'failed'}: adv_count={adv_count}"
     try:
-        artifacts.append(store.write_text_artifact(run_id, f"ble-{cmd_id}-scan", out))
+        artifacts.append(
+            store.write_text_artifact(
+                run_id,
+                "ble-discovery-raw-bluetoothctl-scan",
+                out,
+                suffix=".log",
+                include_timestamp=False,
+            )
+        )
     except Exception:
         log.exception("Failed to persist ble scan artifact")
     # Do not fail the run on BLE unavailability by default (many devices lack BLE).
@@ -580,8 +654,9 @@ def collect_csi_capture(
             artifacts.append(
                 store.write_text_artifact(
                     run_id,
-                    f"csi-{cmd_id}-disabled",
+                    "csi-status-disabled",
                     "CSI capture disabled by configuration (DISABLE_CSI_CAPTURE=true).\n",
+                    include_timestamp=False,
                 )
             )
         except Exception:
@@ -850,7 +925,7 @@ def collect_csi_capture(
                     store.import_file_artifact(
                         run_id,
                         output_file,
-                        artifact_name=f"csi-{cmd_id}-{idx}-{output_file.name}",
+                        artifact_name=f"csi-capture-raw-data-file-{idx:03d}-{output_file.name}",
                     )
                 )
                 imported_files += 1
@@ -938,7 +1013,15 @@ def collect_csi_capture(
             else:
                 artifact_payload = summary + "\n\n" + body + "\n"
         try:
-            artifacts.append(store.write_text_artifact(run_id, f"csi-{cmd_id}-output", artifact_payload))
+            artifacts.append(
+                store.write_text_artifact(
+                    run_id,
+                    "csi-collector-output",
+                    artifact_payload,
+                    suffix=".log",
+                    include_timestamp=False,
+                )
+            )
         except Exception:
             log.exception("Failed to persist csi output artifact")
         return int(exit_code), duration_ms, msg, metrics, artifacts
@@ -948,9 +1031,10 @@ def collect_csi_capture(
         artifacts.append(
             store.write_text_artifact(
                 run_id,
-                f"csi-{cmd_id}-note",
+                "csi-status-not-configured",
                 "CSI capture not configured on this agent.\n"
                 "Set command/env CSI_COLLECTOR_CMD (and optional CSI_OUTPUT_PATH or CSI_OUTPUT_GLOB).\n",
+                include_timestamp=False,
             )
         )
     except Exception:

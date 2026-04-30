@@ -1801,8 +1801,12 @@ class RunStore:
         artifacts_dir = self._run_dir(run_id) / "artifacts"
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         safe_cmd = sanitize_name(cmd_id, "command")
-        file_name = f"{safe_cmd}-{int(time.time() * 1000)}.log"
+        stem = f"command-{safe_cmd}-execution-status"
+        file_name = f"{stem}.log"
         path = artifacts_dir / file_name
+        if path.exists():
+            file_name = f"{stem}-{int(time.time() * 1000)}.log"
+            path = artifacts_dir / file_name
         self._write_text_atomic(
             path,
             "\n".join(
@@ -1826,12 +1830,26 @@ class RunStore:
         self._write_text_atomic(path, json.dumps(payload, indent=2, sort_keys=True))
         return artifact_from_path("run-summary.json", path, run_id)
 
-    def write_text_artifact(self, run_id: str, prefix: str, content: str, *, suffix: str = ".txt") -> fleet_gateway_v2_pb2.ArtifactRef:
+    def write_text_artifact(
+        self,
+        run_id: str,
+        prefix: str,
+        content: str,
+        *,
+        suffix: str = ".txt",
+        include_timestamp: bool = True,
+    ) -> fleet_gateway_v2_pb2.ArtifactRef:
         artifacts_dir = self._run_dir(run_id) / "artifacts"
         artifacts_dir.mkdir(parents=True, exist_ok=True)
-        stamp = int(time.time() * 1000)
-        file_name = f"{sanitize_name(prefix, 'artifact')}-{stamp}{suffix}"
+        stem = sanitize_name(prefix, "artifact")
+        if include_timestamp:
+            file_name = f"{stem}-{int(time.time() * 1000)}{suffix}"
+        else:
+            file_name = f"{stem}{suffix}"
         path = artifacts_dir / file_name
+        if path.exists():
+            file_name = f"{stem}-{int(time.time() * 1000)}{suffix}"
+            path = artifacts_dir / file_name
         self._write_text_atomic(path, content or "")
         return artifact_from_path(file_name, path, run_id)
 

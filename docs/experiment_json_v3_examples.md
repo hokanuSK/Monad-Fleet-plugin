@@ -186,8 +186,9 @@ Compatibility aliases:
 
 - Metrics from `WIFI_SCAN` and `BLE_SCAN` are intended for Prometheus and then Mimir/Grafana.
 - Logs are not sent to Mimir. In this design they are bundled by the observability configuration and uploaded as eLabFTW artifacts.
-- eLabFTW uploads should stay coarse-grained: measurement evidence artifacts, one merged text/log bundle, and one `run-summary.json`.
-- Keep `ARTIFACT_UPLOAD_DURING_MEASURE=false` for Pi design runs so text logs are merged before upload.
+- eLabFTW uploads should stay coarse-grained: measurement evidence artifacts, one merged text/log bundle named `wireless-run-evidence-bundle.tar.gz`, and one `run-summary.json`.
+- With `ARTIFACT_UPLOAD_DURING_MEASURE=false`, the Pi keeps pieces until report replay; Fleet then stages them server-side and uploads the final eLabFTW bundle at run summary time.
+- For storage-limited Pi runs that must upload during measurement, set `ARTIFACT_UPLOAD_DURING_MEASURE=true` with `ARTIFACT_EVICT_AFTER_UPLOAD=true`; Fleet stages the pieces earlier and still uploads the same final eLabFTW bundle at run summary time.
 
 ## Adding CSI Later
 

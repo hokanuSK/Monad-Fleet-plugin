@@ -1,9 +1,11 @@
 import base64
 import hashlib
+import io
 import json
 import logging
 import os
 import re
+import tarfile
 import threading
 import time
 from concurrent import futures
@@ -98,6 +100,7 @@ DEVICE_LAST_SEEN_UNIX = Gauge(
 
 INGEST_JOURNAL_PATH: Path | None = None
 ARTIFACT_INGEST_JOURNAL_PATH: Path | None = None
+ARTIFACT_SERVER_SPOOL_DIR: Path | None = None
 INGEST_JOURNAL_LOCK = threading.Lock()
 ELAB_CLIENT_FOR_HTTP: Any = None
 METRICS_EXCLUDE_PREFIXES: tuple[str, ...] = ()
@@ -292,7 +295,13 @@ def build_uploaded_artifact_name(
     agent_short = (agent_raw[-6:] if agent_raw else "agent")
 
     p = Path(original)
-    ext = p.suffix if p.suffix and len(p.suffix) <= 12 else ""
+    lower_name = p.name.lower()
+    compound_ext = ""
+    for candidate in (".tar.gz", ".tar.bz2", ".tar.xz", ".jsonl", ".ndjson"):
+        if lower_name.endswith(candidate):
+            compound_ext = p.name[-len(candidate) :]
+            break
+    ext = compound_ext or (p.suffix if p.suffix and len(p.suffix) <= 12 else "")
     stem = p.name[: -len(ext)] if ext else p.name
     stem_safe = re.sub(r"[^a-zA-Z0-9._-]+", "-", stem).strip("-_.") or "artifact"
 
@@ -304,6 +313,368 @@ def build_uploaded_artifact_name(
     if len(base) > max_base_len:
         base = base[:max_base_len].rstrip("-_.")
     return (base or "artifact") + ext
+
+
+def safe_artifact_filename(value: Any, default: str = "artifact.bin") -> str:
+    raw = Path(normalize_string(value) or default).name or default
+    safe = re.sub(r"[^a-zA-Z0-9._-]+", "-", raw).strip("-_.")
+    if not safe:
+        safe = default
+    return safe[:180].rstrip("-_.") or default
+
+
+def artifact_spool_root(experiment_id: int, run_id: str, agent_id: str) -> Path:
+    root = ARTIFACT_SERVER_SPOOL_DIR
+    if root is None:
+        if ARTIFACT_INGEST_JOURNAL_PATH is not None:
+            root = ARTIFACT_INGEST_JOURNAL_PATH.parent / "artifact-spool"
+        else:
+            root = Path("/tmp/monad-fleet-artifact-spool")
+    run_token = re.sub(r"[^a-zA-Z0-9._-]+", "-", normalize_string(run_id)).strip("-_.") or "run"
+    agent_token = re.sub(r"[^a-zA-Z0-9._-]+", "-", normalize_device_id(agent_id)).strip("-_.") or "agent"
+    return root / f"experiment-{int(experiment_id)}" / run_token / agent_token
+
+
+def server_spool_uri(experiment_id: int, run_id: str, agent_id: str, stored_name: str) -> str:
+    run_token = re.sub(r"[^a-zA-Z0-9._-]+", "-", normalize_string(run_id)).strip("-_.") or "run"
+    agent_token = re.sub(r"[^a-zA-Z0-9._-]+", "-", normalize_device_id(agent_id)).strip("-_.") or "agent"
+    return (
+        f"fleet-spool://experiments/{int(experiment_id)}/runs/{run_token}/"
+        f"agents/{agent_token}/artifacts/{safe_artifact_filename(stored_name)}"
+    )
+
+
+def artifact_description(name: str) -> str:
+    stem = Path(normalize_string(name)).stem.lower()
+    if stem == "run-summary":
+        return "Machine-readable summary of run status, command counts, and aggregate metrics."
+    if stem.startswith("command-") and stem.endswith("-execution-status"):
+        return "Command wrapper log with command id, command line, exit code, duration, and short message."
+    if stem.startswith("wifi-link-status"):
+        return "Wi-Fi link snapshot from iw, including SSID, channel/frequency, RSSI, and bitrate when available."
+    if stem.startswith("wifi-access-point-scan"):
+        return "Wi-Fi access point scan output from iw."
+    if stem.startswith("wifi-proc-wireless-status"):
+        return "Fallback Wi-Fi status from /proc/net/wireless."
+    if stem.startswith("wifi-diagnostics-debug"):
+        return "Wi-Fi diagnostic output captured when scan/link evidence was missing."
+    if stem.startswith("ble-discovery-raw-bluetoothctl-scan"):
+        return "Raw bluetoothctl discovery output captured during the BLE scan window."
+    if stem.startswith("csi-status-disabled"):
+        return "CSI status note showing capture was disabled by configuration."
+    if stem.startswith("csi-status-not-configured"):
+        return "CSI status note showing no collector command or output path was configured."
+    if stem.startswith("csi-collector-output"):
+        return "CSI collector stdout/stderr and timeout/evidence notes."
+    if stem.startswith("csi-capture-raw-data-file"):
+        return "Raw CSI capture output file imported from the collector."
+    if stem.startswith("device-rf-environment-snapshot"):
+        return "Device RF environment snapshot with kernel, Wi-Fi interface, link, wireless, and Bluetooth state."
+    if stem.startswith("command-") and stem.endswith("-raw-output"):
+        return "Raw stdout/stderr from a shell command artifact."
+    return "Run evidence artifact captured by the device agent."
+
+
+def file_sha256_bytes(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
+
+
+def store_server_spooled_artifact(
+    *,
+    experiment_id: int,
+    run_id: str,
+    agent_id: str,
+    artifact_name: str,
+    raw: bytes,
+    mime: str,
+    comment: str,
+    upload_phase: str,
+    sha256_value: str,
+) -> dict[str, Any]:
+    root = artifact_spool_root(experiment_id, run_id, agent_id)
+    root.mkdir(parents=True, exist_ok=True)
+
+    actual_sha = file_sha256_bytes(raw)
+    sha = normalize_string(sha256_value).lower() or actual_sha
+    stored_name = safe_artifact_filename(artifact_name)
+    candidate = root / stored_name
+    if candidate.exists():
+        try:
+            existing_sha = file_sha256_bytes(candidate.read_bytes())
+        except Exception:
+            existing_sha = ""
+        if existing_sha != actual_sha:
+            p = Path(stored_name)
+            suffix = p.suffix
+            stem = p.name[: -len(suffix)] if suffix else p.name
+            stored_name = safe_artifact_filename(f"{stem}__{actual_sha[:8]}{suffix}")
+            candidate = root / stored_name
+
+    tmp = candidate.with_name(candidate.name + ".tmp")
+    tmp.write_bytes(raw)
+    tmp.replace(candidate)
+
+    meta = {
+        "received_at": utc_now_iso(),
+        "experiment_id": int(experiment_id),
+        "run_id": normalize_string(run_id),
+        "agent_id": normalize_device_id(agent_id),
+        "artifact_name": normalize_string(artifact_name),
+        "stored_spool_name": stored_name,
+        "upload_phase": normalize_string(upload_phase) or "measure_live",
+        "mime": normalize_string(mime) or "application/octet-stream",
+        "comment": normalize_string(comment),
+        "sha256": sha,
+        "actual_sha256": actual_sha,
+        "size_bytes": len(raw),
+        "server_spool_uri": server_spool_uri(experiment_id, run_id, agent_id, stored_name),
+    }
+    (root / f"{stored_name}.meta.json").write_text(json.dumps(meta, sort_keys=True, indent=2), encoding="utf-8")
+    append_artifact_journal({**meta, "status": "spooled"})
+    return meta
+
+
+def load_server_spooled_artifacts(experiment_id: int, run_id: str, agent_id: str) -> list[dict[str, Any]]:
+    root = artifact_spool_root(experiment_id, run_id, agent_id)
+    if not root.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for meta_path in sorted(root.glob("*.meta.json")):
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            continue
+        if not isinstance(meta, dict):
+            continue
+        stored_name = safe_artifact_filename(meta.get("stored_spool_name"))
+        data_path = root / stored_name
+        if not data_path.exists() or not data_path.is_file():
+            continue
+        meta["path"] = str(data_path)
+        rows.append(meta)
+    return rows
+
+
+def upload_raw_artifact_to_elab(
+    *,
+    experiment_id: int,
+    run_id: str,
+    agent_id: str,
+    artifact_name: str,
+    raw: bytes,
+    mime: str,
+    comment: str,
+    upload_phase: str,
+) -> dict[str, Any]:
+    if ELAB_CLIENT_FOR_HTTP is None:
+        raise RuntimeError("elab client unavailable")
+
+    sha256_value = file_sha256_bytes(raw)
+    existing = find_artifact_upload_in_journal(
+        experiment_id=experiment_id,
+        run_id=run_id,
+        agent_id=agent_id,
+        artifact_name=artifact_name,
+        sha256_value=sha256_value,
+        size_bytes=len(raw),
+    )
+    if existing is not None:
+        existing_location = normalize_string(existing.get("location"))
+        existing_upload_id = existing.get("upload_id")
+        existing_artifact_uri = ""
+        if isinstance(existing_upload_id, int):
+            existing_artifact_uri = f"elabftw://experiments/{experiment_id}/uploads/{existing_upload_id}"
+        elif existing_location:
+            existing_artifact_uri = existing_location
+        return {
+            "deduplicated": True,
+            "upload_id": existing_upload_id,
+            "artifact_uri": existing_artifact_uri,
+            "location": existing_location,
+            "stored_artifact_name": normalize_string(existing.get("stored_artifact_name")) or artifact_name,
+            "sha256": sha256_value,
+            "size_bytes": len(raw),
+        }
+
+    upload_filename = build_uploaded_artifact_name(
+        artifact_name=artifact_name,
+        run_id=run_id,
+        agent_id=agent_id,
+        upload_phase=upload_phase,
+        sha256_value=sha256_value,
+        size_bytes=len(raw),
+    )
+    uploaded = ELAB_CLIENT_FOR_HTTP.upload_experiment_artifact(
+        experiment_id,
+        upload_filename,
+        raw,
+        comment=comment,
+        mime=mime,
+    )
+    location = normalize_string(uploaded.get("location"))
+    upload_id = uploaded.get("upload_id")
+    artifact_uri = ""
+    if isinstance(upload_id, int):
+        artifact_uri = f"elabftw://experiments/{experiment_id}/uploads/{upload_id}"
+    elif location:
+        artifact_uri = location
+
+    append_artifact_journal(
+        {
+            "received_at": utc_now_iso(),
+            "experiment_id": experiment_id,
+            "run_id": run_id,
+            "agent_id": agent_id,
+            "artifact_name": artifact_name,
+            "stored_artifact_name": upload_filename,
+            "upload_phase": upload_phase,
+            "sha256": sha256_value,
+            "size_bytes": len(raw),
+            "upload_id": upload_id,
+            "location": location,
+            "status": "uploaded",
+        }
+    )
+    return {
+        "deduplicated": False,
+        "upload_id": upload_id,
+        "artifact_uri": artifact_uri,
+        "location": location,
+        "stored_artifact_name": upload_filename,
+        "sha256": sha256_value,
+        "size_bytes": len(raw),
+    }
+
+
+def build_server_artifact_bundle(run_id: str, rows: list[dict[str, Any]]) -> bytes:
+    manifest_entries = []
+    payloads: list[tuple[dict[str, Any], bytes]] = []
+    for row in rows:
+        path = Path(normalize_string(row.get("path")))
+        if not path.exists() or not path.is_file():
+            continue
+        raw = path.read_bytes()
+        name = normalize_string(row.get("artifact_name")) or path.name
+        stored_name = safe_artifact_filename(row.get("stored_spool_name") or name)
+        manifest_entries.append(
+            {
+                "name": name,
+                "stored_name": stored_name,
+                "sha256": normalize_string(row.get("actual_sha256") or row.get("sha256")) or file_sha256_bytes(raw),
+                "size_bytes": len(raw),
+                "description": artifact_description(name),
+            }
+        )
+        payloads.append(({"stored_name": stored_name}, raw))
+
+    manifest = {
+        "schema": "fleet.v2.artifact_bundle.v2",
+        "run_id": normalize_string(run_id),
+        "created_at": utc_now_iso(),
+        "format": "tar.gz",
+        "entries_dir": "entries/",
+        "entries": manifest_entries,
+    }
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for row, raw in payloads:
+            info = tarfile.TarInfo(name=f"entries/{safe_artifact_filename(row.get('stored_name'))}")
+            info.size = len(raw)
+            info.mtime = int(time.time())
+            archive.addfile(info, io.BytesIO(raw))
+        manifest_bytes = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
+        info = tarfile.TarInfo(name="manifest.json")
+        info.size = len(manifest_bytes)
+        info.mtime = int(time.time())
+        archive.addfile(info, io.BytesIO(manifest_bytes))
+    return buffer.getvalue()
+
+
+def finalize_server_spooled_run(
+    *,
+    experiment_id: int,
+    run_id: str,
+    agent_id: str,
+    summary_raw: bytes,
+    summary_mime: str,
+    summary_comment: str,
+) -> dict[str, Any]:
+    rows = load_server_spooled_artifacts(experiment_id, run_id, agent_id)
+    text_suffixes = {".txt", ".log", ".json"}
+    text_rows: list[dict[str, Any]] = []
+    raw_rows: list[dict[str, Any]] = []
+    for row in rows:
+        name = normalize_string(row.get("artifact_name"))
+        if name == "run-summary.json":
+            continue
+        suffix = Path(name).suffix.lower()
+        if suffix in text_suffixes:
+            text_rows.append(row)
+        else:
+            raw_rows.append(row)
+
+    uploads: list[dict[str, Any]] = []
+    if text_rows:
+        bundle_raw = build_server_artifact_bundle(run_id, text_rows)
+        bundle_upload = upload_raw_artifact_to_elab(
+            experiment_id=experiment_id,
+            run_id=run_id,
+            agent_id=agent_id,
+            artifact_name="wireless-run-evidence-bundle.tar.gz",
+            raw=bundle_raw,
+            mime="application/gzip",
+            comment=f"fleet-v3 run={run_id} agent={agent_id} artifact=wireless-run-evidence-bundle.tar.gz",
+            upload_phase="report_replay",
+        )
+        uploads.append({"artifact_name": "wireless-run-evidence-bundle.tar.gz", **bundle_upload})
+
+    for row in raw_rows:
+        path = Path(normalize_string(row.get("path")))
+        raw = path.read_bytes()
+        name = normalize_string(row.get("artifact_name")) or path.name
+        upload = upload_raw_artifact_to_elab(
+            experiment_id=experiment_id,
+            run_id=run_id,
+            agent_id=agent_id,
+            artifact_name=name,
+            raw=raw,
+            mime=normalize_string(row.get("mime")) or "application/octet-stream",
+            comment=normalize_string(row.get("comment"))
+            or f"fleet-v3 run={run_id} agent={agent_id} artifact={name}",
+            upload_phase="report_replay",
+        )
+        uploads.append({"artifact_name": name, **upload})
+
+    summary_upload = upload_raw_artifact_to_elab(
+        experiment_id=experiment_id,
+        run_id=run_id,
+        agent_id=agent_id,
+        artifact_name="run-summary.json",
+        raw=summary_raw,
+        mime=summary_mime or "application/json",
+        comment=summary_comment or f"fleet-v3 run={run_id} agent={agent_id} artifact=run-summary.json",
+        upload_phase="report_replay",
+    )
+    append_artifact_journal(
+        {
+            "received_at": utc_now_iso(),
+            "experiment_id": experiment_id,
+            "run_id": run_id,
+            "agent_id": agent_id,
+            "artifact_name": "run-summary.json",
+            "status": "server_finalized",
+            "bundled_artifacts_count": len(text_rows),
+            "raw_artifacts_count": len(raw_rows),
+            "uploads_count": len(uploads) + 1,
+        }
+    )
+    return {
+        "summary_upload": summary_upload,
+        "uploads": uploads,
+        "bundled_artifacts_count": len(text_rows),
+        "raw_artifacts_count": len(raw_rows),
+    }
 
 
 def mark_device_seen(device_id: str) -> None:
@@ -871,12 +1242,6 @@ class MetricsIngestHttpHandler(BaseHTTPRequestHandler):
         self._write_json(202, {"ok": True, "accepted_points": accepted})
 
     def _handle_artifact_ingest(self) -> None:
-        global ELAB_CLIENT_FOR_HTTP
-        if ELAB_CLIENT_FOR_HTTP is None:
-            ARTIFACT_UPLOADS_TOTAL.labels(status="rejected").inc()
-            self._write_json(503, {"ok": False, "error": "elab client unavailable"})
-            return
-
         try:
             payload = self._read_json_body()
         except ValueError:
@@ -925,95 +1290,66 @@ class MetricsIngestHttpHandler(BaseHTTPRequestHandler):
         if not comment:
             comment = f"fleet-v3 run={run_id} agent={agent_id} artifact={artifact_name} sha256={sha256_value} size={size_hint}"
 
-        existing = find_artifact_upload_in_journal(
-            experiment_id=exp_id,
-            run_id=run_id,
-            agent_id=agent_id,
-            artifact_name=artifact_name,
-            sha256_value=sha256_value,
-            size_bytes=len(raw),
-        )
-        if existing is not None:
-            existing_location = normalize_string(existing.get("location"))
-            existing_upload_id = existing.get("upload_id")
-            existing_artifact_uri = ""
-            if isinstance(existing_upload_id, int):
-                existing_artifact_uri = f"elabftw://experiments/{exp_id}/uploads/{existing_upload_id}"
-            elif existing_location:
-                existing_artifact_uri = existing_location
-            existing_stored_name = normalize_string(existing.get("stored_artifact_name")) or normalize_string(
-                existing.get("artifact_name")
-            )
-            ARTIFACT_UPLOADS_TOTAL.labels(status="deduplicated").inc()
+        if Path(artifact_name).name == "run-summary.json":
+            try:
+                finalized = finalize_server_spooled_run(
+                    experiment_id=exp_id,
+                    run_id=run_id,
+                    agent_id=agent_id,
+                    summary_raw=raw,
+                    summary_mime=mime,
+                    summary_comment=comment,
+                )
+            except Exception as exc:
+                ARTIFACT_UPLOADS_TOTAL.labels(status="error").inc()
+                self._write_json(502, {"ok": False, "error": f"server finalize failed: {exc}"})
+                return
+
+            summary_upload = finalized.get("summary_upload") if isinstance(finalized.get("summary_upload"), dict) else {}
+            ARTIFACT_UPLOADS_TOTAL.labels(status="uploaded").inc()
             self._write_json(
                 202,
                 {
                     "ok": True,
-                    "deduplicated": True,
                     "experiment_id": exp_id,
-                    "upload_id": existing_upload_id,
-                    "artifact_uri": existing_artifact_uri,
-                    "location": existing_location,
-                    "stored_artifact_name": existing_stored_name,
+                    "upload_id": summary_upload.get("upload_id"),
+                    "artifact_uri": normalize_string(summary_upload.get("artifact_uri")),
+                    "location": normalize_string(summary_upload.get("location")),
+                    "stored_artifact_name": normalize_string(summary_upload.get("stored_artifact_name")),
+                    "server_finalized": True,
+                    "bundled_artifacts_count": int(finalized.get("bundled_artifacts_count", 0) or 0),
+                    "raw_artifacts_count": int(finalized.get("raw_artifacts_count", 0) or 0),
+                    "finalized_uploads": finalized.get("uploads", []),
                 },
             )
             return
 
-        upload_filename = build_uploaded_artifact_name(
-            artifact_name=artifact_name,
+        # Non-summary artifacts are staged in Fleet for both in-measurement and
+        # report-replay transfers. The summary artifact is the run-finalization
+        # signal that creates the coarse eLabFTW bundle.
+        meta = store_server_spooled_artifact(
+            experiment_id=exp_id,
             run_id=run_id,
             agent_id=agent_id,
+            artifact_name=artifact_name,
+            raw=raw,
+            mime=mime,
+            comment=comment,
             upload_phase=upload_phase,
             sha256_value=sha256_value,
-            size_bytes=len(raw),
         )
-
-        try:
-            uploaded = ELAB_CLIENT_FOR_HTTP.upload_experiment_artifact(
-                exp_id,
-                upload_filename,
-                raw,
-                comment=comment,
-                mime=mime,
-            )
-        except Exception as exc:
-            ARTIFACT_UPLOADS_TOTAL.labels(status="error").inc()
-            self._write_json(502, {"ok": False, "error": f"upload failed: {exc}"})
-            return
-
-        location = normalize_string(uploaded.get("location"))
-        upload_id = uploaded.get("upload_id")
-        artifact_uri = ""
-        if isinstance(upload_id, int):
-            artifact_uri = f"elabftw://experiments/{exp_id}/uploads/{upload_id}"
-        elif location:
-            artifact_uri = location
-
-        append_artifact_journal(
-            {
-                "received_at": utc_now_iso(),
-                "experiment_id": exp_id,
-                "run_id": run_id,
-                "agent_id": agent_id,
-                "artifact_name": artifact_name,
-                "stored_artifact_name": upload_filename,
-                "upload_phase": upload_phase,
-                "sha256": sha256_value,
-                "size_bytes": len(raw),
-                "upload_id": upload_id,
-                "location": location,
-            }
-        )
-        ARTIFACT_UPLOADS_TOTAL.labels(status="uploaded").inc()
+        ARTIFACT_UPLOADS_TOTAL.labels(status="spooled").inc()
         self._write_json(
             202,
             {
                 "ok": True,
+                "spooled": True,
                 "experiment_id": exp_id,
-                "upload_id": upload_id,
-                "artifact_uri": artifact_uri,
-                "location": location,
-                "stored_artifact_name": upload_filename,
+                "artifact_uri": normalize_string(meta.get("server_spool_uri")),
+                "location": normalize_string(meta.get("server_spool_uri")),
+                "stored_artifact_name": normalize_string(meta.get("stored_spool_name")),
+                "sha256": normalize_string(meta.get("actual_sha256") or meta.get("sha256")),
+                "size_bytes": int(meta.get("size_bytes", len(raw)) or len(raw)),
             },
         )
 

@@ -4,6 +4,15 @@ from .sinks import *  # noqa: F401,F403
 from . import core as core_mod
 from . import sinks as sinks_mod
 
+
+def _raw_command_artifact_stem(cmd_id: str) -> str:
+    token = sanitize_name(cmd_id, "command")
+    lowered = token.lower()
+    if "rf-env" in lowered or ("environment" in lowered and "snapshot" in lowered):
+        return "device-rf-environment-snapshot"
+    return f"command-{token}-raw-output"
+
+
 def main() -> None:
     fleet_host = os.environ.get("FLEET_MANAGER_HOST", "monad-fleet-service")
     fleet_port = int(os.environ.get("FLEET_MANAGER_PORT", "50060"))
@@ -174,7 +183,7 @@ def main() -> None:
     ) -> None:
         token = normalize(artifact_status).lower()
         status_value = fleet_gateway_v2_pb2.UPLOAD_PENDING
-        if token == "uploaded":
+        if token in {"uploaded", "spooled"}:
             status_value = fleet_gateway_v2_pb2.UPLOAD_ACK
         elif token == "failed":
             status_value = fleet_gateway_v2_pb2.UPLOAD_ERROR
@@ -618,7 +627,14 @@ def main() -> None:
                     # Store raw output for arbitrary shell commands too (useful for parsing later).
                     if full:
                         try:
-                            extra_artifacts.append(store.write_text_artifact(run_id, f"cmd-{cmd_id}-output", full))
+                            extra_artifacts.append(
+                                store.write_text_artifact(
+                                    run_id,
+                                    _raw_command_artifact_stem(cmd_id),
+                                    full,
+                                    include_timestamp=False,
+                                )
+                            )
                         except Exception:
                             log.exception("Failed to persist command output artifact for cmd_id=%s", cmd_id)
 
@@ -773,7 +789,8 @@ def main() -> None:
         )
 
         merged_artifacts_count = 0
-        if sinks_mod._merge_text_artifacts_enabled():
+        server_side_bundling = sinks_mod._server_side_artifact_bundling_enabled()
+        if sinks_mod._merge_text_artifacts_enabled() and not server_side_bundling:
             artifacts, merged_artifacts_count = merge_text_artifacts_for_run(run_id, artifacts, store)
 
         try:
@@ -794,13 +811,14 @@ def main() -> None:
                     "command_sink_artifacts_uploaded": command_sink_artifacts_uploaded,
                     "command_sink_artifacts_upload_failed": command_sink_artifacts_upload_failed,
                     "merged_artifacts_count": merged_artifacts_count,
+                    "server_side_artifact_bundling": 1 if server_side_bundling else 0,
                     "run_storage_pressure_hits": run_storage_pressure_hits,
                     "latest_metrics": latest_observed_metrics,
                     "generated_at": now_utc().isoformat().replace("+00:00", "Z"),
                 },
             )
             artifacts.append(summary_artifact)
-            if global_upload_during_measure:
+            if global_upload_during_measure and not server_side_bundling:
                 uploaded_now, failed_now = opportunistic_upload_artifacts_to_elab(
                     run_id,
                     policy.experiment_id,
@@ -830,6 +848,7 @@ def main() -> None:
             "command_sink_artifacts_uploaded": str(command_sink_artifacts_uploaded),
             "command_sink_artifacts_upload_failed": str(command_sink_artifacts_upload_failed),
             "merged_artifacts_count": str(merged_artifacts_count),
+            "server_side_artifact_bundling": "1" if server_side_bundling else "0",
             "run_storage_pressure_hits": str(run_storage_pressure_hits),
             "wifi_ap_total": str(wifi_ap_total),
             "ble_adv_total": str(ble_adv_total),
