@@ -1,0 +1,12 @@
+.git
+.gitignore
+.DS_Store
+.env
+.env.*
+artifacts
+data
+docs
+node_modules
+src/elabftw
+**/__pycache__
+**/*.pyc
