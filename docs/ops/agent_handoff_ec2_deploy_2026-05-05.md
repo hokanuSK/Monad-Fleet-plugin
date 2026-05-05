@@ -71,16 +71,25 @@ VPN access verification:
   - `https://10.200.0.1:9443/login.php` -> `200`
   - `http://10.200.0.1:9108/metrics` -> `200`
   - `10.200.0.1:50060` -> TCP open
-- Remote `.env.aws` was updated to advertise the VPN URL:
-  - `ELAB_SITE_URL=https://10.200.0.1:9443`
-  - `ELAB_SERVER_NAME=10.200.0.1`
+- Devices should keep using VPN-local Fleet endpoints:
+  - `FLEET_MANAGER_HOST=10.200.0.1`
+  - `FLEET_MANAGER_PORT=50060`
+  - `FLEET_ARTIFACT_INGEST_URL=http://10.200.0.1:9108/ingest/v1/artifacts`
 
-Public internet access note:
+Public internet access:
 
-- External curls from the local machine to `34.198.184.128:9443` and `34.198.184.128:9108` timed out.
-- This is acceptable for the intended VPN-only path.
-- Do not open public AWS security-group rules for the Pi run unless explicit public access is required later.
-- If public access is later required, the relevant security group is `sg-09900ca13e1d76374`; the instance role cannot modify it.
+- Grafana is publicly reachable:
+  - `http://34.198.184.128:3000/api/health` -> `200`
+  - Browser URL: `http://34.198.184.128:3000`
+- Remote `.env.aws` was restored to advertise public eLabFTW URLs:
+  - `ELAB_SITE_URL=https://elab-monad-fleet.34.198.184.128.sslip.io:9443`
+  - `ELAB_SERVER_NAME=elab-monad-fleet.34.198.184.128.sslip.io`
+- eLabFTW is healthy on the host and over VPN, but public `9443/tcp` currently times out from the internet.
+- Required AWS security-group change for public eLabFTW:
+  - Add inbound `TCP 9443` to `sg-09900ca13e1d76374`.
+  - Source can be the operator IP for restricted access, or `0.0.0.0/0` for broad temporary public access.
+- Public `443/tcp` is reachable to the instance but no process is listening there. With current rootless Docker and no sudo, binding `443` is not possible (`net.ipv4.ip_unprivileged_port_start=1024`).
+- The EC2 instance role cannot modify security groups (`ec2:AuthorizeSecurityGroupIngress` denied), and local AWS credentials were invalid (`AuthFailure`), so this rule must be added from AWS credentials/console with EC2 security-group permissions.
 
 Rootless Docker persistence:
 
@@ -99,7 +108,7 @@ ssh ladamik@34.198.184.128 'kill "$(cat /tmp/fleetmanager-rootless-docker-keepal
 
 Next steps for the two-Pi experiment:
 
-1. Keep the run on VPN-local addresses.
+1. Keep device traffic on VPN-local addresses.
 2. Re-check VPN access from each Pi:
 
 ```bash
@@ -119,8 +128,10 @@ FLEET_ARTIFACT_INGEST_URL=http://10.200.0.1:9108/ingest/v1/artifacts
 4. Schedule the two-Pi eLabFTW experiment against the new base URL:
 
 ```text
-https://10.200.0.1:9443/api/v2
+https://elab-monad-fleet.34.198.184.128.sslip.io:9443/api/v2
 ```
+
+If creating/scheduling from a host on the VPN, `https://10.200.0.1:9443/api/v2` also works, but public UI links should use the public sslip hostname.
 
 Known real Pi device IDs from previous runs:
 
