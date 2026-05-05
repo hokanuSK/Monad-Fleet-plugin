@@ -53,25 +53,34 @@ Expected running services:
 Internal verification passed from the EC2 host:
 
 - `https://127.0.0.1:9443/login.php` -> `200`
+- `https://10.200.0.1:9443/login.php` -> serving over WireGuard/VPN
 - `https://elab-monad-fleet.34.198.184.128.sslip.io:9443/login.php` with `--resolve ...:127.0.0.1` -> `200`
 - `https://127.0.0.1:9443/api/v2/experiments` with the remote API key -> `200`
 - `http://127.0.0.1:9108/metrics` -> `200`
 - `http://127.0.0.1:3000/api/health` -> `200`
 - `http://127.0.0.1:9009/ready` -> `200`
 
-Open blocker for external access:
+VPN access verification:
+
+- EC2 WireGuard interface: `wg0 = 10.200.0.1/24`.
+- `monad-01` (`10.200.0.10`) verified:
+  - `https://10.200.0.1:9443/login.php` -> `200`
+  - `http://10.200.0.1:9108/metrics` -> `200`
+  - `10.200.0.1:50060` -> TCP open
+- `monad-02` (`10.200.0.11`) verified:
+  - `https://10.200.0.1:9443/login.php` -> `200`
+  - `http://10.200.0.1:9108/metrics` -> `200`
+  - `10.200.0.1:50060` -> TCP open
+- Remote `.env.aws` was updated to advertise the VPN URL:
+  - `ELAB_SITE_URL=https://10.200.0.1:9443`
+  - `ELAB_SERVER_NAME=10.200.0.1`
+
+Public internet access note:
 
 - External curls from the local machine to `34.198.184.128:9443` and `34.198.184.128:9108` timed out.
-- The EC2 host is listening on `0.0.0.0:9443`, `0.0.0.0:50060`, `0.0.0.0:9108`, `0.0.0.0:3000`, and `0.0.0.0:9009`, so this is an AWS security group issue.
-- Local AWS credentials are invalid (`AuthFailure`).
-- The EC2 instance role cannot modify security groups (`ec2:AuthorizeSecurityGroupIngress` denied).
-
-Required AWS security group rules:
-
-- Add inbound `TCP 9443` to `sg-09900ca13e1d76374` for eLabFTW web/API access.
-- Add inbound `TCP 50060` to `sg-09900ca13e1d76374` for the real Pi fleet gRPC agents.
-- Prefer restricting sources to the operator/Pi public IPs. For a quick experiment, `0.0.0.0/0` works but exposes the service broadly.
-- Keep `3000`, `9108`, and `9009` private unless remote Grafana/metrics access is explicitly needed.
+- This is acceptable for the intended VPN-only path.
+- Do not open public AWS security-group rules for the Pi run unless explicit public access is required later.
+- If public access is later required, the relevant security group is `sg-09900ca13e1d76374`; the instance role cannot modify it.
 
 Rootless Docker persistence:
 
@@ -90,24 +99,27 @@ ssh ladamik@34.198.184.128 'kill "$(cat /tmp/fleetmanager-rootless-docker-keepal
 
 Next steps for the two-Pi experiment:
 
-1. Open inbound `9443/tcp` and `50060/tcp` in AWS security group `sg-09900ca13e1d76374`.
-2. Re-check external access:
+1. Keep the run on VPN-local addresses.
+2. Re-check VPN access from each Pi:
 
 ```bash
-curl -k -I --max-time 15 https://elab-monad-fleet.34.198.184.128.sslip.io:9443/login.php
+curl -k -I --max-time 15 https://10.200.0.1:9443/login.php
+curl -sS --max-time 10 http://10.200.0.1:9108/metrics | head
+timeout 3 bash -lc '</dev/tcp/10.200.0.1/50060' && echo grpc=open
 ```
 
 3. Configure the Pi agents to use:
 
 ```text
-FLEET_MANAGER_HOST=34.198.184.128
+FLEET_MANAGER_HOST=10.200.0.1
 FLEET_MANAGER_PORT=50060
+FLEET_ARTIFACT_INGEST_URL=http://10.200.0.1:9108/ingest/v1/artifacts
 ```
 
 4. Schedule the two-Pi eLabFTW experiment against the new base URL:
 
 ```text
-https://elab-monad-fleet.34.198.184.128.sslip.io:9443/api/v2
+https://10.200.0.1:9443/api/v2
 ```
 
 Known real Pi device IDs from previous runs:
