@@ -152,6 +152,24 @@ services:
     networks:
       - elabftw-net
 
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    restart: unless-stopped
+    depends_on:
+      monad-fleet-service:
+        condition: service_started
+      mimir:
+        condition: service_started
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./infrastructure/observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - elabftw-net
+
   grafana:
     image: grafana/grafana-oss:11.1.4
     restart: unless-stopped
@@ -181,6 +199,7 @@ volumes:
   web-uploads:
   fleet-data:
   mimir-data:
+  prometheus-data:
   grafana-data:
   caddy-data:
   caddy-config:

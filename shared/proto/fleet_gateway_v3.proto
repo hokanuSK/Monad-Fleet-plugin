@@ -16,6 +16,8 @@ service FleetManager {
   rpc ReportUploadStatus(ReportUploadStatusRequest) returns (StatusAck);
   // MAINTENANCE runtime status (per-artifact upload)
   rpc ReportArtifactUploadStatus(ReportArtifactUploadStatusRequest) returns (StatusAck);
+  // MAINTENANCE artifact body upload. The first stream message must be the header.
+  rpc UploadArtifact(stream UploadArtifactChunk) returns (UploadArtifactResponse);
 
   // REPORT
   rpc PublishReport(PublishReportRequest) returns (PublishReportResponse);
@@ -190,6 +192,44 @@ message ReportArtifactUploadStatusRequest {
   UploadStatus status = 10;
   string message = 11;
   map<string, string> metrics = 12;
+}
+
+message ArtifactUploadHeader {
+  string agent_id = 1;
+  string run_id = 2;
+  string experiment_id = 3;
+  string policy_id = 4;
+  string artifact_name = 5;
+  uint64 size_bytes = 6;
+  string sha256 = 7;
+  string mime = 8;
+  string upload_phase = 9;
+  string comment = 10;
+}
+
+message UploadArtifactChunk {
+  oneof payload {
+    ArtifactUploadHeader header = 1;
+    bytes content = 2;
+  }
+}
+
+message UploadArtifactResponse {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    ACCEPTED = 1;
+    REJECTED = 2;
+  }
+  Status status = 1;
+  string reason = 2;
+  string artifact_uri = 3;
+  string location = 4;
+  string stored_artifact_name = 5;
+  string sha256 = 6;
+  uint64 size_bytes = 7;
+  bool server_finalized = 8;
+  uint32 bundled_artifacts_count = 9;
+  uint32 raw_artifacts_count = 10;
 }
 
 message PublishReportRequest {

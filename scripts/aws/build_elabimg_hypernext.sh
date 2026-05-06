@@ -17,18 +17,37 @@ if [[ -f "$ENV_FILE" ]]; then
   set +a
 fi
 
-if ! command -v git >/dev/null 2>&1; then
-  echo "git not found in PATH" >&2
-  exit 1
-fi
-
 if ! command -v docker >/dev/null 2>&1; then
   echo "docker not found in PATH" >&2
   exit 1
 fi
 
 rm -rf "$WORK_DIR"
-git clone --depth 1 "$ELABIMG_REPO" "$WORK_DIR"
+if command -v git >/dev/null 2>&1; then
+  git clone --depth 1 "$ELABIMG_REPO" "$WORK_DIR"
+else
+  if ! command -v curl >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1; then
+    echo "git not found, and curl+tar fallback is unavailable" >&2
+    exit 1
+  fi
+  tmp_archive="$(mktemp -t elabimg.XXXXXX.tar.gz)"
+  trap 'rm -f "$tmp_archive"' EXIT
+  case "$ELABIMG_REPO" in
+    https://github.com/*.git)
+      archive_url="${ELABIMG_REPO%.git}/archive/refs/heads/master.tar.gz"
+      ;;
+    https://github.com/*)
+      archive_url="${ELABIMG_REPO%/}/archive/refs/heads/master.tar.gz"
+      ;;
+    *)
+      echo "git not found and ELABIMG_REPO is not a supported GitHub URL: $ELABIMG_REPO" >&2
+      exit 1
+      ;;
+  esac
+  mkdir -p "$WORK_DIR"
+  curl -fsSL "$archive_url" -o "$tmp_archive"
+  tar -xzf "$tmp_archive" -C "$WORK_DIR" --strip-components=1
+fi
 
 dockerfile="$WORK_DIR/Dockerfile"
 sed -i.bak \
@@ -123,7 +142,9 @@ PHP
 # scripts, so BuildInfo.php is never created — we append the generation step here.
 cat >> "$dockerfile" << 'DOCKERFILE_APPEND'
 # Generate BuildInfo.php used by TwigTrait for asset cache-busting (hypernext branch requirement)
-RUN php -d open_basedir='' /usr/local/bin/composer dump-autoload -o --working-dir=/elabftw 2>&1 | tail -1
+RUN ELABFTW_VERSION="$ELABFTW_VERSION" php -d open_basedir='' /elabftw/src/tools/mkbuildinfo.php \
+  && php -d open_basedir='' /usr/local/bin/composer dump-autoload -o --working-dir=/elabftw 2>&1 | tail -1 \
+  && test -f /elabftw/src/Elabftw/BuildInfo.php
 # Patch schema version: scheduler-json-editor-fix branch has REQUIRED_SCHEMA=187 but DB is at 208
 RUN sed -i 's/REQUIRED_SCHEMA = 187/REQUIRED_SCHEMA = 208/' /elabftw/src/Elabftw/Update.php
 COPY patch_scheduler_datetime.php /tmp/patch_scheduler_datetime.php

@@ -959,6 +959,142 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
             log.exception("ReportArtifactUploadStatus(v2) failed for agent_id=%s run_id=%s", agent_id, run_id)
             context.abort(grpc.StatusCode.INTERNAL, f"ReportArtifactUploadStatus(v2) failed: {exc}")
 
+    def UploadArtifact(self, request_iterator, context):
+        try:
+            first = next(request_iterator)
+        except StopIteration:
+            ARTIFACT_UPLOADS_TOTAL.labels(status="rejected").inc()
+            return fleet_gateway_v2_pb2.UploadArtifactResponse(
+                status=fleet_gateway_v2_pb2.UploadArtifactResponse.REJECTED,
+                reason="empty upload stream",
+            )
+
+        if first.WhichOneof("payload") != "header":
+            ARTIFACT_UPLOADS_TOTAL.labels(status="rejected").inc()
+            return fleet_gateway_v2_pb2.UploadArtifactResponse(
+                status=fleet_gateway_v2_pb2.UploadArtifactResponse.REJECTED,
+                reason="first upload stream message must be header",
+            )
+
+        header = first.header
+        exp_id = parse_experiment_numeric_id(header.experiment_id)
+        run_id = normalize_string(header.run_id)
+        agent_id = normalize_device_id(header.agent_id)
+        artifact_name = normalize_string(header.artifact_name)
+        if exp_id is None or not run_id or not agent_id or not artifact_name:
+            ARTIFACT_UPLOADS_TOTAL.labels(status="rejected").inc()
+            return fleet_gateway_v2_pb2.UploadArtifactResponse(
+                status=fleet_gateway_v2_pb2.UploadArtifactResponse.REJECTED,
+                reason="experiment_id, run_id, agent_id, and artifact_name are required",
+            )
+
+        max_bytes = max(1024, int(self._cfg.get("artifact_max_bytes", 20 * 1024 * 1024)))
+        chunks = []
+        size_bytes = 0
+        for msg in request_iterator:
+            payload_kind = msg.WhichOneof("payload")
+            if payload_kind == "header":
+                ARTIFACT_UPLOADS_TOTAL.labels(status="rejected").inc()
+                return fleet_gateway_v2_pb2.UploadArtifactResponse(
+                    status=fleet_gateway_v2_pb2.UploadArtifactResponse.REJECTED,
+                    reason="duplicate upload header",
+                )
+            if payload_kind != "content":
+                continue
+            raw_chunk = bytes(msg.content)
+            size_bytes += len(raw_chunk)
+            if size_bytes > max_bytes:
+                ARTIFACT_UPLOADS_TOTAL.labels(status="rejected").inc()
+                return fleet_gateway_v2_pb2.UploadArtifactResponse(
+                    status=fleet_gateway_v2_pb2.UploadArtifactResponse.REJECTED,
+                    reason=f"artifact too large ({size_bytes} > {max_bytes})",
+                )
+            chunks.append(raw_chunk)
+
+        raw = b"".join(chunks)
+        expected_size = int(header.size_bytes or 0)
+        if expected_size > 0 and expected_size != len(raw):
+            ARTIFACT_UPLOADS_TOTAL.labels(status="rejected").inc()
+            return fleet_gateway_v2_pb2.UploadArtifactResponse(
+                status=fleet_gateway_v2_pb2.UploadArtifactResponse.REJECTED,
+                reason=f"size mismatch ({len(raw)} != {expected_size})",
+            )
+
+        actual_sha256 = hashlib.sha256(raw).hexdigest()
+        expected_sha256 = normalize_string(header.sha256)
+        if expected_sha256 and expected_sha256 != actual_sha256:
+            ARTIFACT_UPLOADS_TOTAL.labels(status="rejected").inc()
+            return fleet_gateway_v2_pb2.UploadArtifactResponse(
+                status=fleet_gateway_v2_pb2.UploadArtifactResponse.REJECTED,
+                reason="sha256 mismatch",
+                sha256=actual_sha256,
+                size_bytes=len(raw),
+            )
+
+        mime = normalize_string(header.mime) or "application/octet-stream"
+        upload_phase = normalize_string(header.upload_phase) or "grpc_upload"
+        comment = normalize_string(header.comment)
+        if not comment:
+            comment = (
+                f"fleet-v3 run={run_id} agent={agent_id} artifact={artifact_name} "
+                f"sha256={actual_sha256} size={len(raw)}"
+            )
+
+        if Path(artifact_name).name == "run-summary.json":
+            try:
+                finalized = finalize_server_spooled_run(
+                    experiment_id=exp_id,
+                    run_id=run_id,
+                    agent_id=agent_id,
+                    summary_raw=raw,
+                    summary_mime=mime,
+                    summary_comment=comment,
+                )
+            except Exception as exc:
+                ARTIFACT_UPLOADS_TOTAL.labels(status="error").inc()
+                return fleet_gateway_v2_pb2.UploadArtifactResponse(
+                    status=fleet_gateway_v2_pb2.UploadArtifactResponse.REJECTED,
+                    reason=f"server finalize failed: {exc}",
+                )
+
+            summary_upload = finalized.get("summary_upload") if isinstance(finalized.get("summary_upload"), dict) else {}
+            ARTIFACT_UPLOADS_TOTAL.labels(status="uploaded").inc()
+            return fleet_gateway_v2_pb2.UploadArtifactResponse(
+                status=fleet_gateway_v2_pb2.UploadArtifactResponse.ACCEPTED,
+                reason="artifact uploaded and run finalized",
+                artifact_uri=normalize_string(summary_upload.get("artifact_uri")),
+                location=normalize_string(summary_upload.get("location")),
+                stored_artifact_name=normalize_string(summary_upload.get("stored_artifact_name")),
+                sha256=actual_sha256,
+                size_bytes=len(raw),
+                server_finalized=True,
+                bundled_artifacts_count=int(finalized.get("bundled_artifacts_count", 0) or 0),
+                raw_artifacts_count=int(finalized.get("raw_artifacts_count", 0) or 0),
+            )
+
+        meta = store_server_spooled_artifact(
+            experiment_id=exp_id,
+            run_id=run_id,
+            agent_id=agent_id,
+            artifact_name=artifact_name,
+            raw=raw,
+            mime=mime,
+            comment=comment,
+            upload_phase=upload_phase,
+            sha256_value=expected_sha256,
+        )
+        ARTIFACT_UPLOADS_TOTAL.labels(status="spooled").inc()
+        spool_uri = normalize_string(meta.get("server_spool_uri"))
+        return fleet_gateway_v2_pb2.UploadArtifactResponse(
+            status=fleet_gateway_v2_pb2.UploadArtifactResponse.ACCEPTED,
+            reason="artifact spooled",
+            artifact_uri=spool_uri,
+            location=spool_uri,
+            stored_artifact_name=normalize_string(meta.get("stored_spool_name")),
+            sha256=normalize_string(meta.get("actual_sha256") or meta.get("sha256")),
+            size_bytes=int(meta.get("size_bytes", len(raw)) or len(raw)),
+        )
+
     def AckPrepared(self, request, context):
         agent_id = normalize_device_id(request.agent_id)
         preparation_id = normalize_string(request.preparation_id)
