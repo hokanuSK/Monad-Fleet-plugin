@@ -34,6 +34,8 @@ def main() -> None:
     sent_retention_days = int(os.environ.get("SENT_RETENTION_DAYS", "14"))
     global_upload_during_measure = parse_bool(os.environ.get("ARTIFACT_UPLOAD_DURING_MEASURE"), False)
     global_artifact_upload_target = sinks_mod._artifact_upload_target(os.environ.get("ARTIFACT_UPLOAD_TARGET"))
+    enable_command_status_reports = parse_bool(os.environ.get("ENABLE_COMMAND_STATUS_REPORTS"), True)
+    enable_upload_status_reports = parse_bool(os.environ.get("ENABLE_UPLOAD_STATUS_REPORTS"), True)
     run_artifact_soft_limit_bytes = max(0, parse_int(os.environ.get("RUN_ARTIFACT_SOFT_LIMIT_BYTES"), 0))
     separate_measure_and_report = parse_bool(os.environ.get("SEPARATE_MEASURE_AND_REPORT"), False)
     restart_control_plane_before_send = parse_bool(
@@ -93,6 +95,8 @@ def main() -> None:
         exit_code: int = 0,
         measure_type: str = "",
     ) -> None:
+        if not enable_command_status_reports:
+            return
         payload_metrics = {
             normalize(k): normalize(v)
             for k, v in (metrics or {}).items()
@@ -136,6 +140,8 @@ def main() -> None:
             )
 
     def report_upload_status_from_report(run_id: str, report: fleet_gateway_v2_pb2.Report, metrics_state: str, reason: str) -> None:
+        if not enable_upload_status_reports:
+            return
         token = normalize(metrics_state).upper()
         status_value = fleet_gateway_v2_pb2.UPLOAD_PENDING
         if token == "UPLOADED":
@@ -181,6 +187,8 @@ def main() -> None:
         artifact_status: str,
         reason: str,
     ) -> None:
+        if not enable_upload_status_reports:
+            return
         token = normalize(artifact_status).lower()
         status_value = fleet_gateway_v2_pb2.UPLOAD_PENDING
         if token in {"uploaded", "spooled"}:

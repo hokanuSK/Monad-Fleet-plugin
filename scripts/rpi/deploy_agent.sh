@@ -7,6 +7,9 @@ PI_HOST="${PI_HOST:-${1:-monad-rpi5.local}}"
 PI_USER="${PI_USER:-admin}"
 PI_DIR="${PI_DIR:-/home/${PI_USER}/monad-fleet-agent}"
 SSH_IDENTITY_FILE="${SSH_IDENTITY_FILE:-}"
+SSH_PROXY_JUMP="${SSH_PROXY_JUMP:-}"
+SSH_USER_KNOWN_HOSTS_FILE="${SSH_USER_KNOWN_HOSTS_FILE:-}"
+SSH_STRICT_HOST_KEY_CHECKING="${SSH_STRICT_HOST_KEY_CHECKING:-accept-new}"
 USE_DEFAULT_SSH_KEY="${USE_DEFAULT_SSH_KEY:-false}"
 DEFAULT_SSH_KEY="${ROOT_DIR}/scripts/rpi/keys/monad_rpi5_ed25519"
 if [[ -z "${SSH_IDENTITY_FILE}" && "${USE_DEFAULT_SSH_KEY}" == "true" && -f "${DEFAULT_SSH_KEY}" ]]; then
@@ -15,9 +18,21 @@ fi
 
 SSH_ARGS=()
 SCP_ARGS=()
+if [[ -n "${SSH_STRICT_HOST_KEY_CHECKING}" ]]; then
+  SSH_ARGS+=(-o "StrictHostKeyChecking=${SSH_STRICT_HOST_KEY_CHECKING}")
+  SCP_ARGS+=(-o "StrictHostKeyChecking=${SSH_STRICT_HOST_KEY_CHECKING}")
+fi
+if [[ -n "${SSH_USER_KNOWN_HOSTS_FILE}" ]]; then
+  SSH_ARGS+=(-o "UserKnownHostsFile=${SSH_USER_KNOWN_HOSTS_FILE}")
+  SCP_ARGS+=(-o "UserKnownHostsFile=${SSH_USER_KNOWN_HOSTS_FILE}")
+fi
 if [[ -n "${SSH_IDENTITY_FILE}" ]]; then
   SSH_ARGS+=(-i "${SSH_IDENTITY_FILE}" -o IdentitiesOnly=yes)
   SCP_ARGS+=(-i "${SSH_IDENTITY_FILE}" -o IdentitiesOnly=yes)
+fi
+if [[ -n "${SSH_PROXY_JUMP}" ]]; then
+  SSH_ARGS+=(-J "${SSH_PROXY_JUMP}")
+  SCP_ARGS+=(-J "${SSH_PROXY_JUMP}")
 fi
 
 run_ssh() {
