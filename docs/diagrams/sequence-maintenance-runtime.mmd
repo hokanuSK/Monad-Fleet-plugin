@@ -32,24 +32,33 @@ sequenceDiagram
                     Uploader->>LocalTSDB: Read pending metrics/logs batch
                     Uploader->>Mimir: Upload pending metrics + logs
                     Mimir-->>Uploader: metrics/logs ACK/err
-                    Uploader->>Fleet: Report metrics/logs upload status
+                    Uploader->>Fleet: gRPC ReportUploadStatus(metrics/logs ACK/err)
                     Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>metrics/logs upload state
                 else no pending metrics/logs
                     Uploader->>Uploader: Skip metrics/logs upload
                 end
                 alt pending artifacts
-                    Uploader->>RunStore: Read next artifact
-                    Uploader->>Fleet: Upload artifact from local spool
-                    Fleet-->>Uploader: artifact ACK/err
-                    Uploader->>Fleet: Report artifact upload status
-                    Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>artifacts state + last uploaded ptr
+                    Uploader->>RunStore: Read next artifact bytes + metadata
+                    Uploader->>Fleet: gRPC UploadArtifact(stream header + chunks)
+                    Fleet->>Fleet: Stage artifact in server spool
+                    alt artifact is run-summary.json
+                        Fleet->>Fleet: Build wireless-run-evidence-bundle.tar.gz
+                        Fleet->>ELab: POST /experiments/{id}/uploads<br/>bundle + run-summary.json
+                        Fleet-->>Uploader: gRPC UploadArtifactResponse(ACCEPTED,<br/>server_finalized=true)
+                    else normal artifact
+                        Fleet-->>Uploader: gRPC UploadArtifactResponse(ACCEPTED,<br/>server_finalized=false)
+                    end
+                    opt upload status events enabled
+                        Uploader->>Fleet: gRPC ReportArtifactUploadStatus(ACK/err)
+                        Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>artifacts state + last uploaded ptr
+                    end
                 else no pending artifacts
                     Uploader->>Uploader: Skip artifacts upload
                 end
-                Uploader->>Fleet: PublishReport(report with run_id)
+                Uploader->>Fleet: gRPC PublishReport(report with run_id)
                 Fleet->>Fleet: Map upload/report status
                 Fleet->>ELab: PATCH /items/{id} metadata:<br/>last report upload state + run_id
-                Fleet-->>Uploader: report upload ACK/err
+                Fleet-->>Uploader: gRPC PublishReportResponse(ACK/err)
                 alt report upload ACK
                     Uploader->>RunStore: Mark run local state = sent
                 else report upload err
