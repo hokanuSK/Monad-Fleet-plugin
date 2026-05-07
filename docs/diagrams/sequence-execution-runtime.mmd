@@ -23,14 +23,14 @@ sequenceDiagram
             alt command = SYNC
                 rect rgb(255,228,230)
                     CmdExec->>RunStore: Stage maintenance window + slot/jitter policy
-                    Agent->>Fleet: ReportCommandStatus(SYNC STARTED/FINISHED)
+                    Agent->>Fleet: gRPC ReportCommandStatus(SYNC STARTED/FINISHED)
                     Fleet->>ELab: PATCH /event/{run_event_id} metadata: SYNC window/slot policy state
                 end
             else command = OBSERVE
                 rect rgb(254,249,195)
                     CmdExec->>CmdExec: Apply OBSERVE sinks + remote_write settings
                     CmdExec->>Mimir: Probe Mimir metrics path
-                    Agent->>Fleet: ReportCommandStatus(OBSERVE STARTED/FINISHED/FAILED)
+                    Agent->>Fleet: gRPC ReportCommandStatus(OBSERVE STARTED/FINISHED/FAILED)
                     Fleet->>ELab: PATCH /event/{run_event_id} metadata: command state + last exit
                 end
             else command = WIFI_SCAN
@@ -38,7 +38,7 @@ sequenceDiagram
                     CmdExec->>CmdExec: Run WIFI_SCAN with RF setup env
                     CmdExec->>RunStore: Persist WiFi outputs + RF context metrics
                     CmdExec-)Mimir: Forward numeric metrics through configured sink path
-                    Agent->>Fleet: ReportCommandStatus(WIFI_SCAN STARTED/FINISHED/FAILED)
+                    Agent->>Fleet: gRPC ReportCommandStatus(WIFI_SCAN STARTED/FINISHED/FAILED)
                     Fleet->>ELab: PATCH /event/{run_event_id} metadata: WIFI_SCAN command state
                 end
             else command = BLE_SCAN
@@ -46,7 +46,7 @@ sequenceDiagram
                     CmdExec->>CmdExec: Run BLE_SCAN with RF setup env
                     CmdExec->>RunStore: Persist BLE outputs + RF context metrics
                     CmdExec-)Mimir: Forward numeric metrics through configured sink path
-                    Agent->>Fleet: ReportCommandStatus(BLE_SCAN STARTED/FINISHED/FAILED)
+                    Agent->>Fleet: gRPC ReportCommandStatus(BLE_SCAN STARTED/FINISHED/FAILED)
                     Fleet->>ELab: PATCH /event/{run_event_id} metadata: command state + last exit
                 end
             else command = CAPTURE_CSI
@@ -54,13 +54,13 @@ sequenceDiagram
                     CmdExec->>CmdExec: Run CAPTURE_CSI with RF setup env
                     CmdExec->>RunStore: Persist CSI outputs/evidence + RF context metrics
                     CmdExec-)Mimir: Forward numeric metrics through configured sink path
-                    Agent->>Fleet: ReportCommandStatus(CAPTURE_CSI STARTED/FINISHED/FAILED)
+                    Agent->>Fleet: gRPC ReportCommandStatus(CAPTURE_CSI STARTED/FINISHED/FAILED)
                     Fleet->>ELab: PATCH /event/{run_event_id} metadata: CAPTURE_CSI state + evidence status
                 end
             else command = SHELL
                 rect rgb(226,232,240)
                     CmdExec->>RunStore: Record stdout/stderr/exit_code
-                    Agent->>Fleet: ReportCommandStatus(SHELL STARTED/FINISHED/FAILED)
+                    Agent->>Fleet: gRPC ReportCommandStatus(SHELL STARTED/FINISHED/FAILED)
                     Fleet->>ELab: PATCH /event/{run_event_id} metadata: command state + last exit
                 end
             end
