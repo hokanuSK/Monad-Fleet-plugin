@@ -102,6 +102,8 @@ INGEST_JOURNAL_PATH: Path | None = None
 ARTIFACT_INGEST_JOURNAL_PATH: Path | None = None
 ARTIFACT_SERVER_SPOOL_DIR: Path | None = None
 INGEST_JOURNAL_LOCK = threading.Lock()
+DEVICE_DISPLAY_NAME_LOCK = threading.Lock()
+DEVICE_DISPLAY_NAME_BY_AGENT_ID: dict[str, str] = {}
 ELAB_CLIENT_FOR_HTTP: Any = None
 METRICS_EXCLUDE_PREFIXES: tuple[str, ...] = ()
 
@@ -163,6 +165,32 @@ def safe_metric_token(value: Any, default: str = "unknown") -> str:
     text = re.sub(r"[^a-z0-9_]", "_", text)
     text = re.sub(r"_+", "_", text).strip("_")
     return text or default
+
+
+def safe_artifact_token(value: Any, default: str = "unknown") -> str:
+    text = normalize_string(value).lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    text = re.sub(r"-+", "-", text).strip("-")
+    return text or default
+
+
+def record_device_display_name(agent_id: Any, hostname: Any) -> None:
+    token = normalize_device_id(agent_id)
+    display = safe_artifact_token(hostname, "")
+    if not token or not display:
+        return
+    with DEVICE_DISPLAY_NAME_LOCK:
+        DEVICE_DISPLAY_NAME_BY_AGENT_ID[token] = display
+
+
+def device_display_token(agent_id: Any) -> str:
+    token = normalize_device_id(agent_id)
+    if token:
+        with DEVICE_DISPLAY_NAME_LOCK:
+            display = DEVICE_DISPLAY_NAME_BY_AGENT_ID.get(token)
+        if display:
+            return display
+    return safe_artifact_token(token, "agent")
 
 
 def to_float(value: Any) -> float | None:
@@ -291,8 +319,7 @@ def build_uploaded_artifact_name(
     run_raw = re.sub(r"[^a-zA-Z0-9]", "", normalize_string(run_id))
     run_short = (run_raw[:8] if run_raw else "run")
 
-    agent_raw = normalize_device_id(agent_id).lower()
-    agent_token = re.sub(r"[^a-z0-9]+", "-", agent_raw).strip("-") or "agent"
+    agent_token = device_display_token(agent_id)
 
     p = Path(original)
     lower_name = p.name.lower()
