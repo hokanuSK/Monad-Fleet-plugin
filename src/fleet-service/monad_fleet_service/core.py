@@ -278,6 +278,7 @@ def find_artifact_upload_in_journal(
 
 def build_uploaded_artifact_name(
     *,
+    experiment_id: int,
     artifact_name: str,
     run_id: str,
     agent_id: str,
@@ -286,13 +287,12 @@ def build_uploaded_artifact_name(
     size_bytes: int,
 ) -> str:
     original = normalize_string(artifact_name) or "artifact.bin"
-    phase_token = safe_metric_token(upload_phase, "report").replace("_", "-")
 
     run_raw = re.sub(r"[^a-zA-Z0-9]", "", normalize_string(run_id))
     run_short = (run_raw[:8] if run_raw else "run")
 
-    agent_raw = re.sub(r"[^a-zA-Z0-9]", "", normalize_device_id(agent_id))
-    agent_short = (agent_raw[-6:] if agent_raw else "agent")
+    agent_raw = normalize_device_id(agent_id).lower()
+    agent_token = re.sub(r"[^a-z0-9]+", "-", agent_raw).strip("-") or "agent"
 
     p = Path(original)
     lower_name = p.name.lower()
@@ -304,11 +304,16 @@ def build_uploaded_artifact_name(
     ext = compound_ext or (p.suffix if p.suffix and len(p.suffix) <= 12 else "")
     stem = p.name[: -len(ext)] if ext else p.name
     stem_safe = re.sub(r"[^a-zA-Z0-9._-]+", "-", stem).strip("-_.") or "artifact"
+    stem_kind = stem_safe.lower()
+    artifact_kind = {
+        "run-summary": "summary",
+        "wireless-run-evidence-bundle": "wireless-evidence",
+    }.get(stem_kind, stem_safe)
 
     sha_token = normalize_string(sha256_value).lower()
-    content_tag = sha_token[:8] if sha_token else f"sz{max(0, int(size_bytes))}"
+    content_tag = f"sha-{sha_token[:8]}" if sha_token else f"sz-{max(0, int(size_bytes))}"
 
-    base = f"run-{run_short}__{phase_token}__ag-{agent_short}__{stem_safe}__{content_tag}"
+    base = f"exp-{int(experiment_id):04d}__dev-{agent_token}__run-{run_short}__{artifact_kind}__{content_tag}"
     max_base_len = 180 - len(ext)
     if len(base) > max_base_len:
         base = base[:max_base_len].rstrip("-_.")
@@ -497,6 +502,7 @@ def upload_raw_artifact_to_elab(
         }
 
     upload_filename = build_uploaded_artifact_name(
+        experiment_id=experiment_id,
         artifact_name=artifact_name,
         run_id=run_id,
         agent_id=agent_id,
