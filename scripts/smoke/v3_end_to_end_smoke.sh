@@ -12,7 +12,7 @@ MAX_SYNC_CYCLES="${MAX_SYNC_CYCLES:-1}"
 RESET_STATE="${RESET_STATE:-true}"
 RESET_METRICS="${RESET_METRICS:-true}"
 RESET_GRAFANA="${RESET_GRAFANA:-false}"
-VERIFY_MIMIR="${VERIFY_MIMIR:-false}"
+VERIFY_MIMIR="${VERIFY_MIMIR:-true}"
 CLEANUP="${CLEANUP:-false}"
 DO_BUILD="${DO_BUILD:-false}"
 SKIP_CORE_SERVICES_RESTART="${SKIP_CORE_SERVICES_RESTART:-false}"
@@ -97,8 +97,9 @@ UPLOAD_SLOT_JITTER_S="${UPLOAD_SLOT_JITTER_S:-0}"
 PROM_REMOTE_WRITE_ON_CMD="${PROM_REMOTE_WRITE_ON_CMD:-}"
 PROM_REMOTE_WRITE_OFF_CMD="${PROM_REMOTE_WRITE_OFF_CMD:-}"
 PROM_REMOTE_WRITE_CMD_TIMEOUT_S="${PROM_REMOTE_WRITE_CMD_TIMEOUT_S:-12}"
+DEFAULT_METRICS_SINKS="${DEFAULT_METRICS_SINKS:-fleet_http}"
 DATA_SINKS="${DATA_SINKS:-}"
-METRICS_SINKS="${METRICS_SINKS:-}"
+METRICS_SINKS="${METRICS_SINKS:-fleet_http}"
 EVENT_SINKS="${EVENT_SINKS:-}"
 ARTIFACT_SINKS="${ARTIFACT_SINKS:-}"
 WEBHOOK_URL="${WEBHOOK_URL:-}"
@@ -563,12 +564,12 @@ else
   else
     echo "Skipping build (DO_BUILD=false)"
   fi
-  docker compose up -d --force-recreate --no-build monad-fleet-service model-device mimir grafana
+  docker compose up -d --force-recreate --no-build monad-fleet-service model-device mimir prometheus grafana
 fi
 
 SMOKE_LAST_STEP="2_reset_fleet_state"
 if [[ "${RESET_STATE}" == "true" ]]; then
-  echo "[2/8] Reset Fleet service state (dedupe + ingest journal) only"
+  echo "[2/8] Reset Fleet service state only"
   docker compose exec -T monad-fleet-service sh -lc "rm -f /data/state.json /data/ingest-metrics.ndjson || true"
   docker compose restart monad-fleet-service >/dev/null
 else
@@ -577,7 +578,13 @@ fi
 
 SMOKE_LAST_STEP="3_reset_metrics"
 if [[ "${RESET_METRICS}" == "true" ]]; then
-  echo "[3/8] Reset Mimir data only (does not touch eLabFTW/MySQL)"
+  echo "[3/8] Reset Prometheus + Mimir data (does not touch eLabFTW/MySQL)"
+  if docker compose ps --services --status running | grep -qx "prometheus"; then
+    docker compose exec -T prometheus sh -lc "rm -rf /prometheus/* || true"
+    docker compose restart prometheus >/dev/null
+  else
+    echo "Prometheus is not running; skipping Prometheus reset."
+  fi
   if docker compose ps --services --status running | grep -qx "mimir"; then
     docker compose exec -T mimir sh -lc "rm -rf /data/* || true"
     docker compose restart mimir >/dev/null

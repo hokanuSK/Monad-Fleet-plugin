@@ -28,14 +28,14 @@ sequenceDiagram
             alt no pending upload data
                 Uploader->>Uploader: No pending upload data,<br/>skip this maintenance tick
             else pending upload data
-                alt pending metrics/logs
-                    Uploader->>LocalTSDB: Read pending metrics/logs batch
-                    Uploader->>Mimir: Upload pending metrics + logs
-                    Mimir-->>Uploader: metrics/logs ACK/err
-                    Uploader->>Fleet: gRPC ReportUploadStatus(metrics/logs ACK/err)
-                    Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>metrics/logs upload state
-                else no pending metrics/logs
-                    Uploader->>Uploader: Skip metrics/logs upload
+                alt pending metrics
+                    Uploader->>LocalTSDB: Read pending metrics batch
+                    Uploader->>Mimir: Upload pending metrics
+                    Mimir-->>Uploader: metrics ACK/err
+                    Uploader->>Fleet: gRPC ReportUploadStatus(metrics ACK/err)
+                    Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>metrics upload state
+                else no pending metrics
+                    Uploader->>Uploader: Skip metrics upload
                 end
                 alt pending artifacts
                     Uploader->>RunStore: Read next artifact bytes + metadata

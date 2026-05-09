@@ -395,7 +395,7 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
 
     def _upload_payload_kind_text(self, kind_value: int) -> str:
         mapping = {
-            int(fleet_gateway_v2_pb2.METRICS_LOGS): "metrics_logs",
+            int(fleet_gateway_v2_pb2.METRICS_LOGS): "metrics",
             int(fleet_gateway_v2_pb2.ARTIFACT): "artifact",
         }
         return mapping.get(int(kind_value), "unspecified")

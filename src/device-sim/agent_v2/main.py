@@ -154,14 +154,14 @@ def main() -> None:
         try:
             ack = stub.ReportUploadStatus(
                 fleet_gateway_v2_pb2.ReportUploadStatusRequest(
-                    event_id=f"{normalize(run_id)}:upload:metrics_logs:{token.lower() or 'pending'}",
+                    event_id=f"{normalize(run_id)}:upload:metrics:{token.lower() or 'pending'}",
                     agent_id=agent_id,
                     run_id=normalize(run_id),
                     experiment_id=normalize(report.experiment_id),
                     policy_id=normalize(report.policy_id),
                     payload_kind=fleet_gateway_v2_pb2.METRICS_LOGS,
                     status=status_value,
-                    message=normalize(reason) or f"metrics/logs upload status={token or 'PENDING'}",
+                    message=normalize(reason) or f"metrics upload status={token or 'PENDING'}",
                     metrics={
                         "metrics_upload_state": token or "PENDING",
                         "upload_hook_reason": normalize(reason),
@@ -821,7 +821,11 @@ def main() -> None:
                     "merged_artifacts_count": merged_artifacts_count,
                     "server_side_artifact_bundling": 1 if server_side_bundling else 0,
                     "run_storage_pressure_hits": run_storage_pressure_hits,
-                    "latest_metrics": latest_observed_metrics,
+                    "metrics_destination": {
+                        "primary": "mimir",
+                        "path": "agent/fleet-http or report -> Fleet /metrics -> Prometheus remote_write -> Mimir -> Grafana",
+                        "note": "Numeric telemetry values are intentionally omitted from this artifact; query Mimir/Grafana for metrics.",
+                    },
                     "generated_at": now_utc().isoformat().replace("+00:00", "Z"),
                 },
             )

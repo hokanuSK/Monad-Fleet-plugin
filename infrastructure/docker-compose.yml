@@ -92,7 +92,8 @@ services:
       - "BOOK_IS_CANCELLABLE=true"
       - "DATA_DIR=/data"
       - "METRICS_PORT=9108"
-      - "METRICS_EXCLUDE_PREFIXES=csi_"
+      - "METRICS_EXCLUDE_PREFIXES="
+      - "ENABLE_METRICS_INGEST_JOURNAL=false"
       - "INGEST_API_TOKEN="
       # TU DOSAĎ SVOJ REST API KEY (celý reťazec z My Profile → API Keys → REST API key)
       - ELAB_API_KEY=${ELAB_API_KEY:-apiKey4Test}
@@ -145,6 +146,7 @@ services:
       - FLEET_MANAGER_PORT=50060
       - MAX_SYNC_CYCLES=0
       - EXECUTE_POLICY=false
+      - DEFAULT_METRICS_SINKS=fleet_http
     mac_address: 02:42:ac:14:00:04
     networks:
       - elabftw-net

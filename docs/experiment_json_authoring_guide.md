@@ -294,13 +294,13 @@ end up attached to runtime commands such as `WIFI_SCAN`, `BLE_SCAN`, or `SHELL`.
 
 ### Artifact normalization
 
-Metrics are not eLabFTW artifacts. Wi-Fi RSSI, BLE RSSI, command status, and device health metrics should go through the agent metrics path into local Prometheus and Mimir/Grafana.
+Metrics are not eLabFTW artifacts. Wi-Fi RSSI, BLE RSSI, CSI summary counters, command status, and device health metrics should go through the agent metrics path into Prometheus, then Mimir for Grafana.
 
 eLabFTW should receive coarse run evidence only:
 
 - measurement output artifacts, such as a Wi-Fi scan log or PCAP, a BLE scan JSONL/log, or CSI files when CSI is re-enabled
 - one merged text/log bundle named like `wireless-run-evidence-bundle.tar.gz`
-- one `run-summary.json`
+- one `run-summary.json` for run status and pointers, not a duplicate telemetry store
 
 For Pi design runs, `ARTIFACT_UPLOAD_DURING_MEASURE=false` keeps pieces on the device until report replay. Fleet then stages those pieces server-side and uploads the same normalized eLabFTW artifact set.
 

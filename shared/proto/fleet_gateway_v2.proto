@@ -12,7 +12,7 @@ service FleetManager {
   rpc AckPrepared(AckPreparedRequest) returns (AckPreparedResponse);
   // EXECUTION runtime status (command lifecycle)
   rpc ReportCommandStatus(ReportCommandStatusRequest) returns (StatusAck);
-  // MAINTENANCE runtime status (metrics/logs spool upload)
+  // MAINTENANCE runtime status (metrics sink upload)
   rpc ReportUploadStatus(ReportUploadStatusRequest) returns (StatusAck);
   // MAINTENANCE runtime status (per-artifact upload)
   rpc ReportArtifactUploadStatus(ReportArtifactUploadStatusRequest) returns (StatusAck);

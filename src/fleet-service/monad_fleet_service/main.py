@@ -57,10 +57,15 @@ def serve() -> None:
 
     data_dir = Path(os.environ.get("DATA_DIR", "/data"))
     data_dir.mkdir(parents=True, exist_ok=True)
-    core.INGEST_JOURNAL_PATH = data_dir / "ingest-metrics.ndjson"
+    enable_metrics_ingest_journal = core.normalize_string(
+        os.environ.get("ENABLE_METRICS_INGEST_JOURNAL", "false")
+    ).lower() in {"1", "true", "yes", "on"}
+    core.INGEST_JOURNAL_PATH = data_dir / "ingest-metrics.ndjson" if enable_metrics_ingest_journal else None
     core.ARTIFACT_INGEST_JOURNAL_PATH = data_dir / "ingest-artifacts.ndjson"
     core.ARTIFACT_SERVER_SPOOL_DIR = data_dir / "artifact-spool"
     core.METRICS_EXCLUDE_PREFIXES = tuple(cfg.get("metrics_exclude_prefixes") or ())
+    if not enable_metrics_ingest_journal:
+        core.log.info("Metrics ingest journal disabled; Mimir is the durable metrics store")
     if core.METRICS_EXCLUDE_PREFIXES:
         core.log.info("Metrics export filter enabled, excluded prefixes: %s", ",".join(core.METRICS_EXCLUDE_PREFIXES))
     core.log.info("fleet.v3 device state metadata patching enabled=%s", cfg["enable_v2_device_state_patch"])

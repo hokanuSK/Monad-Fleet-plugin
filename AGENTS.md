@@ -61,7 +61,7 @@ Source-of-truth boundaries:
 
 - Git repo: code, proto contracts, scripts, implementation docs.
 - eLabFTW: experiment metadata and uploaded artifacts.
-- Mimir/Grafana: time-series metrics and dashboards.
+- Prometheus/Mimir/Grafana: scrape, retain, and visualize time-series metrics.
 - Notion: operational log, decisions, incidents, and execution tasks.
 
 Naming requirements for ops records:
@@ -151,12 +151,12 @@ DO_BUILD=true RESET_STATE=true RESET_METRICS=true CLEANUP=false scripts/smoke/v3
 What it does (high level):
 
 - restarts Fleet + device + observability services (optionally builds images)
-- optionally resets Fleet dedupe state + ingest journal (`/data/state.json`, `/data/ingest-metrics.ndjson`)
-- optionally clears Mimir data directory
+- resets Fleet dedupe state (`/data/state.json`) and any opt-in metric ingest journal (`/data/ingest-metrics.ndjson`)
+- optionally clears Prometheus and Mimir data directories
 - creates a new eLabFTW experiment with a v3 policy (WiFi/BLE/CSI commands)
 - runs one agent v2 cycle and publishes a report
 - posts a sample low-level JSON payload to `/ingest/v1/metrics`
-- verifies metrics in Fleet `/metrics` endpoint (optional Mimir verification via `VERIFY_MIMIR=true`)
+- verifies metrics in Fleet `/metrics` and Mimir by default (`VERIFY_MIMIR=false` can skip Mimir verification)
 
 ## Run Agent v2 Manually (In `model-device` Container)
 
