@@ -1,0 +1,193 @@
+"""Prometheus exposition endpoint for the device agent.
+
+Path (per the architecture decision in the 5 GHz + BLE + power measurement plan):
+
+    agent /metrics  -->  Pi-side Prometheus (operator-deployed)
+                          --remote_write-->  Mimir on EC2  -->  Grafana
+
+The endpoint serves metrics in the standard Prometheus exposition format on
+``PROM_EXPOSITION_BIND_HOST:PROM_EXPOSITION_PORT`` (default
+``127.0.0.1:9110``). Per-Pi disambiguation labels (``agent_id``, ``pi_id``,
+``site``, etc.) are intentionally **not** baked into metrics here -- they are
+applied at scrape time via the Pi-side Prometheus's ``external_labels`` /
+``relabel_configs``. This keeps cardinality predictable and stops one agent
+from impersonating another by setting its own labels.
+
+The legacy ``_ingest_metrics_http`` JSON push (sinks._ingest_metrics_http -->
+fleet-service ``/ingest/v1/metrics``) is **not** replaced by this module; it
+stays only for sub-second mid-command sample bursts (``WIFI_SAMPLE_EMIT_HTTP=1``)
+where the Prometheus scrape cadence is too coarse.
+"""
+from __future__ import annotations
+
+import logging
+import os
+from typing import Optional
+
+try:
+    from prometheus_client import (
+        CollectorRegistry,
+        Counter,
+        Gauge,
+        start_http_server,
+    )
+
+    _PROM_AVAILABLE = True
+except Exception:  # pragma: no cover - prometheus_client is optional at runtime
+    CollectorRegistry = None  # type: ignore[assignment,misc]
+    Counter = None  # type: ignore[assignment,misc]
+    Gauge = None  # type: ignore[assignment,misc]
+    start_http_server = None  # type: ignore[assignment]
+    _PROM_AVAILABLE = False
+
+
+log = logging.getLogger(__name__)
+
+
+# Module-level state, populated by start_exposition_server() the first time it runs.
+_REGISTRY: Optional["CollectorRegistry"] = None
+_SERVER_STARTED: bool = False
+_BOUND_HOST: str = ""
+_BOUND_PORT: int = 0
+
+
+# Power telemetry gauges. Other modules import these and call .set(value) when
+# a sample is read; updates between scrapes are coalesced by Prometheus.
+power_voltage_volts = None
+power_current_amps = None
+power_under_voltage = None
+power_throttled_state = None
+cpu_temp_celsius = None
+ina_voltage_volts = None
+ina_current_amps = None
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        return int(str(raw).strip())
+    except ValueError:
+        log.warning("Invalid integer for %s=%r; falling back to %s", name, raw, default)
+        return default
+
+
+def _build_metrics(registry: "CollectorRegistry") -> None:
+    """Declare the initial set of gauges on the registry.
+
+    Called once on first server start. Stored in module globals so the agent's
+    measurement code (e.g. ``core._collect_device_status_metrics``) can reach
+    them without re-importing or re-registering.
+    """
+    global power_voltage_volts, power_current_amps, power_under_voltage
+    global power_throttled_state, cpu_temp_celsius
+    global ina_voltage_volts, ina_current_amps
+
+    power_voltage_volts = Gauge(
+        "monad_pi_voltage_volts",
+        "Pi core supply voltage as reported by `vcgencmd measure_volts core`.",
+        registry=registry,
+    )
+    power_current_amps = Gauge(
+        "monad_pi_current_amps",
+        "Pi core supply current (amps) when an INA219 sensor is wired and configured.",
+        registry=registry,
+    )
+    power_under_voltage = Gauge(
+        "monad_pi_under_voltage",
+        "1 when `vcgencmd get_throttled` reports an under-voltage condition right now, else 0.",
+        registry=registry,
+    )
+    power_throttled_state = Gauge(
+        "monad_pi_throttled_state",
+        "Raw integer returned by `vcgencmd get_throttled` (bitfield).",
+        registry=registry,
+    )
+    cpu_temp_celsius = Gauge(
+        "monad_pi_cpu_temp_celsius",
+        "Pi CPU temperature in degrees Celsius (sourced from /sys/class/thermal).",
+        registry=registry,
+    )
+    ina_voltage_volts = Gauge(
+        "monad_pi_ina_voltage_volts",
+        "Voltage reported by an INA219 sensor when OBSERVE_POWER_INA_ADDR is set.",
+        registry=registry,
+    )
+    ina_current_amps = Gauge(
+        "monad_pi_ina_current_amps",
+        "Current reported by an INA219 sensor when OBSERVE_POWER_INA_ADDR is set.",
+        registry=registry,
+    )
+
+
+def start_exposition_server() -> bool:
+    """Start the agent Prometheus exposition listener.
+
+    Reads ``PROM_EXPOSITION_ENABLED`` / ``PROM_EXPOSITION_BIND_HOST`` /
+    ``PROM_EXPOSITION_PORT`` from the environment. Returns True if a listener
+    is running by the time this returns, False otherwise (disabled,
+    prometheus_client missing, bind failure).
+
+    Idempotent: subsequent calls are no-ops and just return the current state.
+    """
+    global _REGISTRY, _SERVER_STARTED, _BOUND_HOST, _BOUND_PORT
+
+    if _SERVER_STARTED:
+        return True
+
+    if not _bool_env("PROM_EXPOSITION_ENABLED", True):
+        log.info("Prometheus exposition disabled via PROM_EXPOSITION_ENABLED=false")
+        return False
+
+    if not _PROM_AVAILABLE:
+        log.warning(
+            "prometheus_client is not installed; agent /metrics endpoint will not be served. "
+            "Install it via `pip install prometheus-client` to enable scrape-based metrics."
+        )
+        return False
+
+    bind_host = (os.environ.get("PROM_EXPOSITION_BIND_HOST") or "127.0.0.1").strip() or "127.0.0.1"
+    port = _int_env("PROM_EXPOSITION_PORT", 9110)
+
+    _REGISTRY = CollectorRegistry()
+    _build_metrics(_REGISTRY)
+
+    try:
+        start_http_server(port, addr=bind_host, registry=_REGISTRY)
+    except OSError as exc:
+        log.warning(
+            "Could not bind Prometheus exposition listener at %s:%s (%s). "
+            "Agent will continue; the new measurement metrics will not reach Mimir.",
+            bind_host,
+            port,
+            exc,
+        )
+        _REGISTRY = None
+        return False
+
+    _SERVER_STARTED = True
+    _BOUND_HOST = bind_host
+    _BOUND_PORT = port
+    log.info("Prometheus exposition listening on http://%s:%s/metrics", bind_host, port)
+    return True
+
+
+def get_registry() -> Optional["CollectorRegistry"]:
+    """Return the active registry, or None if the listener never started."""
+    return _REGISTRY
+
+
+def is_running() -> bool:
+    return _SERVER_STARTED
+
+
+def bound_endpoint() -> tuple[str, int]:
+    return _BOUND_HOST, _BOUND_PORT

@@ -3,6 +3,7 @@ from .collectors import *  # noqa: F401,F403
 from .sinks import *  # noqa: F401,F403
 from . import core as core_mod
 from . import sinks as sinks_mod
+from . import prom_exposition as prom_exposition_mod
 
 
 def _raw_command_artifact_stem(cmd_id: str) -> str:
@@ -74,6 +75,14 @@ def main() -> None:
     active_upload_cfg = dict(base_upload_cfg)
 
     store = RunStore(data_root, sent_retention_days=sent_retention_days)
+
+    # Bring up the Prometheus exposition endpoint before we start polling so
+    # the Pi-side Prometheus has something to scrape from the moment this
+    # agent is alive. This is the path the new measurement metrics
+    # (power, 5 GHz aggregates, BLE rates) ride; it is independent of the
+    # legacy fleet-service /ingest/v1/metrics push.
+    prom_exposition_mod.start_exposition_server()
+
     channel = grpc.insecure_channel(target)
     stub = fleet_gateway_v2_pb2_grpc.FleetManagerStub(channel)
 
