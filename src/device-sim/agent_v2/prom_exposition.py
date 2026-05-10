@@ -57,6 +57,8 @@ power_voltage_volts = None
 power_under_voltage = None
 power_throttled_state = None
 cpu_temp_celsius = None
+pmic_3v3_sys_current_amps = None
+pmic_3v3_sys_voltage_volts = None
 
 
 def _bool_env(name: str, default: bool) -> bool:
@@ -86,6 +88,7 @@ def _build_metrics(registry: "CollectorRegistry") -> None:
     """
     global power_voltage_volts, power_under_voltage
     global power_throttled_state, cpu_temp_celsius
+    global pmic_3v3_sys_current_amps, pmic_3v3_sys_voltage_volts
 
     power_voltage_volts = Gauge(
         "monad_pi_voltage_volts",
@@ -105,6 +108,19 @@ def _build_metrics(registry: "CollectorRegistry") -> None:
     cpu_temp_celsius = Gauge(
         "monad_pi_cpu_temp_celsius",
         "Pi CPU temperature in degrees Celsius (sourced from /sys/class/thermal).",
+        registry=registry,
+    )
+    pmic_3v3_sys_current_amps = Gauge(
+        "monad_pi_pmic_3v3_sys_current_amps",
+        "Pi 5 PMIC 3V3_SYS rail current in amps. On the official RPi M.2 HAT+ "
+        "this rail feeds the M.2 slot directly, so AX210 power can be approximated "
+        "by subtracting the Pi-only baseline (typically 20-40 mA, characterized once "
+        "with the AX210 disabled). Pi 5 only; gauge stays at 0 on older hardware.",
+        registry=registry,
+    )
+    pmic_3v3_sys_voltage_volts = Gauge(
+        "monad_pi_pmic_3v3_sys_voltage_volts",
+        "Pi 5 PMIC 3V3_SYS rail voltage in volts (typically ~3.30 V).",
         registry=registry,
     )
 

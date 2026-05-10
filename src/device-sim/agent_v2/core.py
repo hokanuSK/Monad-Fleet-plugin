@@ -1503,6 +1503,46 @@ def _collect_iface_counters(iface: str) -> dict[str, str]:
     return metrics
 
 
+def _read_pi_pmic_rails(rails: tuple[str, ...] = ("3V3_SYS",)) -> dict[str, dict[str, float]]:
+    """Best-effort read of named Pi 5 PMIC ADC rails via `vcgencmd pmic_read_adc`.
+
+    Returns a dict like ``{"3V3_SYS": {"current_a": 0.087, "voltage_v": 3.302}}``
+    for each rail in ``rails`` that vcgencmd reports. Rails not present in the
+    output (or older hardware that lacks ``pmic_read_adc``) are simply omitted;
+    callers should treat empty values as "not available" rather than zero.
+
+    The expected output format from vcgencmd looks like::
+
+        3V3_SYS_A current(1)=0.08685777A
+        3V3_SYS_V volt(9)=3.30260900V
+    """
+    out: dict[str, dict[str, float]] = {}
+    vcgencmd = resolve_executable("vcgencmd", ["/usr/bin/vcgencmd"])
+    if not vcgencmd:
+        return out
+    rc, _, raw = _run_capture_args([vcgencmd, "pmic_read_adc"], 3000)
+    if rc != 0 or not raw:
+        return out
+    wanted = {r.upper() for r in rails}
+    for line in raw.splitlines():
+        m = re.search(
+            r"^\s*([A-Z0-9_]+?)_(A|V)\s+(?:current|volt)\(\d+\)=([\d.]+)\s*[AV]\s*$",
+            line,
+        )
+        if not m:
+            continue
+        rail = m.group(1).upper()
+        if rail not in wanted:
+            continue
+        kind = m.group(2)
+        try:
+            val = float(m.group(3))
+        except ValueError:
+            continue
+        out.setdefault(rail, {})[("current_a" if kind == "A" else "voltage_v")] = val
+    return out
+
+
 def _collect_device_status_metrics() -> dict[str, str]:
     metrics: dict[str, str] = {}
     if not parse_bool(os.environ.get("ENABLE_DEVICE_STATUS_METRICS"), True):
@@ -1602,6 +1642,28 @@ def _collect_device_status_metrics() -> dict[str, str]:
                         _prom.power_voltage_volts.set(volts)
                     except Exception:
                         pass
+
+    # Pi 5 PMIC ADC: 3V3_SYS rail is the M.2 slot's feed on the official RPi
+    # M.2 HAT+. With no other 3.3 V loads on this Pi (operator-confirmed) the
+    # rail is dominated by AX210 + a small Pi baseline; subtract a once-measured
+    # baseline in Grafana to approximate AX210 watts to ~+/- 10 %.
+    pmic = _read_pi_pmic_rails(("3V3_SYS",))
+    rail = pmic.get("3V3_SYS")
+    if rail is not None:
+        if "current_a" in rail:
+            metrics["device_pmic_3v3_sys_current_a"] = f"{rail['current_a']:.4f}"
+            if _prom is not None and getattr(_prom, "pmic_3v3_sys_current_amps", None) is not None:
+                try:
+                    _prom.pmic_3v3_sys_current_amps.set(rail["current_a"])
+                except Exception:
+                    pass
+        if "voltage_v" in rail:
+            metrics["device_pmic_3v3_sys_voltage_v"] = f"{rail['voltage_v']:.4f}"
+            if _prom is not None and getattr(_prom, "pmic_3v3_sys_voltage_volts", None) is not None:
+                try:
+                    _prom.pmic_3v3_sys_voltage_volts.set(rail["voltage_v"])
+                except Exception:
+                    pass
 
     return metrics
 
