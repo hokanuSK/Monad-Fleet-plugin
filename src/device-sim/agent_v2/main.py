@@ -832,9 +832,10 @@ def main() -> None:
                     "run_storage_pressure_hits": run_storage_pressure_hits,
                     "metrics_destination": {
                         "primary": "mimir",
-                        "path": "agent/fleet-http or report -> Fleet /metrics -> Prometheus remote_write -> Mimir -> Grafana",
+                        "path": "agent /metrics -> Pi Prometheus -> remote_write -> Mimir -> Grafana",
                         "note": "Numeric telemetry values are intentionally omitted from this artifact; query Mimir/Grafana for metrics.",
                     },
+                    "hardware_inventory": core_mod._collect_hardware_inventory(),
                     "generated_at": now_utc().isoformat().replace("+00:00", "Z"),
                 },
             )

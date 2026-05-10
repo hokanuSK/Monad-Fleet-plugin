@@ -54,12 +54,9 @@ _BOUND_PORT: int = 0
 # Power telemetry gauges. Other modules import these and call .set(value) when
 # a sample is read; updates between scrapes are coalesced by Prometheus.
 power_voltage_volts = None
-power_current_amps = None
 power_under_voltage = None
 power_throttled_state = None
 cpu_temp_celsius = None
-ina_voltage_volts = None
-ina_current_amps = None
 
 
 def _bool_env(name: str, default: bool) -> bool:
@@ -87,18 +84,12 @@ def _build_metrics(registry: "CollectorRegistry") -> None:
     measurement code (e.g. ``core._collect_device_status_metrics``) can reach
     them without re-importing or re-registering.
     """
-    global power_voltage_volts, power_current_amps, power_under_voltage
+    global power_voltage_volts, power_under_voltage
     global power_throttled_state, cpu_temp_celsius
-    global ina_voltage_volts, ina_current_amps
 
     power_voltage_volts = Gauge(
         "monad_pi_voltage_volts",
         "Pi core supply voltage as reported by `vcgencmd measure_volts core`.",
-        registry=registry,
-    )
-    power_current_amps = Gauge(
-        "monad_pi_current_amps",
-        "Pi core supply current (amps) when an INA219 sensor is wired and configured.",
         registry=registry,
     )
     power_under_voltage = Gauge(
@@ -114,16 +105,6 @@ def _build_metrics(registry: "CollectorRegistry") -> None:
     cpu_temp_celsius = Gauge(
         "monad_pi_cpu_temp_celsius",
         "Pi CPU temperature in degrees Celsius (sourced from /sys/class/thermal).",
-        registry=registry,
-    )
-    ina_voltage_volts = Gauge(
-        "monad_pi_ina_voltage_volts",
-        "Voltage reported by an INA219 sensor when OBSERVE_POWER_INA_ADDR is set.",
-        registry=registry,
-    )
-    ina_current_amps = Gauge(
-        "monad_pi_ina_current_amps",
-        "Current reported by an INA219 sensor when OBSERVE_POWER_INA_ADDR is set.",
         registry=registry,
     )
 

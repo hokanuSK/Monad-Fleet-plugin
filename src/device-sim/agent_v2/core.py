@@ -1508,6 +1508,12 @@ def _collect_device_status_metrics() -> dict[str, str]:
     if not parse_bool(os.environ.get("ENABLE_DEVICE_STATUS_METRICS"), True):
         return metrics
 
+    # Lazy import so a missing prometheus_client doesn't break this function.
+    try:
+        from . import prom_exposition as _prom
+    except Exception:
+        _prom = None  # type: ignore[assignment]
+
     try:
         load1, load5, load15 = os.getloadavg()
         metrics["device_load1"] = f"{load1:.2f}"
@@ -1557,7 +1563,13 @@ def _collect_device_status_metrics() -> dict[str, str]:
         temp_mc = _read_int_file(temp_path)
         if temp_mc is None:
             continue
-        metrics["device_cpu_temp_c"] = f"{(float(temp_mc) / 1000.0):.2f}"
+        temp_c = float(temp_mc) / 1000.0
+        metrics["device_cpu_temp_c"] = f"{temp_c:.2f}"
+        if _prom is not None and getattr(_prom, "cpu_temp_celsius", None) is not None:
+            try:
+                _prom.cpu_temp_celsius.set(temp_c)
+            except Exception:
+                pass
         break
 
     vcgencmd = resolve_executable("vcgencmd", ["/usr/bin/vcgencmd"])
@@ -1570,8 +1582,105 @@ def _collect_device_status_metrics() -> dict[str, str]:
                 metrics["device_throttled_flags"] = str(flags)
                 metrics["device_throttled_now"] = "1" if (flags & 0x1) else "0"
                 metrics["device_under_voltage_now"] = "1" if (flags & 0x1) else "0"
+                if _prom is not None:
+                    try:
+                        if getattr(_prom, "power_throttled_state", None) is not None:
+                            _prom.power_throttled_state.set(flags)
+                        if getattr(_prom, "power_under_voltage", None) is not None:
+                            _prom.power_under_voltage.set(1.0 if (flags & 0x1) else 0.0)
+                    except Exception:
+                        pass
+
+        exit_code, _, out = _run_capture_args([vcgencmd, "measure_volts", "core"], 2000)
+        if exit_code == 0:
+            mm = re.search(r"volt=([\d.]+)", out)
+            if mm:
+                volts = float(mm.group(1))
+                metrics["device_core_volts"] = f"{volts:.4f}"
+                if _prom is not None and getattr(_prom, "power_voltage_volts", None) is not None:
+                    try:
+                        _prom.power_voltage_volts.set(volts)
+                    except Exception:
+                        pass
 
     return metrics
+
+
+def _collect_hardware_inventory() -> dict[str, Any]:
+    """Best-effort enumeration of radios + I2C devices for run-summary.json.
+
+    Each key is always present; the value is empty when the underlying tool
+    is missing or returns nothing. This is observation only -- nothing in the
+    runtime gates on these values.
+    """
+    inv: dict[str, Any] = {
+        "kernel": "",
+        "model": "",
+        "wifi_interfaces": [],
+        "bluetooth_adapters": [],
+        "i2c_devices_bus1": [],
+    }
+
+    iw_bin = resolve_executable("iw", ["/usr/sbin/iw", "/sbin/iw"])
+    if iw_bin:
+        rc, _, out = _run_capture_args([iw_bin, "dev"], 3000)
+        if rc == 0 and out:
+            interfaces: list[dict[str, str]] = []
+            current: dict[str, str] | None = None
+            for line in out.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("Interface "):
+                    name = stripped[len("Interface "):].strip()
+                    if name:
+                        current = {"name": name}
+                        interfaces.append(current)
+                elif current is not None and stripped.startswith("type "):
+                    current["type"] = stripped[len("type "):].strip()
+                elif current is not None and stripped.startswith("addr "):
+                    current["addr"] = stripped[len("addr "):].strip()
+            inv["wifi_interfaces"] = interfaces
+
+    btctl = resolve_executable("bluetoothctl", ["/usr/bin/bluetoothctl"])
+    if btctl:
+        rc, _, out = _run_capture_args([btctl, "list"], 3000)
+        if rc == 0 and out:
+            adapters: list[dict[str, str]] = []
+            for line in out.splitlines():
+                m = re.match(
+                    r"^Controller\s+([0-9A-Fa-f:]{17})\s+(.+?)(?:\s+\[.*\])?\s*$",
+                    line.strip(),
+                )
+                if m:
+                    adapters.append({"address": m.group(1), "name": m.group(2)})
+            inv["bluetooth_adapters"] = adapters
+
+    i2cdetect = resolve_executable("i2cdetect", ["/usr/sbin/i2cdetect", "/sbin/i2cdetect"])
+    if i2cdetect:
+        rc, _, out = _run_capture_args([i2cdetect, "-y", "1"], 3000)
+        if rc == 0 and out:
+            addrs: list[str] = []
+            for line in out.splitlines():
+                m = re.match(r"^([0-9a-fA-F]{2}):\s*(.*)$", line)
+                if not m:
+                    continue
+                base = int(m.group(1), 16)
+                fields = m.group(2).strip().split()
+                for i, field in enumerate(fields):
+                    if re.match(r"^[0-9a-fA-F]{2}$", field):
+                        addrs.append(f"0x{(base + i):02x}")
+            inv["i2c_devices_bus1"] = addrs
+
+    rc, _, out = _run_capture_args(["uname", "-a"], 1500)
+    if rc == 0 and out:
+        first = out.strip().splitlines()[:1]
+        if first:
+            inv["kernel"] = first[0]
+
+    model = _read_text_file("/sys/firmware/devicetree/base/model")
+    if model:
+        inv["model"] = model.strip().rstrip("\x00")
+
+    return inv
 
 
 def _collect_wifi_observability_metrics(iface: str, timeout_ms: int, iw_bin: str | None = None) -> dict[str, str]:
