@@ -550,12 +550,12 @@
         "name": "pi_baseline_a",
         "label": "Pi 3V3_SYS baseline (A) for AX210 differential",
         "type": "constant",
-        "description": "Mean PMIC 3V3_SYS current measured during a 60 s baseline run with AX210 disabled (rfkill block all). Pi 5 + RPi M.2 HAT+ typical: 0.020 to 0.040.",
-        "query": "0.030",
+        "description": "Mean PMIC 3V3_SYS current of the AX210-idle baseline (chip present + driver bound but radio interface DOWN). Default 0.084 A is the empirical monad-03 measurement (Pi 5 + official M.2 HAT+ + AX210 in standby). Override per-Pi at view time; for an absolute AX210 baseline (Pi-alone) characterize with `rfkill block all` after the radio interface is up.",
+        "query": "0.084",
         "current": {
           "selected": false,
-          "text": "0.030",
-          "value": "0.030"
+          "text": "0.084",
+          "value": "0.084"
         }
       }
     ]
