@@ -19,6 +19,7 @@ _safe_float = core_mod._safe_float
 _safe_int = core_mod._safe_int
 from .sinks import _ingest_metrics_http, opportunistic_upload_artifacts_to_elab
 from . import wifi5g_capture as _wifi5g_capture
+from . import ble_advertise as _ble_advertise
 
 
 def _artifact_stem(base: str, detail: str = "") -> str:
@@ -674,6 +675,89 @@ def collect_wifi_scan_series(
     return 0, max(total_duration_ms, wall_ms), message, aggregate, all_artifacts
 
 
+def collect_ble_advertise(
+    *,
+    timeout_ms: int,
+    execute_policy: bool,
+    store: RunStore,
+    run_id: str,
+    cmd_id: str,
+    override_env: dict[str, str],
+) -> tuple[int, int, str, dict[str, str], list[fleet_gateway_v2_pb2.ArtifactRef]]:
+    """Phase 3 BLE_SCAN branch: drive ``bluetoothctl`` to broadcast LE
+    advertisements with rotating ``adv_id`` payloads for the duration of
+    the measure window.
+
+    Reads ``BLE_ADV_UPDATE_INTERVAL_S`` and ``BLE_ADV_PAYLOAD_PREFIX`` from
+    ``override_env``. Stages the JSONL log in /tmp then imports it into the
+    run-artifact dir as ``ble-tx-log.json`` so it lands in the bundled
+    wireless-evidence tarball via the ``.json`` extension routing.
+    """
+    env = override_env or {}
+    metrics: dict[str, str] = {"ble_mode": "advertise"}
+    artifacts: list[fleet_gateway_v2_pb2.ArtifactRef] = []
+
+    if not execute_policy:
+        metrics["ble_advertise_status"] = "dry_run"
+        return 0, 100, "ble advertise dry run (execute_policy=false)", metrics, []
+
+    try:
+        update_interval_s = float(
+            env.get("BLE_ADV_UPDATE_INTERVAL_S") or _ble_advertise.DEFAULT_UPDATE_INTERVAL_S
+        )
+    except (TypeError, ValueError):
+        update_interval_s = _ble_advertise.DEFAULT_UPDATE_INTERVAL_S
+    payload_prefix = (
+        normalize(env.get("BLE_ADV_PAYLOAD_PREFIX")) or _ble_advertise.DEFAULT_PAYLOAD_PREFIX
+    )
+
+    duration_s = max(1.0, (timeout_ms / 1000.0) - 1.0)
+
+    stamp = int(time.time())
+    log_scratch = f"/tmp/ble-tx-log-{run_id}-{stamp}.json"
+
+    handles = _ble_advertise.start_advertise(
+        log_path=log_scratch,
+        duration_s=duration_s,
+        update_interval_s=update_interval_s,
+        payload_prefix=payload_prefix,
+    )
+    if handles is None:
+        metrics["ble_advertise_status"] = "start_failed"
+        return 1, 0, "ble advertise: could not start (bluetoothctl missing or refused)", metrics, []
+
+    # Block until the runner thread finishes (or measure window deadline expires).
+    # The runner loop honors its own deadline; we just join the thread.
+    handles.runner_thread.join()
+    stats = _ble_advertise.stop_advertise(handles)
+
+    if Path(log_scratch).exists():
+        try:
+            log_text = Path(log_scratch).read_text(encoding="utf-8")
+            artifacts.append(
+                store.write_text_artifact(
+                    run_id,
+                    "ble-tx-log",
+                    log_text,
+                    suffix=".json",
+                    include_timestamp=False,
+                )
+            )
+        except Exception:
+            log.exception("Failed to persist ble-tx-log.json")
+        try:
+            Path(log_scratch).unlink()
+        except Exception:
+            pass
+
+    metrics["ble_advertise_status"] = "ok"
+    metrics["ble_tx_count"] = str(stats["tx_count"])
+    metrics["ble_advertise_elapsed_s"] = f"{stats['elapsed_s']:.2f}"
+    metrics["ble_advertise_update_interval_s"] = f"{update_interval_s:.2f}"
+    duration_ms = int(stats["elapsed_s"] * 1000)
+    return 0, duration_ms, f"advertised {stats['tx_count']} adv_ids over {duration_ms}ms", metrics, artifacts
+
+
 def collect_ble_scan(
     timeout_ms: int,
     execute_policy: bool,
@@ -685,6 +769,20 @@ def collect_ble_scan(
     override_argv: list[str] | None = None,
     override_env: dict[str, str] | None = None,
 ) -> tuple[int, int, str, dict[str, str], list[fleet_gateway_v2_pb2.ArtifactRef]]:
+    # Phase 3: branch on BLE_SCAN_MODE before any default-path work so an
+    # `advertise` policy gets routed to the bluetoothctl-driven advertise
+    # branch without the legacy `bluetoothctl scan on` running first.
+    ble_mode = normalize((override_env or {}).get("BLE_SCAN_MODE")).lower()
+    if ble_mode == "advertise":
+        return collect_ble_advertise(
+            timeout_ms=timeout_ms,
+            execute_policy=execute_policy,
+            store=store,
+            run_id=run_id,
+            cmd_id=cmd_id,
+            override_env=override_env or {},
+        )
+
     metrics: dict[str, str] = {}
     artifacts: list[fleet_gateway_v2_pb2.ArtifactRef] = []
 

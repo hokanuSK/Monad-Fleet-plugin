@@ -62,6 +62,8 @@ pmic_3v3_sys_voltage_volts = None
 wifi5g_current_channel = None
 wifi5g_dwell_changes_total = None
 wifi5g_capture_active = None
+ble_tx_total = None
+ble_advertise_active = None
 
 
 def _bool_env(name: str, default: bool) -> bool:
@@ -145,6 +147,24 @@ def _build_metrics(registry: "CollectorRegistry") -> None:
         "monad_pi_wifi5g_capture_active",
         "1 when tcpdump-backed monitor-mode capture is running, else 0. Useful for "
         "annotating Grafana panels with capture windows.",
+        registry=registry,
+    )
+
+    global ble_tx_total, ble_advertise_active
+    ble_tx_total = Counter(
+        "monad_pi_ble_tx_total",
+        "Cumulative count of BLE advertisement payload-refresh events. The Pi "
+        "broadcasts on its hardware advertising interval but only refreshes the "
+        "adv_id payload every BLE_ADV_UPDATE_INTERVAL_S seconds; this counter "
+        "ticks once per refresh, not once per radio broadcast. A flat curve "
+        "during BLE_SCAN_MODE=advertise means the bluetoothctl pipeline is "
+        "stuck.",
+        registry=registry,
+    )
+    ble_advertise_active = Gauge(
+        "monad_pi_ble_advertise_active",
+        "1 while the BLE advertise runner is broadcasting, else 0. Useful for "
+        "annotating Grafana panels with advertise windows.",
         registry=registry,
     )
 
