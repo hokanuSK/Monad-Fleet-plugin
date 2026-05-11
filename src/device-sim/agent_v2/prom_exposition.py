@@ -59,6 +59,9 @@ power_throttled_state = None
 cpu_temp_celsius = None
 pmic_3v3_sys_current_amps = None
 pmic_3v3_sys_voltage_volts = None
+wifi5g_current_channel = None
+wifi5g_dwell_changes_total = None
+wifi5g_capture_active = None
 
 
 def _bool_env(name: str, default: bool) -> bool:
@@ -121,6 +124,27 @@ def _build_metrics(registry: "CollectorRegistry") -> None:
     pmic_3v3_sys_voltage_volts = Gauge(
         "monad_pi_pmic_3v3_sys_voltage_volts",
         "Pi 5 PMIC 3V3_SYS rail voltage in volts (typically ~3.30 V).",
+        registry=registry,
+    )
+
+    global wifi5g_current_channel, wifi5g_dwell_changes_total, wifi5g_capture_active
+    wifi5g_current_channel = Gauge(
+        "monad_pi_wifi5g_current_channel",
+        "Channel number the 5 GHz monitor-mode capture is dwelling on right now. "
+        "0 when no capture is active.",
+        registry=registry,
+    )
+    wifi5g_dwell_changes_total = Counter(
+        "monad_pi_wifi5g_dwell_changes_total",
+        "Cumulative count of successful channel-hop transitions during 5 GHz "
+        "monitor-mode capture. A flat curve while WIFI_SCAN is running means the "
+        "hop thread is stuck or the iface refused channel changes.",
+        registry=registry,
+    )
+    wifi5g_capture_active = Gauge(
+        "monad_pi_wifi5g_capture_active",
+        "1 when tcpdump-backed monitor-mode capture is running, else 0. Useful for "
+        "annotating Grafana panels with capture windows.",
         registry=registry,
     )
 
