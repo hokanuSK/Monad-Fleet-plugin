@@ -1,10 +1,11 @@
 """5 GHz monitor-mode + channel-hopping capture for the agent's WIFI_SCAN command.
 
-Used when the policy sets ``WIFI_SCAN_MODE=passive_monitor``. Flips a named
-Wi-Fi interface (typically the Pi 5's M.2 AX210 on ``wlp1s0``, separate from
-the Broadcom control plane on ``wlan0``) into monitor mode, runs ``tcpdump``
-to write a pcap of every observed 802.11 frame, and channel-hops through a
-configurable list of 5 GHz channels on a background thread.
+Used when the policy sets ``WIFI_SCAN_MODE=passive_monitor``. Creates a
+transient monitor-mode virtual interface (e.g. ``wlan0mon``) on top of the
+named parent interface (e.g. ``wlan0`` / AX210), leaving the parent in managed
+mode so VPN / control-plane connectivity is preserved. Runs ``tcpdump`` on the
+monitor vif to write a pcap of every observed 802.11 frame, and channel-hops
+through a configurable list of 5 GHz channels on a background thread.
 
 Outputs land via the agent's existing RunStore:
  - ``wifi-5g-monitor.pcap`` -- raw frame capture; uploaded as an individual
@@ -34,6 +35,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+# sbin paths are often absent from non-root PATH on Debian/Raspberry Pi OS.
+_SBIN_SEARCH = ("/usr/sbin", "/sbin")
+
 
 log = logging.getLogger(__name__)
 
@@ -56,7 +60,8 @@ DEFAULT_CHANNEL_WIDTH_MHZ: int = 20
 @dataclass
 class CaptureHandles:
     """Bag of state returned by :func:`start_capture`; pass to :func:`stop_capture`."""
-    iface: str
+    parent_iface: str       # physical interface left in managed mode (e.g. wlan0)
+    iface: str              # transient monitor vif used for capture (e.g. wlan0mon)
     pcap_path: str
     schedule_log_path: str
     tcpdump_proc: subprocess.Popen
@@ -64,6 +69,18 @@ class CaptureHandles:
     hop_thread: threading.Thread
     started_monotonic_ns: int = 0
     dwell_entries: list[dict] = field(default_factory=list)
+
+
+def _find_tool(name: str) -> Optional[str]:
+    """Locate ``name`` on PATH and in common sbin directories."""
+    found = shutil.which(name)
+    if found:
+        return found
+    for d in _SBIN_SEARCH:
+        candidate = Path(d) / name
+        if candidate.exists():
+            return str(candidate)
+    return None
 
 
 def _run(cmd: list[str], timeout: float = 4.0) -> tuple[int, str, str]:
@@ -95,52 +112,48 @@ def parse_channel_list(raw: str) -> list[int]:
     return out or list(DEFAULT_5GHZ_CHANNELS)
 
 
-def set_monitor_mode(iface: str) -> tuple[bool, str]:
-    """Switch ``iface`` into monitor mode.
+def create_monitor_vif(parent_iface: str, mon_iface: Optional[str] = None) -> tuple[bool, str, str]:
+    """Create a transient monitor-mode virtual interface off ``parent_iface``.
 
-    Sequence (kept simple to maximise compatibility across iwlwifi firmwares):
-    ``ip link set down`` -> ``iw dev set type monitor`` -> ``ip link set up``.
-    Requires root.
+    ``parent_iface`` stays in managed mode so VPN / SSH / control-plane
+    connectivity is preserved. Returns ``(ok, mon_iface_name, message)``.
+    The caller is responsible for calling :func:`delete_monitor_vif` when done.
+    Requires root (CAP_NET_ADMIN).
     """
-    for cmd in (
-        ["ip", "link", "set", iface, "down"],
-        ["iw", "dev", iface, "set", "type", "monitor"],
-        ["ip", "link", "set", iface, "up"],
-    ):
-        rc, _, err = _run(cmd)
-        if rc != 0:
-            return False, f'{" ".join(cmd)} failed rc={rc} err={err.strip()[:200]}'
-    return True, "monitor mode set"
+    iw = _find_tool("iw")
+    if not iw:
+        return False, "", "iw not found on PATH or in /sbin:/usr/sbin"
+    mon = mon_iface or (parent_iface + "mon")
+    # Clean up any stale vif from a previous interrupted run.
+    _run(["ip", "link", "set", mon, "down"])
+    _run([iw, "dev", mon, "del"])
+    rc, _, err = _run([iw, "dev", parent_iface, "interface", "add", mon, "type", "monitor"])
+    if rc != 0:
+        return False, mon, f"iw add monitor vif failed rc={rc} err={err.strip()[:200]}"
+    rc, _, err = _run(["ip", "link", "set", mon, "up"])
+    if rc != 0:
+        _run([iw, "dev", mon, "del"])
+        return False, mon, f"ip link set {mon} up failed rc={rc} err={err.strip()[:200]}"
+    return True, mon, "monitor vif created"
 
 
-def restore_managed_mode(iface: str) -> tuple[bool, str]:
-    """Best-effort: switch ``iface`` back to managed mode and bring it up.
-
-    Errors are swallowed; the goal is to leave the Pi in a usable state even
-    if some step fails (e.g. driver refuses managed mode while a userspace
-    process still holds an open socket).
-    """
-    last_err = ""
-    for cmd in (
-        ["ip", "link", "set", iface, "down"],
-        ["iw", "dev", iface, "set", "type", "managed"],
-        ["ip", "link", "set", iface, "up"],
-    ):
-        rc, _, err = _run(cmd)
-        if rc != 0:
-            last_err = err.strip()[:200]
-    return True, last_err or "restored"
+def delete_monitor_vif(mon_iface: str) -> None:
+    """Best-effort removal of the transient monitor virtual interface."""
+    iw = _find_tool("iw") or "iw"
+    _run(["ip", "link", "set", mon_iface, "down"])
+    _run([iw, "dev", mon_iface, "del"])
 
 
 def set_channel(iface: str, channel: int, width_mhz: int = DEFAULT_CHANNEL_WIDTH_MHZ) -> tuple[bool, str]:
-    """Tune ``iface`` to ``channel``. ``width_mhz`` supports 20 / 40 (HT40+).
+    """Tune monitor ``iface`` to ``channel``. ``width_mhz`` supports 20 / 40 (HT40+).
 
     Returns ``(ok, message)``. Failures most commonly indicate a DFS channel
     in a regdomain that doesn't allow passive-monitor on that band, or that
-    the iface isn't in monitor mode (callers should call :func:`set_monitor_mode`
-    first).
+    the iface isn't in monitor mode (callers should call
+    :func:`create_monitor_vif` first).
     """
-    cmd = ["iw", "dev", iface, "set", "channel", str(channel)]
+    iw = _find_tool("iw") or "iw"
+    cmd = [iw, "dev", iface, "set", "channel", str(channel)]
     if width_mhz == 40:
         cmd.append("HT40+")
     rc, _, err = _run(cmd, timeout=2.0)
@@ -206,42 +219,46 @@ def start_capture(
 ) -> Optional[CaptureHandles]:
     """Begin a 5 GHz monitor-mode capture.
 
-    Performs the iface state change to monitor mode, spawns ``tcpdump`` writing
-    to ``pcap_path``, and starts a background channel-hopping thread. Returns a
-    :class:`CaptureHandles` handle that the caller passes to :func:`stop_capture`
-    when the measure window ends.
+    Creates a transient monitor virtual interface (``<iface>mon``) off the
+    named parent interface so the parent stays in managed mode (preserving VPN
+    / control-plane connectivity). Spawns ``tcpdump`` on the monitor vif and
+    starts a background channel-hopping thread. Returns a
+    :class:`CaptureHandles` handle that the caller passes to
+    :func:`stop_capture` when the measure window ends.
 
-    Returns ``None`` if any prerequisite step fails (missing tools, ``iw`` set
-    failure, ``tcpdump`` couldn't start). Callers should treat that as a soft
-    error and continue with no capture rather than aborting the whole run.
+    Returns ``None`` if any prerequisite step fails (missing tools, vif
+    creation failure, tcpdump couldn't start). Callers should treat that as a
+    soft error rather than aborting the whole run.
     """
-    if shutil.which("iw") is None:
-        log.warning("wifi5g_capture: 'iw' not on PATH; skipping monitor capture")
+    iw = _find_tool("iw")
+    if iw is None:
+        log.warning("wifi5g_capture: 'iw' not found on PATH or in /sbin:/usr/sbin; skipping monitor capture")
         return None
-    if shutil.which("tcpdump") is None:
-        log.warning("wifi5g_capture: 'tcpdump' not on PATH; skipping monitor capture")
+    tcpdump = _find_tool("tcpdump")
+    if tcpdump is None:
+        log.warning("wifi5g_capture: 'tcpdump' not found; skipping monitor capture")
         return None
 
-    ok, msg = set_monitor_mode(iface)
+    ok, mon_iface, msg = create_monitor_vif(iface)
     if not ok:
-        log.warning("wifi5g_capture: could not set monitor mode on %s: %s", iface, msg)
+        log.warning("wifi5g_capture: could not create monitor vif on %s: %s", iface, msg)
         return None
 
     ch_list = list(channels) if channels else list(DEFAULT_5GHZ_CHANNELS)
     if not ch_list:
         log.warning("wifi5g_capture: empty channel list; aborting")
-        restore_managed_mode(iface)
+        delete_monitor_vif(mon_iface)
         return None
 
     # Park on the first channel so tcpdump starts seeing frames immediately.
-    set_channel(iface, ch_list[0], width_mhz)
+    set_channel(mon_iface, ch_list[0], width_mhz)
 
     # tcpdump writes pcap directly; -U flushes per packet so partial files are
     # valid if we get killed. -s 256 captures management+control headers and a
     # bit of data payload without exploding pcap size.
     cmd = [
-        "tcpdump",
-        "-i", iface,
+        tcpdump,
+        "-i", mon_iface,
         "-w", pcap_path,
         "-U",
         "-s", "256",
@@ -256,7 +273,7 @@ def start_capture(
         )
     except FileNotFoundError as exc:
         log.warning("wifi5g_capture: tcpdump spawn failed: %s", exc)
-        restore_managed_mode(iface)
+        delete_monitor_vif(mon_iface)
         return None
 
     # Give tcpdump a moment to bind to the iface; if it dies immediately, bail.
@@ -264,11 +281,12 @@ def start_capture(
     if proc.poll() is not None:
         err = proc.stderr.read() if proc.stderr else ""
         log.warning("wifi5g_capture: tcpdump exited rc=%s err=%s", proc.returncode, err.strip()[:200])
-        restore_managed_mode(iface)
+        delete_monitor_vif(mon_iface)
         return None
 
     handles = CaptureHandles(
-        iface=iface,
+        parent_iface=iface,
+        iface=mon_iface,
         pcap_path=pcap_path,
         schedule_log_path=schedule_log_path,
         tcpdump_proc=proc,
@@ -285,8 +303,9 @@ def start_capture(
     handles.hop_thread = hop
     hop.start()
     log.info(
-        "wifi5g_capture: started iface=%s pcap=%s channels=%s dwell_s=%.2f",
+        "wifi5g_capture: started parent=%s monitor=%s pcap=%s channels=%s dwell_s=%.2f",
         iface,
+        mon_iface,
         pcap_path,
         ch_list,
         dwell_s,
@@ -314,7 +333,7 @@ def stop_capture(handles: CaptureHandles) -> dict:
         except Exception:
             pass
 
-    restore_managed_mode(handles.iface)
+    delete_monitor_vif(handles.iface)
 
     # Flush the dwell schedule to disk as JSONL.
     try:
