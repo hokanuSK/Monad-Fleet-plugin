@@ -1,3 +1,5 @@
+import threading
+
 from .core import *  # noqa: F401,F403
 from .collectors import *  # noqa: F401,F403
 from .sinks import *  # noqa: F401,F403
@@ -492,6 +494,7 @@ def main() -> None:
             if not in_window(group_from, group.to):
                 continue
 
+            _async_tasks: list = []
             for cmd in group.commands:
                 commands_total += 1
                 cmd_id = normalize(cmd.id) or f"cmd-{commands_total}"
@@ -568,6 +571,11 @@ def main() -> None:
                     )
                     if emit_live_samples and route_iface and route_iface.startswith("wl") and not allow_wifi_live_ingest:
                         emit_live_samples = False
+                    wifi_scan_mode = normalize(cmd_env.get("WIFI_SCAN_MODE")).lower()
+                    wifi_run_async = (
+                        wifi_scan_mode == "passive_monitor"
+                        and parse_bool(cmd_env.get("WIFI_SCAN_RUN_ASYNC"), False)
+                    )
                     if requested_interval_s > 0 and requested_duration_s > 0:
                         exit_code, duration_ms, message, parsed, extra_artifacts = collect_wifi_scan_series(
                             wifi_iface,
@@ -588,6 +596,18 @@ def main() -> None:
                             override_argv=cmd_argv,
                             override_env=cmd_env,
                         )
+                    elif wifi_run_async:
+                        _box: list = []
+                        def _wifi_worker(
+                            _b=_box, _iface=wifi_iface, _tms=timeout_ms,
+                            _ep=execute_policy, _s=store, _rid=run_id, _cid=cmd_id,
+                            _cl=cmdline, _av=cmd_argv, _ev=cmd_env,
+                        ):
+                            _b.append(collect_wifi_scan(_iface, _tms, _ep, _s, _rid, _cid, override_cmdline=_cl, override_argv=_av, override_env=_ev))
+                        _t = threading.Thread(target=_wifi_worker, daemon=True)
+                        _t.start()
+                        _async_tasks.append((_t, _box))
+                        exit_code, duration_ms, message, parsed, extra_artifacts = 0, 0, "passive_monitor started async", {"wifi_capture_mode": "passive_monitor", "async": "true"}, []
                     else:
                         exit_code, duration_ms, message, parsed, extra_artifacts = collect_wifi_scan(
                             wifi_iface,
@@ -604,16 +624,34 @@ def main() -> None:
                     wifi_ap_total += max(0, wifi_ap_count)
                     event_metrics = parsed
                 elif int(cmd.type) == int(fleet_gateway_v2_pb2.BLE_SCAN):
-                    exit_code, duration_ms, message, parsed, extra_artifacts = collect_ble_scan(
-                        timeout_ms,
-                        execute_policy,
-                        store,
-                        run_id,
-                        cmd_id,
-                        override_cmdline=cmdline,
-                        override_argv=cmd_argv,
-                        override_env=cmd_env,
+                    ble_scan_mode = normalize(cmd_env.get("BLE_SCAN_MODE")).lower()
+                    ble_run_async = (
+                        ble_scan_mode == "advertise"
+                        and parse_bool(cmd_env.get("BLE_SCAN_RUN_ASYNC"), False)
                     )
+                    if ble_run_async:
+                        _bbox: list = []
+                        def _ble_worker(
+                            _b=_bbox, _tms=timeout_ms, _ep=execute_policy,
+                            _s=store, _rid=run_id, _cid=cmd_id,
+                            _cl=cmdline, _av=cmd_argv, _ev=cmd_env,
+                        ):
+                            _b.append(collect_ble_scan(_tms, _ep, _s, _rid, _cid, override_cmdline=_cl, override_argv=_av, override_env=_ev))
+                        _bt = threading.Thread(target=_ble_worker, daemon=True)
+                        _bt.start()
+                        _async_tasks.append((_bt, _bbox))
+                        exit_code, duration_ms, message, parsed, extra_artifacts = 0, 0, "ble advertise started async", {"ble_mode": "advertise", "async": "true"}, []
+                    else:
+                        exit_code, duration_ms, message, parsed, extra_artifacts = collect_ble_scan(
+                            timeout_ms,
+                            execute_policy,
+                            store,
+                            run_id,
+                            cmd_id,
+                            override_cmdline=cmdline,
+                            override_argv=cmd_argv,
+                            override_env=cmd_env,
+                        )
                     ble_adv_count = int(parsed.get("ble_adv_count", "0") or 0)
                     ble_adv_total += max(0, ble_adv_count)
                     event_metrics = parsed
@@ -782,6 +820,14 @@ def main() -> None:
 
                 if exit_code != 0 and group.failure_mode == fleet_gateway_v2_pb2.FAIL_FAST:
                     break
+
+            for _at, _ab in _async_tasks:
+                _at.join()
+                if _ab:
+                    _, _, _, _, _aex = _ab[0]
+                    for _art in _aex:
+                        artifacts.append(_art)
+            _async_tasks.clear()
 
         status = "OK" if commands_failed == 0 else "FAILED"
         record(
