@@ -335,7 +335,6 @@ def main() -> None:
 
     poll = int(hello.recommended_prepare_poll_sec or default_poll_seconds)
     last_policy_id = ""
-    cached_policy: fleet_gateway_v2_pb2.Policy | None = None
     cycles = 0
 
     # Try to deliver any runs persisted from previous process/network interruptions.
@@ -369,20 +368,12 @@ def main() -> None:
         if policy_resp.status == fleet_gateway_v2_pb2.GetPolicyResponse.NOT_MODIFIED:
             if normalize(policy_resp.policy_id):
                 last_policy_id = normalize(policy_resp.policy_id)
-            if len(policy_resp.policy.command_groups) > 0:
-                policy = policy_resp.policy
-                log.info("Policy not modified: server returned executable policy_id=%s", last_policy_id)
-            elif cached_policy is not None and normalize(cached_policy.policy_id) == normalize(last_policy_id):
-                policy = fleet_gateway_v2_pb2.Policy()
-                policy.CopyFrom(cached_policy)
-                log.info("Policy not modified: using locally cached policy_id=%s", last_policy_id)
-            else:
-                log.warning("Policy not modified but no cached policy body is available; skipping execution")
-                flush_pending_reports_guarded("policy-not-modified-no-cache")
-                if reached_max_cycles(cycles, max_cycles):
-                    break
-                time.sleep(poll)
-                continue
+            log.info("Policy not modified: skipping execution and flushing pending work policy_id=%s", last_policy_id)
+            flush_pending_reports_guarded("policy-not-modified")
+            if reached_max_cycles(cycles, max_cycles):
+                break
+            time.sleep(poll)
+            continue
         elif policy_resp.status != fleet_gateway_v2_pb2.GetPolicyResponse.OK:
             log.info("No policy available")
             flush_pending_reports_guarded("policy-unavailable")
@@ -392,8 +383,6 @@ def main() -> None:
             continue
         else:
             policy = policy_resp.policy
-            cached_policy = fleet_gateway_v2_pb2.Policy()
-            cached_policy.CopyFrom(policy)
 
         if policy is None:
             log.warning("No executable policy payload after policy resolution; skipping cycle")

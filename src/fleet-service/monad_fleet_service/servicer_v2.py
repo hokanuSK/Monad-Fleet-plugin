@@ -47,6 +47,7 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
         )
 
     def _update_v2_presence(self, item: dict[str, Any], agent: fleet_gateway_v2_pb2.AgentDescriptor) -> None:
+        record_device_display_name(agent.agent_id, agent.hostname)
         item_id = item.get("id")
         if not item_id:
             return
