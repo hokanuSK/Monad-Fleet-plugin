@@ -10,17 +10,15 @@ COPY src/fleet-service/requirements.txt ./requirements.txt
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY shared/proto ./proto
+COPY shared/proto_gen/fleet_gateway_pb2.py \
+     shared/proto_gen/fleet_gateway_pb2_grpc.py \
+     shared/proto_gen/fleet_gateway_v2_pb2.py \
+     shared/proto_gen/fleet_gateway_v2_pb2_grpc.py \
+     shared/proto_gen/fleet_gateway_v3_pb2.py \
+     shared/proto_gen/fleet_gateway_v3_pb2_grpc.py \
+     ./
 COPY src/fleet-service/gateway_server.py ./gateway_server.py
 COPY src/fleet-service/monad_fleet_service ./monad_fleet_service
-
-RUN python -m grpc_tools.protoc \
-    -I./proto \
-    --python_out=. \
-    --grpc_python_out=. \
-    proto/fleet_gateway.proto \
-    proto/fleet_gateway_v2.proto \
-    proto/fleet_gateway_v3.proto
 
 EXPOSE 50060
 EXPOSE 9108

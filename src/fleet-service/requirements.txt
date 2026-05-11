@@ -1,5 +1,4 @@
 grpcio
-grpcio-tools
 requests
 urllib3
 prometheus-client
