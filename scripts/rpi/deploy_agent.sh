@@ -53,8 +53,7 @@ run_scp() {
 
 AGENT_SRC="${ROOT_DIR}/src/device-sim/agent_v2_client.py"
 AGENT_PKG_SRC="${ROOT_DIR}/src/device-sim/agent_v2"
-PROTO_V2_SRC="${ROOT_DIR}/shared/proto/fleet_gateway_v2.proto"
-PROTO_V3_SRC="${ROOT_DIR}/shared/proto/fleet_gateway_v3.proto"
+PROTO_GEN_SRC="${ROOT_DIR}/shared/proto_gen"
 
 if [[ ! -f "${AGENT_SRC}" ]]; then
   echo "Missing file: ${AGENT_SRC}" >&2
@@ -64,45 +63,24 @@ if [[ ! -d "${AGENT_PKG_SRC}" ]]; then
   echo "Missing directory: ${AGENT_PKG_SRC}" >&2
   exit 1
 fi
-if [[ ! -f "${PROTO_V2_SRC}" ]]; then
-  echo "Missing file: ${PROTO_V2_SRC}" >&2
-  exit 1
-fi
-if [[ ! -f "${PROTO_V3_SRC}" ]]; then
-  echo "Missing file: ${PROTO_V3_SRC}" >&2
+if [[ ! -d "${PROTO_GEN_SRC}" ]]; then
+  echo "Missing directory: ${PROTO_GEN_SRC}" >&2
   exit 1
 fi
 
-echo "[1/4] Preparing directory on ${PI_USER}@${PI_HOST}:${PI_DIR}"
+echo "[1/3] Preparing directory on ${PI_USER}@${PI_HOST}:${PI_DIR}"
 run_ssh "${PI_USER}@${PI_HOST}" "mkdir -p '${PI_DIR}'"
 
-echo "[2/4] Copying agent and proto"
+echo "[2/3] Copying agent and pre-generated proto stubs"
 run_scp "${AGENT_SRC}" "${PI_USER}@${PI_HOST}:${PI_DIR}/agent_v2_client.py"
 run_scp -r "${AGENT_PKG_SRC}" "${PI_USER}@${PI_HOST}:${PI_DIR}/"
-run_scp "${PROTO_V2_SRC}" "${PI_USER}@${PI_HOST}:${PI_DIR}/fleet_gateway_v2.proto"
-run_scp "${PROTO_V3_SRC}" "${PI_USER}@${PI_HOST}:${PI_DIR}/fleet_gateway_v3.proto"
+run_scp "${PROTO_GEN_SRC}"/*_pb2*.py "${PI_USER}@${PI_HOST}:${PI_DIR}/"
 
-echo "[3/4] Creating venv and installing dependencies"
+echo "[3/3] Creating venv and installing dependencies"
 run_ssh "${PI_USER}@${PI_HOST}" "bash -lc '
 set -euo pipefail
 python3 -m venv \"${PI_DIR}/venv\"
-\"${PI_DIR}/venv/bin/python\" -m pip install --upgrade pip grpcio grpcio-tools protobuf
-'"
-
-echo "[4/4] Generating protobuf stubs"
-run_ssh "${PI_USER}@${PI_HOST}" "bash -lc '
-set -euo pipefail
-\"${PI_DIR}/venv/bin/python\" -m grpc_tools.protoc \\
-  -I\"${PI_DIR}\" \\
-  --python_out=\"${PI_DIR}\" \\
-  --grpc_python_out=\"${PI_DIR}\" \\
-  \"${PI_DIR}/fleet_gateway_v2.proto\" \\
-  \"${PI_DIR}/fleet_gateway_v3.proto\"
-ls -1 \\
-  \"${PI_DIR}/fleet_gateway_v2_pb2.py\" \\
-  \"${PI_DIR}/fleet_gateway_v2_pb2_grpc.py\" \\
-  \"${PI_DIR}/fleet_gateway_v3_pb2.py\" \\
-  \"${PI_DIR}/fleet_gateway_v3_pb2_grpc.py\"
+\"${PI_DIR}/venv/bin/python\" -m pip install --upgrade pip grpcio protobuf prometheus-client
 '"
 
 echo "Pi agent deployment completed."
