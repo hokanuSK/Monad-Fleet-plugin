@@ -219,7 +219,7 @@ Report command start/finish/failure in real time; keep stable \texttt{event\_id}
 \texttt{ReportUploadStatus} &
 \texttt{agent\_id}, \texttt{run\_id}, \texttt{experiment\_id}, \texttt{policy\_id}, \texttt{payload\_kind}, \texttt{status} &
 \texttt{StatusAck(ok=true)} &
-Report maintenance metrics/logs upload state before/alongside report replay. \\
+Report maintenance metrics upload state before/alongside report replay. \\
 \texttt{ReportArtifactUploadStatus} &
 \texttt{agent\_id}, \texttt{run\_id}, \texttt{experiment\_id}, \texttt{policy\_id}, \texttt{artifact\_name}, \texttt{status} &
 \texttt{StatusAck(ok=true)} &
@@ -427,7 +427,7 @@ duplicate \texttt{preparation\_id} is accepted and treated as already acknowledg
 
 \textbf{Purpose:}
 \begin{itemize}
-  \item report maintenance-window upload state for metrics/logs spool data,
+  \item report maintenance-window upload state for metrics sink data,
   \item expose \texttt{ACK}/\texttt{ERROR}/\texttt{PENDING}/\texttt{SKIPPED} to backend metadata.
 \end{itemize}
 
@@ -875,9 +875,10 @@ Store numeric Wi-Fi/BLE/CSI-derived metrics in time-series backend (Mimir) and v
 
 \subsection{Path}
 \begin{verbatim}
-Agent summary/event metrics -> PublishReport -> Fleet /metrics -> Prometheus
-                                                               -> remote_write -> Mimir -> Grafana
-Low-resource sender JSON   -> /ingest/v1/metrics -> Fleet /metrics -> ...
+Agent live metrics     -> /ingest/v1/metrics -> Fleet /metrics -> Prometheus
+                                                            -> remote_write -> Mimir -> Grafana
+Agent report metrics   -> PublishReport -> Fleet /metrics -> ...
+Low-resource sender JSON -> /ingest/v1/metrics -> Fleet /metrics -> ...
 \end{verbatim}
 
 \subsection{Low-resource sender payload}
@@ -916,11 +917,11 @@ Reference assets in this repository:
 Mimir stores numeric samples, not binary capture blobs.
 Therefore:
 \begin{itemize}
-  \item raw CSI/BLE/PCAP data should be persisted as artifacts (local/object storage and optionally mirrored to eLabFTW uploads)
+  \item raw CSI/BLE/PCAP data and logs should be persisted as artifacts (local/object storage and optionally mirrored to eLabFTW uploads)
   \item derived numeric metrics should be sent via event/summary maps
 \end{itemize}
-\textbf{Current deployment profile:} CSI numeric keys (\texttt{csi\_*}) are excluded from time-series export to Prometheus/Mimir/Grafana.
-CSI remains artifact-first (run artifacts and optional eLabFTW uploads).
+\textbf{Current deployment profile:} numeric CSI summary keys are exportable to Prometheus/Mimir/Grafana by default.
+Raw CSI capture files remain artifact-first (run artifacts and optional eLabFTW uploads).
 
 \section{eLabFTW Mapping Profile}
 \subsection{Experiment authoring}
@@ -1083,7 +1084,7 @@ It resets fleet runtime and metrics storage state only.
 \textbf{Does reset:}
 \begin{itemize}
   \item \texttt{./artifacts/data/fleet/state.json}
-  \item \texttt{./artifacts/data/fleet/ingest-metrics.ndjson}
+  \item optional \texttt{./artifacts/data/fleet/ingest-metrics.ndjson} when metric ingest journaling is enabled
   \item \texttt{./artifacts/data/fleet/ingest-artifacts.ndjson}
   \item Prometheus local TSDB volume
   \item Mimir local TSDB volume
@@ -1348,8 +1349,8 @@ This repository provisions a Grafana dashboard focused on Raspberry Pi wireless 
 
 \textbf{Panels include:} Wi-Fi RSSI, BLE advertisement count, Wi-Fi AP count, Wi-Fi connected status,
 BLE scan status, artifact upload counters, command health, full metric snapshot table, and service counters.
-\textbf{Note:} CSI metrics are excluded from Prometheus/Mimir export in this deployment (\texttt{METRICS\_EXCLUDE\_PREFIXES=csi\_}).
-Use report artifacts/summary and \texttt{scripts/rpi/verify\_real\_run.sh} to validate CSI capture.
+\textbf{Note:} CSI summary counters can be graphed when the agent reports them, but raw CSI captures remain artifact data.
+Use report artifacts and \texttt{scripts/rpi/verify\_real\_run.sh} to validate raw CSI capture.
 
 \subsection{PromQL examples}
 \begin{verbatim}

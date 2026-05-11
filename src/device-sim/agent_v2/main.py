@@ -3,6 +3,7 @@ from .collectors import *  # noqa: F401,F403
 from .sinks import *  # noqa: F401,F403
 from . import core as core_mod
 from . import sinks as sinks_mod
+from . import prom_exposition as prom_exposition_mod
 
 
 def _raw_command_artifact_stem(cmd_id: str) -> str:
@@ -74,6 +75,14 @@ def main() -> None:
     active_upload_cfg = dict(base_upload_cfg)
 
     store = RunStore(data_root, sent_retention_days=sent_retention_days)
+
+    # Bring up the Prometheus exposition endpoint before we start polling so
+    # the Pi-side Prometheus has something to scrape from the moment this
+    # agent is alive. This is the path the new measurement metrics
+    # (power, 5 GHz aggregates, BLE rates) ride; it is independent of the
+    # legacy fleet-service /ingest/v1/metrics push.
+    prom_exposition_mod.start_exposition_server()
+
     channel = grpc.insecure_channel(target)
     stub = fleet_gateway_v2_pb2_grpc.FleetManagerStub(channel)
 
@@ -154,14 +163,14 @@ def main() -> None:
         try:
             ack = stub.ReportUploadStatus(
                 fleet_gateway_v2_pb2.ReportUploadStatusRequest(
-                    event_id=f"{normalize(run_id)}:upload:metrics_logs:{token.lower() or 'pending'}",
+                    event_id=f"{normalize(run_id)}:upload:metrics:{token.lower() or 'pending'}",
                     agent_id=agent_id,
                     run_id=normalize(run_id),
                     experiment_id=normalize(report.experiment_id),
                     policy_id=normalize(report.policy_id),
                     payload_kind=fleet_gateway_v2_pb2.METRICS_LOGS,
                     status=status_value,
-                    message=normalize(reason) or f"metrics/logs upload status={token or 'PENDING'}",
+                    message=normalize(reason) or f"metrics upload status={token or 'PENDING'}",
                     metrics={
                         "metrics_upload_state": token or "PENDING",
                         "upload_hook_reason": normalize(reason),
@@ -821,7 +830,12 @@ def main() -> None:
                     "merged_artifacts_count": merged_artifacts_count,
                     "server_side_artifact_bundling": 1 if server_side_bundling else 0,
                     "run_storage_pressure_hits": run_storage_pressure_hits,
-                    "latest_metrics": latest_observed_metrics,
+                    "metrics_destination": {
+                        "primary": "mimir",
+                        "path": "agent /metrics -> Pi Prometheus -> remote_write -> Mimir -> Grafana",
+                        "note": "Numeric telemetry values are intentionally omitted from this artifact; query Mimir/Grafana for metrics.",
+                    },
+                    "hardware_inventory": core_mod._collect_hardware_inventory(),
                     "generated_at": now_utc().isoformat().replace("+00:00", "Z"),
                 },
             )

@@ -21,7 +21,13 @@ else
 fi
 
 if [[ "${RESET_METRICS}" == "true" ]]; then
-  echo "[2/3] Reset Mimir data"
+  echo "[2/3] Reset Prometheus + Mimir data"
+  if docker compose ps --services --status running | grep -qx "prometheus"; then
+    docker compose exec -T prometheus sh -lc "rm -rf /prometheus/* || true"
+    docker compose restart prometheus >/dev/null
+  else
+    echo "Prometheus is not running; skipping Prometheus reset."
+  fi
   if docker compose ps --services --status running | grep -qx "mimir"; then
     docker compose exec -T mimir sh -lc "rm -rf /data/* || true"
     docker compose restart mimir >/dev/null

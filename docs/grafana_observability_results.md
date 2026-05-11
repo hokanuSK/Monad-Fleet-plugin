@@ -16,7 +16,7 @@ The dashboard reads from the `Mimir` datasource. Fleet metrics flow as:
 agent report or HTTP ingest -> monad-fleet-service /metrics -> Prometheus scrape -> Mimir remote_write -> Grafana
 ```
 
-Both local and AWS compose stacks include Prometheus so Fleet `/metrics` samples are retained in Mimir for Grafana. Existing eLabFTW uploads and Fleet in-memory gauges do not automatically backfill Mimir history after a service restart.
+Both local and AWS compose stacks include Prometheus so Fleet `/metrics` samples are retained in Mimir for Grafana. Existing eLabFTW uploads and Fleet in-memory gauges do not automatically backfill Mimir history after a service restart. Metric ingest journaling is disabled by default; enable `ENABLE_METRICS_INGEST_JOURNAL=true` only for short debugging sessions.
 
 ## Panel Guide
 
@@ -25,7 +25,7 @@ Both local and AWS compose stacks include Prometheus so Fleet `/metrics` samples
 - `Wi-Fi AP Count`: access points observed by the Wi-Fi scan, accepting both `wifi_ap_count` and `wifi_ap_total`.
 - `Wi-Fi Connected`: `1` means the Pi was associated to Wi-Fi when the metric was reported.
 - `BLE Scan OK`: `1` means the BLE command completed successfully.
-- `CSI Frames Total`: CSI frame count when CSI metrics are exported. Current defaults exclude `csi_` metrics from Prometheus/Mimir export.
+- `CSI Frames Total`: CSI frame count when CSI metrics are available. Raw CSI captures remain artifacts; numeric CSI counters are eligible for Prometheus/Mimir export.
 - `Run Command Health`: compares `commands_total` and `commands_failed` for the selected device.
 - `All Device Metrics Snapshot`: instant table of every current numeric metric for the selected device.
 - `Device Health`: CPU temperature, load, memory, and uptime when agents provide `device_*` metrics.

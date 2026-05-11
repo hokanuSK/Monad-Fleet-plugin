@@ -27,7 +27,7 @@ Python gRPC service that integrates devices with eLabFTW for Wi-Fi/BLE/CSI fleet
   - `ReportCommandStatus` records command start/finish/failure in near-real-time
   - status calls are normalized into legacy event ingestion path (`_ingest_v1_event`) to keep one metadata/update pipeline
 - MAINTENANCE:
-  - `ReportUploadStatus` reports metrics/logs upload state (`ACK`, `ERROR`, `PENDING`, `SKIPPED`)
+  - `ReportUploadStatus` reports metrics sink upload state (`ACK`, `ERROR`, `PENDING`, `SKIPPED`)
   - `ReportArtifactUploadStatus` reports per-artifact upload state and optional URI/hash/size metadata
   - `PublishReport` remains the authoritative run close-out + dedupe decision (`ACCEPTED`/`DUPLICATE`/`REJECTED`)
 
@@ -74,6 +74,8 @@ Python gRPC service that integrates devices with eLabFTW for Wi-Fi/BLE/CSI fleet
 - `RESOURCE_STATUS_ID_MAP_JSON` (optional JSON object for runtime-state -> eLab status id resolution by status title, e.g. `{"waiting":7,"operational":2,"open":8,"processed":6,"maintenance mode":1}`)
 - `METRICS_BIND` (`0.0.0.0`)
 - `METRICS_PORT` (`9108`)
+- `METRICS_EXCLUDE_PREFIXES` (empty by default; comma-separated metric-name prefixes to suppress from Prometheus/Mimir export)
+- `ENABLE_METRICS_INGEST_JOURNAL` (`false`; set `true` only for short-lived HTTP ingest debugging)
 - `INGEST_API_TOKEN` (empty by default; set to require `x-ingest-token` on HTTP ingest)
 - `ARTIFACT_MAX_BYTES` (max accepted artifact bytes for `/ingest/v1/artifacts`, default `20971520`)
 
