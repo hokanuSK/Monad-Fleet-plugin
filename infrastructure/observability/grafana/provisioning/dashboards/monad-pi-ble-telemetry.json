@@ -1,0 +1,299 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "BLE advertisement telemetry from the agent /metrics endpoint. Shows advertise windows, payload-refresh rate, and cumulative tx count per Pi. Sourced from Pi-side Prometheus scraping the agent and remote-writing to Mimir.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Advertise active right now",
+      "description": "1 = bluetoothctl advertise pipeline is running, 0 = idle.",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "text", "value": null },
+              { "color": "blue", "value": 1 }
+            ]
+          },
+          "unit": "short",
+          "decimals": 0,
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "IDLE", "color": "text" } } },
+            { "type": "value", "options": { "1": { "text": "ADVERTISING", "color": "blue" } } }
+          ]
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center"
+      },
+      "targets": [
+        {
+          "expr": "monad_pi_ble_advertise_active{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Total adv_id refreshes",
+      "description": "Cumulative count of BLE payload refreshes since agent start. Each refresh = one new adv_id broadcast. Ticks once per BLE_ADV_UPDATE_INTERVAL_S, not once per radio broadcast.",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          },
+          "unit": "short",
+          "decimals": 0
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center"
+      },
+      "targets": [
+        {
+          "expr": "monad_pi_ble_tx_total{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "adv_id refresh rate (last 1 min)",
+      "description": "Payload refreshes per second over the last minute. Expected: 1 / BLE_ADV_UPDATE_INTERVAL_S (e.g. 0.5/s at 2s interval). 0 while idle or if the bluetoothctl pipeline is stuck.",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "text", "value": null },
+              { "color": "blue", "value": 0.1 }
+            ]
+          },
+          "unit": "ops",
+          "decimals": 3
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center"
+      },
+      "targets": [
+        {
+          "expr": "rate(monad_pi_ble_tx_total{instance=~\"$instance\"}[1m])",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "adv_id refreshes this window",
+      "description": "Number of payload refreshes during the selected time range (increase over window). Useful for estimating how many unique adv_ids a receiver would observe.",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          },
+          "unit": "short",
+          "decimals": 0
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center"
+      },
+      "targets": [
+        {
+          "expr": "increase(monad_pi_ble_tx_total{instance=~\"$instance\"}[$__range])",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Advertise window (active / idle)",
+      "description": "1 = bluetoothctl pipeline running, 0 = idle. Use as an annotation layer when correlating with power or Wi-Fi panels.",
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 4 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 30,
+            "gradientMode": "none",
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "unit": "short",
+          "min": 0,
+          "max": 1.1
+        }
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "monad_pi_ble_advertise_active{instance=~\"$instance\"}",
+          "legendFormat": "advertise_active {{instance}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "BLE adv_id refresh rate over time",
+      "description": "rate(monad_pi_ble_tx_total[1m]). Expected ~0.5/s at BLE_ADV_UPDATE_INTERVAL_S=2.0. A flat zero while advertise_active=1 means the bluetoothctl pipeline is stuck.",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 10 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "unit": "ops",
+          "decimals": 3,
+          "min": 0
+        }
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "rate(monad_pi_ble_tx_total{instance=~\"$instance\"}[1m])",
+          "legendFormat": "tx rate {{instance}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Cumulative adv_id refreshes (counter)",
+      "description": "Raw monad_pi_ble_tx_total counter. Resets on agent restart. Slope = refresh rate; compare between Pis to confirm all are advertising.",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 10 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "unit": "short",
+          "decimals": 0,
+          "min": 0
+        }
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "monad_pi_ble_tx_total{instance=~\"$instance\"}",
+          "legendFormat": "tx_total {{instance}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "refresh": "15s",
+  "schemaVersion": 38,
+  "tags": ["monad", "ble", "bluetooth", "pi"],
+  "templating": {
+    "list": [
+      {
+        "name": "instance",
+        "label": "Pi instance",
+        "type": "query",
+        "query": {
+          "query": "label_values(monad_pi_ble_advertise_active, instance)",
+          "refId": "MimirVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": { "selected": true, "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Monad Pi BLE Telemetry",
+  "uid": "monad-pi-ble-telemetry",
+  "version": 1
+}
