@@ -95,6 +95,7 @@ services:
       - "METRICS_EXCLUDE_PREFIXES="
       - "ENABLE_METRICS_INGEST_JOURNAL=false"
       - "INGEST_API_TOKEN="
+      - "DEVICE_INTERFACE_OVERRIDES_JSON="
       - "GRAFANA_EXPERIMENT_DASHBOARDS_ENABLED=true"
       - "GRAFANA_DASHBOARD_TEMPLATE_DIR=/etc/grafana/provisioning/dashboards/static"
       - "GRAFANA_DASHBOARD_OUTPUT_ROOT=/etc/grafana/provisioning/dashboards/experiments"
