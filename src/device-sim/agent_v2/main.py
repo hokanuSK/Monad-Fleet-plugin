@@ -16,6 +16,86 @@ def _raw_command_artifact_stem(cmd_id: str) -> str:
     return f"command-{token}-raw-output"
 
 
+def _policy_env_value(policy: fleet_gateway_v2_pb2.Policy, key: str) -> str:
+    target = normalize(key)
+    if not target:
+        return ""
+    for group in policy.command_groups:
+        for cmd in group.commands:
+            value = normalize(cmd.env.get(target))
+            if value:
+                return value
+    return ""
+
+
+def _policy_execution_config(policy: fleet_gateway_v2_pb2.Policy) -> dict[str, int | str]:
+    mode = normalize(_policy_env_value(policy, "EXECUTION_MODE")).lower() or "once"
+    if mode not in {"once", "recurring"}:
+        mode = "once"
+    interval_s = max(0, parse_int(_policy_env_value(policy, "EXECUTION_INTERVAL_S"), 0))
+    max_runs = max(0, parse_int(_policy_env_value(policy, "EXECUTION_MAX_RUNS"), 0))
+    return {
+        "mode": mode,
+        "interval_s": interval_s,
+        "max_runs": max_runs,
+    }
+
+
+def _policy_execution_key(
+    *,
+    agent_id: str,
+    experiment_id: str,
+    policy_id: str,
+    measurement_from: str,
+    measurement_to: str,
+) -> str:
+    parts = [
+        normalize(agent_id).lower(),
+        normalize(experiment_id),
+        normalize(policy_id),
+        normalize(measurement_from),
+        normalize(measurement_to),
+    ]
+    return "|".join(parts)
+
+
+def _execution_skip_reason(
+    store: RunStore,
+    execution_key: str,
+    execution_cfg: dict[str, int | str],
+) -> str:
+    record = store.get_execution_record(execution_key)
+    if not record:
+        return ""
+    state = normalize(record.get("state")).lower()
+    mode = normalize(execution_cfg.get("mode")).lower() or "once"
+    if state == "in_progress":
+        return "execution already in progress"
+    if mode == "once":
+        if state in {"completed", "reported", "failed"}:
+            return f"execution already {state}"
+        return ""
+    if mode != "recurring":
+        return ""
+    max_runs = max(0, int(execution_cfg.get("max_runs", 0) or 0))
+    completed_runs = max(0, int(record.get("completed_runs", 0) or 0))
+    if max_runs > 0 and completed_runs >= max_runs:
+        return f"recurring execution reached max_runs={max_runs}"
+    interval_s = max(0, int(execution_cfg.get("interval_s", 0) or 0))
+    if interval_s <= 0:
+        return ""
+    last_completed_raw = normalize(record.get("last_completed_at") or record.get("last_started_at"))
+    last_completed = parse_iso(last_completed_raw) if last_completed_raw else None
+    if last_completed is None:
+        return ""
+    next_due = last_completed + timedelta(seconds=interval_s)
+    now = now_utc()
+    if now < next_due:
+        wait_s = max(1, int((next_due - now).total_seconds()))
+        return f"recurring execution not due for another {wait_s}s"
+    return ""
+
+
 def main() -> None:
     fleet_host = os.environ.get("FLEET_MANAGER_HOST", "monad-fleet-service")
     fleet_port = int(os.environ.get("FLEET_MANAGER_PORT", "50060"))
@@ -421,6 +501,31 @@ def main() -> None:
         if policy.allowed_mode == fleet_gateway_v2_pb2.DUAL_NIC:
             route_verified = bool(route_iface and route_iface == normalize(policy.control_plane_iface))
 
+        measure_from_iso = ts_to_iso(policy.measurement_from)
+        measure_to_iso = ts_to_iso(policy.measurement_to)
+        execution_cfg = _policy_execution_config(policy)
+        execution_key = _policy_execution_key(
+            agent_id=agent_id,
+            experiment_id=policy.experiment_id,
+            policy_id=policy.policy_id,
+            measurement_from=measure_from_iso,
+            measurement_to=measure_to_iso,
+        )
+        skip_reason = _execution_skip_reason(store, execution_key, execution_cfg)
+        if skip_reason:
+            log.info(
+                "Skip execution for policy_id=%s experiment_id=%s mode=%s reason=%s",
+                normalize(policy.policy_id),
+                normalize(policy.experiment_id),
+                normalize(execution_cfg.get("mode")),
+                skip_reason,
+            )
+            flush_pending_reports_guarded("execution-skipped")
+            if reached_max_cycles(cycles, max_cycles):
+                break
+            time.sleep(poll)
+            continue
+
         prep = stub.AckPrepared(
             fleet_gateway_v2_pb2.AckPreparedRequest(
                 agent_id=agent_id,
@@ -444,6 +549,15 @@ def main() -> None:
             continue
 
         run_id = str(uuid.uuid4())
+        store.mark_execution_state(
+            execution_key,
+            state="in_progress",
+            run_id=run_id,
+            policy_id=normalize(policy.policy_id),
+            experiment_id=normalize(policy.experiment_id),
+            measurement_from=measure_from_iso,
+            measurement_to=measure_to_iso,
+        )
         store.start_run(
             run_id,
             {
@@ -451,6 +565,10 @@ def main() -> None:
                 "agent_id": agent_id,
                 "policy_id": policy.policy_id,
                 "experiment_id": policy.experiment_id,
+                "execution_key": execution_key,
+                "execution_mode": normalize(execution_cfg.get("mode")),
+                "measurement_from": measure_from_iso,
+                "measurement_to": measure_to_iso,
                 "started_at": now_utc().isoformat().replace("+00:00", "Z"),
             },
         )
@@ -550,7 +668,11 @@ def main() -> None:
                 extra_artifacts: list[fleet_gateway_v2_pb2.ArtifactRef] = []
 
                 if int(cmd.type) == int(fleet_gateway_v2_pb2.WIFI_SCAN):
-                    wifi_iface = normalize(os.environ.get("WIFI_SCAN_IFACE") or control_plane_iface)
+                    wifi_iface = normalize(
+                        cmd_env.get("WIFI_SCAN_IFACE")
+                        or os.environ.get("WIFI_SCAN_IFACE")
+                        or control_plane_iface
+                    )
                     requested_interval_s = parse_int(
                         cmd_env.get("WIFI_SAMPLE_INTERVAL_S") or cmd_env.get("SAMPLE_INTERVAL_S"),
                         0,

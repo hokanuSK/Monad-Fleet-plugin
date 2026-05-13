@@ -79,6 +79,14 @@ def _ensure_reporting(policy: dict[str, Any]) -> dict[str, Any]:
     return reporting
 
 
+def _ensure_execution(policy: dict[str, Any]) -> dict[str, Any]:
+    execution = policy.get("execution")
+    if not isinstance(execution, dict):
+        execution = {}
+        policy["execution"] = execution
+    return execution
+
+
 def _window_has_times(window: Any) -> bool:
     if not isinstance(window, dict):
         return False
@@ -206,6 +214,31 @@ def _apply_sync_reporting(policy: dict[str, Any], sync_env: dict[str, str]) -> d
             derived_env["UPLOAD_SLOT_JITTER_S"] = str(max(0, slot_jitter_s))
         if slotting:
             reporting["slotting"] = slotting
+
+    execution = _ensure_execution(policy)
+    execution_mode = _normalize(execution.get("mode")).lower()
+    if not execution_mode:
+        execution_mode = _normalize(sync_env.get("SYNC_EXECUTION_MODE") or sync_env.get("EXECUTION_MODE")).lower()
+    if not execution_mode:
+        execution_mode = "once"
+    if execution_mode not in {"once", "recurring"}:
+        execution_mode = "once"
+    execution["mode"] = execution_mode
+    derived_env["EXECUTION_MODE"] = execution_mode
+
+    interval_s = _parse_int(execution.get("interval_s"))
+    if interval_s is None:
+        interval_s = _parse_int(sync_env.get("SYNC_EXECUTION_INTERVAL_S") or sync_env.get("EXECUTION_INTERVAL_S"))
+    if execution_mode == "recurring" and interval_s is not None and interval_s > 0:
+        execution["interval_s"] = max(1, interval_s)
+        derived_env["EXECUTION_INTERVAL_S"] = str(max(1, interval_s))
+
+    max_runs = _parse_int(execution.get("max_runs"))
+    if max_runs is None:
+        max_runs = _parse_int(sync_env.get("SYNC_EXECUTION_MAX_RUNS") or sync_env.get("EXECUTION_MAX_RUNS"))
+    if max_runs is not None and max_runs >= 0:
+        execution["max_runs"] = max(0, max_runs)
+        derived_env["EXECUTION_MAX_RUNS"] = str(max(0, max_runs))
 
     return derived_env
 
