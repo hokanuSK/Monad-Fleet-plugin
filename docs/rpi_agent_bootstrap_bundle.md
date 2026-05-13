@@ -32,6 +32,7 @@ Each device directory contains:
   - Wi-Fi scan iface
   - artifact upload target
   - metrics sink defaults
+  - Prometheus labels and remote_write target
 - `README.md`
   - install example for that device
 
@@ -45,7 +46,7 @@ Top-level output contains:
 Edit a CSV matching:
 
 ```text
-hostname,agent_id,control_plane_iface,wifi_scan_iface,capabilities,artifact_upload_target,default_metrics_sinks,grpc_dns_resolver
+hostname,agent_id,control_plane_iface,wifi_scan_iface,capabilities,artifact_upload_target,default_metrics_sinks,grpc_dns_resolver,prom_pi_id,prom_site,prom_instance,prom_metrics_port,prom_exposition_port,prom_remote_write_url
 ```
 
 Then run:
@@ -74,12 +75,18 @@ What the installer does:
    - `iw`
    - `bluez`
    - `wireless-tools`
-3. deploys agent code with `scripts/rpi/deploy_agent.sh`
-4. installs the systemd unit with `scripts/rpi/install_systemd_service.sh`
-5. verifies:
+   - `prometheus`
+3. writes `/etc/prometheus/prometheus.yml` to:
+   - scrape `127.0.0.1:<prom_metrics_port>`
+   - label the device for Grafana/Mimir
+   - `remote_write` to Mimir
+4. deploys agent code with `scripts/rpi/deploy_agent.sh`
+5. installs the systemd unit with `scripts/rpi/install_systemd_service.sh`
+6. verifies:
    - `iw`
    - `bluetoothctl`
    - Python imports for `grpc`, `google.protobuf`, `prometheus_client`
+   - active `prometheus`
    - active `monad-fleet-agent.service`
 
 ## Runtime Stabilization Included
@@ -89,7 +96,9 @@ The runtime side currently includes:
 - command-level `WIFI_SCAN_IFACE` is respected in `src/device-sim/agent_v2/main.py`
 - fresh Ubuntu package prerequisites are installed before deploy
 - broken WireGuard-provided DNS can be stripped before package install
+- local Prometheus scrape + remote_write is configured as part of bootstrap
 
 That combination addresses the failure mode we saw on `monad-01`, where the
 agent fell back to `iw link` status collection and never produced a pcap
-because `iw` was missing and DNS prevented package installation.
+because `iw` was missing and DNS prevented package installation, and where
+Grafana stayed empty because the node had no local Prometheus path into Mimir.

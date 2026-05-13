@@ -90,6 +90,15 @@ required_columns = [
     "grpc_dns_resolver",
 ]
 
+optional_columns = [
+    "prom_pi_id",
+    "prom_site",
+    "prom_instance",
+    "prom_metrics_port",
+    "prom_exposition_port",
+    "prom_remote_write_url",
+]
+
 rows = []
 with device_csv.open(newline="", encoding="utf-8") as fh:
     reader = csv.DictReader(fh)
@@ -101,17 +110,25 @@ with device_csv.open(newline="", encoding="utf-8") as fh:
         if not hostname:
             continue
         row = {name: (raw.get(name) or "").strip() for name in required_columns}
+        for name in optional_columns:
+            row[name] = (raw.get(name) or "").strip()
         row["control_plane_iface"] = row["control_plane_iface"] or "wg0"
         row["wifi_scan_iface"] = row["wifi_scan_iface"] or row["control_plane_iface"]
         row["capabilities"] = row["capabilities"] or "csi,ble,wifi"
         row["artifact_upload_target"] = row["artifact_upload_target"] or "fleet_http"
         row["default_metrics_sinks"] = row["default_metrics_sinks"] or "fleet_http"
         row["grpc_dns_resolver"] = row["grpc_dns_resolver"] or "native"
+        row["prom_pi_id"] = row["prom_pi_id"] or row["hostname"]
+        row["prom_site"] = row["prom_site"] or "monad-fleet"
+        row["prom_instance"] = row["prom_instance"] or row["hostname"]
+        row["prom_metrics_port"] = row["prom_metrics_port"] or "9110"
+        row["prom_exposition_port"] = row["prom_exposition_port"] or row["prom_metrics_port"]
+        row["prom_remote_write_url"] = row["prom_remote_write_url"] or "http://10.200.0.1:9009/api/v1/push"
         rows.append(row)
 
 manifest_path = out_dir / "manifest.csv"
 with manifest_path.open("w", newline="", encoding="utf-8") as fh:
-    writer = csv.DictWriter(fh, fieldnames=required_columns)
+    writer = csv.DictWriter(fh, fieldnames=required_columns + optional_columns)
     writer.writeheader()
     writer.writerows(rows)
 
@@ -140,6 +157,12 @@ for row in rows:
         f"MONAD_DEFAULT_METRICS_SINKS='{row['default_metrics_sinks']}'",
         f"MONAD_GRPC_DNS_RESOLVER='{row['grpc_dns_resolver']}'",
         f"MONAD_STRIP_WG_DNS='{defaults['strip_wg_dns']}'",
+        f"MONAD_PROM_PI_ID='{row['prom_pi_id']}'",
+        f"MONAD_PROM_SITE='{row['prom_site']}'",
+        f"MONAD_PROM_INSTANCE='{row['prom_instance']}'",
+        f"MONAD_PROM_METRICS_PORT='{row['prom_metrics_port']}'",
+        f"MONAD_PROM_EXPOSITION_PORT='{row['prom_exposition_port']}'",
+        f"MONAD_PROM_REMOTE_WRITE_URL='{row['prom_remote_write_url']}'",
     ]
     (device_dir / "agent.env").write_text("\n".join(env_lines) + "\n", encoding="utf-8")
 
@@ -150,6 +173,7 @@ This bundle assumes:
 - Ubuntu is already flashed and booted
 - the device already has working network access
 - WireGuard is already configured and can reach {defaults['fleet_manager_host']}:{defaults['fleet_manager_port']}
+- Prometheus will be configured to scrape 127.0.0.1:{row['prom_metrics_port']} and remote_write to {row['prom_remote_write_url']}
 
 Install from the operator machine with:
 

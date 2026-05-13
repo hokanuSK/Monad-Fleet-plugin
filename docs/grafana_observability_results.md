@@ -6,9 +6,10 @@ This guide explains what the Monad Fleet Grafana dashboard shows, how to read th
 
 - Local Grafana: `http://localhost:3000`
 - AWS Grafana: `https://grafana-monad-fleet.16.171.70.171.sslip.io`
-- Dashboard UID: `monad-fleet-wireless-v3`
-- Dashboard path: `/d/monad-fleet-wireless-v3/monad-fleet-wireless-sensing-pi-smoke-v3`
-- Provisioned file: `infrastructure/observability/grafana/provisioning/dashboards/monad-fleet-wireless-sensing-v3.json`
+- Static dashboard folder: `Monad Fleet`
+- Per-experiment dashboard folder: `experiment-<id>`; created automatically by the Fleet service when it sees a valid non-expired fleet experiment, or manually by `scripts/grafana/provision_experiment_dashboards.py`
+- Static dashboard templates: `infrastructure/observability/grafana/provisioning/dashboards/static/*.json`
+- Generated experiment dashboards: `infrastructure/observability/grafana/provisioning/dashboards/experiments/experiment-<id>/*.json`
 
 The dashboard reads from the `Mimir` datasource. Fleet metrics flow as:
 
@@ -19,6 +20,10 @@ agent report or HTTP ingest -> monad-fleet-service /metrics -> Prometheus scrape
 Both local and AWS compose stacks include Prometheus so Fleet `/metrics` samples are retained in Mimir for Grafana. Existing eLabFTW uploads and Fleet in-memory gauges do not automatically backfill Mimir history after a service restart. Metric ingest journaling is disabled by default; enable `ENABLE_METRICS_INGEST_JOURNAL=true` only for short debugging sessions.
 
 ## Panel Guide
+
+Smoke runs generate four experiment-scoped dashboards: Power, BLE, Wi-Fi, and CSI. The folder name is based on the eLabFTW experiment id, and the device selector is seeded from the experiment target device list.
+
+The Fleet service auto-provision path is controlled by `GRAFANA_EXPERIMENT_DASHBOARDS_ENABLED=true`. The service must have the Grafana dashboard provisioning directory mounted read/write at `GRAFANA_DASHBOARD_OUTPUT_ROOT`; Grafana reads the same generated files through its file provider.
 
 - `Wi-Fi RSSI (dBm)`: signal strength from the latest Wi-Fi scan/report. Values closer to zero are stronger.
 - `BLE Advertisements`: BLE advertisement count from either `ble_adv_count` or `ble_adv_total`.
@@ -76,6 +81,18 @@ sum by (source) (rate(monad_fleet_metric_updates_total[5m]))
 ```
 
 For the 2026-04-30 localhost run, set the dashboard time range to include `2026-04-30 14:03-14:06 UTC` and select device `24:eb:16:e3:6a:07`.
+
+To regenerate the dashboard folder for a known experiment:
+
+```bash
+scripts/grafana/provision_experiment_dashboards.py --experiment-id 7 --device-ids 00:11:22:33:44:55
+```
+
+To derive device ids from a submitted experiment/policy JSON:
+
+```bash
+scripts/grafana/provision_experiment_dashboards.py --experiment-id 27 --policy-json artifacts/tmp/dual_pi_phase4_15min_27_20260511T202518Z.json
+```
 
 ## AWS Check On 2026-04-30
 

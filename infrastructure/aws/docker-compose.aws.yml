@@ -112,8 +112,13 @@ services:
       ENABLE_METRICS_INGEST_JOURNAL: ${ENABLE_METRICS_INGEST_JOURNAL:-false}
       INGEST_API_TOKEN: ${INGEST_API_TOKEN:-}
       ELAB_API_KEY: ${ELAB_API_KEY}
+      GRAFANA_EXPERIMENT_DASHBOARDS_ENABLED: ${GRAFANA_EXPERIMENT_DASHBOARDS_ENABLED:-true}
+      GRAFANA_DASHBOARD_TEMPLATE_DIR: /etc/grafana/provisioning/dashboards/static
+      GRAFANA_DASHBOARD_OUTPUT_ROOT: /etc/grafana/provisioning/dashboards/experiments
+      GRAFANA_EXPERIMENT_INSTANCE_MAP: ${GRAFANA_EXPERIMENT_INSTANCE_MAP:-2c:cf:67:81:00:45=monad-01,24:eb:16:e3:6a:07=monad-02,2c:cf:67:80:f5:86=monad-03,2c:cf:67:80:f4:bf=monad-04}
     volumes:
       - fleet-data:/data
+      - ./infrastructure/observability/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
     networks:
       - elabftw-net
     ports:

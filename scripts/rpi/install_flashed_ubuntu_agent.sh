@@ -19,7 +19,8 @@ Example:
 This script:
   1. stabilizes a fresh Ubuntu device (packages + optional WireGuard DNS cleanup)
   2. deploys the agent code
-  3. installs the systemd unit using the bundle configuration
+  3. configures local Prometheus scrape + remote_write to Mimir
+  4. installs the systemd unit using the bundle configuration
 EOF
 }
 
@@ -39,6 +40,12 @@ source "${ENV_FILE}"
 
 PI_USER="${PI_USER:-${MONAD_PI_USER:-monad}}"
 PI_DIR="${PI_DIR:-${MONAD_PI_DIR:-/home/${PI_USER}/monad-fleet-agent}}"
+PROM_PI_ID="${PROM_PI_ID:-${MONAD_PROM_PI_ID:-${MONAD_HOSTNAME:-unknown-pi}}}"
+PROM_SITE="${PROM_SITE:-${MONAD_PROM_SITE:-monad-fleet}}"
+PROM_INSTANCE="${PROM_INSTANCE:-${MONAD_PROM_INSTANCE:-${MONAD_HOSTNAME:-unknown-pi}}}"
+PROM_METRICS_PORT="${PROM_METRICS_PORT:-${MONAD_PROM_METRICS_PORT:-9110}}"
+PROM_EXPOSITION_PORT="${PROM_EXPOSITION_PORT:-${MONAD_PROM_EXPOSITION_PORT:-${PROM_METRICS_PORT}}}"
+PROM_REMOTE_WRITE_URL="${PROM_REMOTE_WRITE_URL:-${MONAD_PROM_REMOTE_WRITE_URL:-http://10.200.0.1:9009/api/v1/push}}"
 SSH_PROXY_JUMP="${SSH_PROXY_JUMP:-}"
 SSH_IDENTITY_FILE="${SSH_IDENTITY_FILE:-}"
 SSH_USER_KNOWN_HOSTS_FILE="${SSH_USER_KNOWN_HOSTS_FILE:-}"
@@ -77,7 +84,7 @@ if [[ \"${MONAD_STRIP_WG_DNS:-false}\" == \"true\" ]] && sudo test -f /etc/wireg
 fi
 sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::ForceIPv4=true update
 sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::ForceIPv4=true install -y \
-  python3.12-venv iw bluez wireless-tools
+  python3.12-venv iw bluez wireless-tools prometheus
 sudo systemctl enable --now bluetooth || true
 '"
 
@@ -88,7 +95,33 @@ SSH_USER_KNOWN_HOSTS_FILE="${SSH_USER_KNOWN_HOSTS_FILE}" \
 SSH_STRICT_HOST_KEY_CHECKING="${SSH_STRICT_HOST_KEY_CHECKING}" \
 "${ROOT_DIR}/scripts/rpi/deploy_agent.sh" "${PI_HOST}"
 
-echo "[3/4] Installing systemd service"
+echo "[3/4] Configuring local Prometheus"
+run_ssh "${PI_USER}@${PI_HOST}" "bash -lc '
+set -euo pipefail
+sudo install -d -m 0755 /etc/prometheus
+sudo tee /etc/prometheus/prometheus.yml >/dev/null <<\"PROM\"
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: monad-fleet-agent
+    static_configs:
+      - targets: [\"127.0.0.1:${PROM_METRICS_PORT}\"]
+        labels:
+          agent_id: \"${MONAD_AGENT_ID}\"
+          pi_id: \"${PROM_PI_ID}\"
+          site: \"${PROM_SITE}\"
+          instance: \"${PROM_INSTANCE}\"
+
+remote_write:
+  - url: \"${PROM_REMOTE_WRITE_URL}\"
+PROM
+sudo systemctl enable --now prometheus
+sudo systemctl restart prometheus
+'"
+
+echo "[4/4] Installing systemd service"
 PI_HOST="${PI_HOST}" PI_USER="${PI_USER}" PI_DIR="${PI_DIR}" \
 SSH_PROXY_JUMP="${SSH_PROXY_JUMP}" SSH_IDENTITY_FILE="${SSH_IDENTITY_FILE}" \
 SSH_USER_KNOWN_HOSTS_FILE="${SSH_USER_KNOWN_HOSTS_FILE}" \
@@ -109,9 +142,10 @@ ARTIFACT_EVICT_AFTER_UPLOAD="${MONAD_ARTIFACT_EVICT_AFTER_UPLOAD}" \
 RUN_ARTIFACT_SOFT_LIMIT_BYTES="${MONAD_RUN_ARTIFACT_SOFT_LIMIT_BYTES}" \
 DEFAULT_METRICS_SINKS="${MONAD_DEFAULT_METRICS_SINKS}" \
 GRPC_DNS_RESOLVER="${MONAD_GRPC_DNS_RESOLVER}" \
+METRICS_PORT="${PROM_EXPOSITION_PORT}" \
 "${ROOT_DIR}/scripts/rpi/install_systemd_service.sh" "${PI_HOST}"
 
-echo "[4/4] Verifying runtime"
+echo "[5/5] Verifying runtime"
 run_ssh "${PI_USER}@${PI_HOST}" "bash -lc '
 set -euo pipefail
 command -v iw
@@ -122,7 +156,9 @@ import google.protobuf
 import prometheus_client
 print(\"python-runtime-ok\")
 PY
+sudo systemctl is-active prometheus
 sudo systemctl is-active monad-fleet-agent.service
+sudo grep -q \"${PROM_REMOTE_WRITE_URL}\" /etc/prometheus/prometheus.yml
 '"
 
 cat <<EOF
@@ -132,4 +168,6 @@ Bundle: ${BUNDLE_DIR}
 Fleet manager: ${MONAD_FLEET_MANAGER_HOST}:${MONAD_FLEET_MANAGER_PORT}
 Control plane iface: ${MONAD_CONTROL_PLANE_IFACE}
 Wi-Fi scan iface: ${MONAD_WIFI_SCAN_IFACE}
+Prometheus scrape: 127.0.0.1:${PROM_METRICS_PORT}
+Prometheus remote_write: ${PROM_REMOTE_WRITE_URL}
 EOF

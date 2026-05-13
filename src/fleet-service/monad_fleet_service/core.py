@@ -104,6 +104,7 @@ ARTIFACT_SERVER_SPOOL_DIR: Path | None = None
 INGEST_JOURNAL_LOCK = threading.Lock()
 ELAB_CLIENT_FOR_HTTP: Any = None
 METRICS_EXCLUDE_PREFIXES: tuple[str, ...] = ()
+_AGENT_HOSTNAME_CACHE: dict[str, str] = {}
 
 
 def utc_now() -> datetime:
@@ -122,6 +123,11 @@ def normalize_string(value: Any) -> str:
 
 def normalize_device_id(value: Any) -> str:
     return normalize_string(value).lower()
+
+
+def safe_hostname_token(value: Any) -> str:
+    token = re.sub(r"[^a-zA-Z0-9._-]+", "-", normalize_string(value)).strip("-_.").lower()
+    return token[:64].rstrip("-_.")
 
 
 def looks_like_mac(value: str) -> bool:
@@ -281,6 +287,7 @@ def build_uploaded_artifact_name(
     artifact_name: str,
     run_id: str,
     agent_id: str,
+    hostname: str = "",
     upload_phase: str,
     sha256_value: str,
     size_bytes: int,
@@ -293,6 +300,8 @@ def build_uploaded_artifact_name(
 
     agent_raw = re.sub(r"[^a-zA-Z0-9]", "", normalize_device_id(agent_id))
     agent_short = (agent_raw[-6:] if agent_raw else "agent")
+    host_short = safe_hostname_token(hostname)
+    device_token = f"dev-{host_short}" if host_short else f"ag-{agent_short}"
 
     p = Path(original)
     lower_name = p.name.lower()
@@ -308,7 +317,7 @@ def build_uploaded_artifact_name(
     sha_token = normalize_string(sha256_value).lower()
     content_tag = sha_token[:8] if sha_token else f"sz{max(0, int(size_bytes))}"
 
-    base = f"run-{run_short}__{phase_token}__ag-{agent_short}__{stem_safe}__{content_tag}"
+    base = f"run-{run_short}__{phase_token}__{device_token}__{stem_safe}__{content_tag}"
     max_base_len = 180 - len(ext)
     if len(base) > max_base_len:
         base = base[:max_base_len].rstrip("-_.")
@@ -321,6 +330,46 @@ def safe_artifact_filename(value: Any, default: str = "artifact.bin") -> str:
     if not safe:
         safe = default
     return safe[:180].rstrip("-_.") or default
+
+
+def resolve_agent_hostname(agent_id: str) -> str:
+    normalized_agent_id = normalize_device_id(agent_id)
+    if not normalized_agent_id:
+        return ""
+    cached = normalize_string(_AGENT_HOSTNAME_CACHE.get(normalized_agent_id))
+    if cached:
+        return cached
+    if ELAB_CLIENT_FOR_HTTP is None:
+        return ""
+    try:
+        candidates = ELAB_CLIENT_FOR_HTTP.list_items(search=normalized_agent_id, limit=100)
+    except Exception:
+        return ""
+    for item in candidates:
+        metadata = parse_maybe_json(item.get("metadata"), {})
+        body = parse_maybe_json(item.get("body"), {})
+        values = [
+            read_metadata_value(metadata, "device_id"),
+            read_metadata_value(metadata, "mac_address"),
+            read_metadata_value(metadata, "mac"),
+            read_metadata_value(metadata, "wifi_mac"),
+            body.get("device_id") if isinstance(body, dict) else None,
+            body.get("mac_address") if isinstance(body, dict) else None,
+            body.get("mac") if isinstance(body, dict) else None,
+        ]
+        if not any(normalize_device_id(value) == normalized_agent_id for value in values):
+            continue
+        hostname = normalize_string(read_metadata_value(metadata, "hostname"))
+        if not hostname and isinstance(body, dict):
+            hostname = normalize_string(body.get("hostname"))
+        if not hostname:
+            hostname = normalize_string(item.get("title"))
+            if hostname.lower().startswith("device "):
+                hostname = ""
+        if hostname:
+            _AGENT_HOSTNAME_CACHE[normalized_agent_id] = hostname
+            return hostname
+    return ""
 
 
 def artifact_spool_root(experiment_id: int, run_id: str, agent_id: str) -> Path:
@@ -470,6 +519,7 @@ def upload_raw_artifact_to_elab(
         raise RuntimeError("elab client unavailable")
 
     sha256_value = file_sha256_bytes(raw)
+    hostname = resolve_agent_hostname(agent_id)
     existing = find_artifact_upload_in_journal(
         experiment_id=experiment_id,
         run_id=run_id,
@@ -500,6 +550,7 @@ def upload_raw_artifact_to_elab(
         artifact_name=artifact_name,
         run_id=run_id,
         agent_id=agent_id,
+        hostname=hostname,
         upload_phase=upload_phase,
         sha256_value=sha256_value,
         size_bytes=len(raw),

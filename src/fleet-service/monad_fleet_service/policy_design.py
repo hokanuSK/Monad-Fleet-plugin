@@ -109,10 +109,35 @@ def _copy_window(window: dict[str, Any]) -> dict[str, str]:
     return out
 
 
+def _merge_selector_values(current: Any, incoming: Any) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for source in (current, incoming):
+        if not isinstance(source, list):
+            continue
+        for raw_value in source:
+            value = _normalize(raw_value)
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            out.append(value)
+    return out
+
+
+def _merge_target_selector(policy: dict[str, Any], selector: dict[str, Any]) -> None:
+    existing = policy.get("target_selector")
+    merged = _deep_copy_json(existing) if isinstance(existing, dict) else {}
+    for key in ("device_ids", "device_types", "locations", "agent_ids"):
+        values = _merge_selector_values(merged.get(key), selector.get(key))
+        if values:
+            merged[key] = values
+    policy["target_selector"] = merged
+
+
 def _apply_sync_windows(policy: dict[str, Any], sync_cmd: dict[str, Any]) -> None:
     selector = sync_cmd.get("target_selector")
     if isinstance(selector, dict):
-        policy["target_selector"] = _deep_copy_json(selector)
+        _merge_target_selector(policy, selector)
 
     validity_window = sync_cmd.get("validity_policy_window")
     if _window_has_times(validity_window):
