@@ -1,0 +1,3 @@
+hostname,agent_id,control_plane_iface,wifi_scan_iface,capabilities,artifact_upload_target,default_metrics_sinks,grpc_dns_resolver
+monad-08,,wg0,wlan0,"csi,ble,wifi",fleet_http,fleet_http,native
+monad-09,,wg0,wlp1s0,"csi,ble,wifi",fleet_http,fleet_http,native

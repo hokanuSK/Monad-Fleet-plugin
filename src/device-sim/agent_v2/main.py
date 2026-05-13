@@ -550,7 +550,11 @@ def main() -> None:
                 extra_artifacts: list[fleet_gateway_v2_pb2.ArtifactRef] = []
 
                 if int(cmd.type) == int(fleet_gateway_v2_pb2.WIFI_SCAN):
-                    wifi_iface = normalize(os.environ.get("WIFI_SCAN_IFACE") or control_plane_iface)
+                    wifi_iface = normalize(
+                        cmd_env.get("WIFI_SCAN_IFACE")
+                        or os.environ.get("WIFI_SCAN_IFACE")
+                        or control_plane_iface
+                    )
                     requested_interval_s = parse_int(
                         cmd_env.get("WIFI_SAMPLE_INTERVAL_S") or cmd_env.get("SAMPLE_INTERVAL_S"),
                         0,

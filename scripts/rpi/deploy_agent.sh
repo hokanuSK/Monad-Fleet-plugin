@@ -80,7 +80,11 @@ echo "[3/3] Creating venv and installing dependencies"
 run_ssh "${PI_USER}@${PI_HOST}" "bash -lc '
 set -euo pipefail
 python3 -m venv \"${PI_DIR}/venv\"
-\"${PI_DIR}/venv/bin/python\" -m pip install --upgrade pip grpcio protobuf prometheus-client
+\"${PI_DIR}/venv/bin/python\" -m pip install --upgrade pip
+\"${PI_DIR}/venv/bin/python\" -m pip install --upgrade \
+  \"grpcio>=1.74,<2\" \
+  \"protobuf>=6.31.1,<7\" \
+  \"prometheus-client>=0.20,<1\"
 '"
 
 echo "Pi agent deployment completed."
