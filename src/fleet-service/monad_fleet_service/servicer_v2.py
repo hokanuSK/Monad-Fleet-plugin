@@ -21,6 +21,92 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
                     normalized_map[key] = value
         self._resource_status_id_map = normalized_map
 
+    def _item_metadata(self, item: dict[str, Any] | None) -> dict[str, Any]:
+        metadata = parse_maybe_json((item or {}).get("metadata"), {})
+        return metadata if isinstance(metadata, dict) else {}
+
+    def _reported_wifi_ifaces(self, item: dict[str, Any] | None) -> list[str]:
+        metadata = self._item_metadata(item)
+        interfaces = metadata.get("interfaces")
+        if not isinstance(interfaces, list):
+            return []
+        seen: set[str] = set()
+        out: list[str] = []
+        for iface in interfaces:
+            if not isinstance(iface, dict):
+                continue
+            name = normalize_string(iface.get("name")).lower()
+            kind = normalize_string(iface.get("kind")).lower()
+            if not name or name in seen:
+                continue
+            if kind not in {"wifi", "wireless", "wlan"} and not name.startswith("wl"):
+                continue
+            seen.add(name)
+            out.append(name)
+        return out
+
+    def _interface_override_entry(self, agent_id: str) -> dict[str, Any]:
+        raw = self._cfg.get("device_interface_overrides_json")
+        if not isinstance(raw, dict):
+            return {}
+        entry = raw.get(normalize_device_id(agent_id)) or raw.get(normalize_string(agent_id))
+        return entry if isinstance(entry, dict) else {}
+
+    def _resolve_wifi_scan_iface(
+        self,
+        *,
+        agent_id: str,
+        item: dict[str, Any] | None,
+        env_map: dict[str, str],
+    ) -> str:
+        metadata = self._item_metadata(item)
+        override_entry = self._interface_override_entry(agent_id)
+        reported_ifaces = self._reported_wifi_ifaces(item)
+        reported_set = set(reported_ifaces)
+
+        configured = normalize_string(override_entry.get("wifi_scan_iface")).lower()
+        if not configured:
+            configured = normalize_string(read_metadata_value(metadata, "wifi_scan_iface")).lower()
+        preferred = normalize_string(env_map.get("WIFI_SCAN_IFACE")).lower()
+        control_plane = normalize_string(
+            override_entry.get("control_plane_iface")
+            or read_metadata_value(metadata, "control_plane_iface")
+        ).lower()
+
+        measurement_candidates = [name for name in reported_ifaces if name and name != control_plane and not name.startswith("wg")]
+        if configured and (not reported_set or configured in reported_set):
+            return configured
+        if preferred and preferred in measurement_candidates:
+            return preferred
+        if len(measurement_candidates) == 1:
+            return measurement_candidates[0]
+        for prefix in ("wlp", "wlan", "wlx"):
+            for candidate in measurement_candidates:
+                if candidate.startswith(prefix):
+                    return candidate
+        if preferred and preferred != control_plane:
+            return preferred
+        if configured:
+            return configured
+        return ""
+
+    def _resolve_command_env_for_agent(
+        self,
+        *,
+        agent_id: str,
+        item: dict[str, Any] | None,
+        command_type: int,
+        env_map: dict[str, str],
+    ) -> dict[str, str]:
+        resolved = dict(env_map)
+        if int(command_type) == int(fleet_gateway_v2_pb2.WIFI_SCAN):
+            scan_mode = normalize_string(resolved.get("WIFI_SCAN_MODE")).lower()
+            if scan_mode == "passive_monitor":
+                iface = self._resolve_wifi_scan_iface(agent_id=agent_id, item=item, env_map=resolved)
+                if iface:
+                    resolved["WIFI_SCAN_IFACE"] = iface
+        return resolved
+
     def _choose_allowed_mode(self, agent: fleet_gateway_v2_pb2.AgentDescriptor) -> tuple[int, str]:
         requested = int(agent.requested_mode)
         interfaces = list(agent.interfaces)
@@ -434,7 +520,7 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
             return rows
         return []
 
-    def _policy_to_v2(self, policy: dict[str, Any], policy_id: str) -> fleet_gateway_v2_pb2.Policy:
+    def _policy_to_v2(self, policy: dict[str, Any], policy_id: str, *, agent_id: str = "", item: dict[str, Any] | None = None) -> fleet_gateway_v2_pb2.Policy:
         start_iso, end_iso = self._measurement_window(policy)
         reporting_env = self._policy_reporting_env(policy, start_iso, end_iso)
         command_groups: list[fleet_gateway_v2_pb2.CommandGroup] = []
@@ -473,6 +559,12 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
                         )
                     )
                 command_type = self._command_type(cmd)
+                merged_env = self._resolve_command_env_for_agent(
+                    agent_id=agent_id,
+                    item=item,
+                    command_type=command_type,
+                    env_map=merged_env,
+                )
                 cmdline = normalize_string(cmd.get("cmdline") or cmd.get("cmd"))
                 if not cmdline and command_type == fleet_gateway_v2_pb2.SHELL:
                     cmdline = normalize_string(env_map.get("cmdline") or env_map.get("CMDLINE"))
@@ -764,7 +856,7 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
             )
             return fleet_gateway_v2_pb2.GetPolicyResponse(
                 status=fleet_gateway_v2_pb2.GetPolicyResponse.OK,
-                policy=self._policy_to_v2(policy, policy_id),
+                policy=self._policy_to_v2(policy, policy_id, agent_id=agent_id, item=item),
                 experiment_id=experiment_id,
                 policy_id=policy_id,
                 measurement_from=timestamp_from_iso(start_iso),

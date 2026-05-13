@@ -77,6 +77,9 @@ def serve() -> None:
         ),
         "grafana_experiment_default_instance_regex": os.environ.get("GRAFANA_EXPERIMENT_DEFAULT_INSTANCE_REGEX", ""),
         "grafana_experiment_scan_interval_s": int(os.environ.get("GRAFANA_EXPERIMENT_SCAN_INTERVAL_S", "60")),
+        "device_interface_overrides_json": core.parse_maybe_json(
+            os.environ.get("DEVICE_INTERFACE_OVERRIDES_JSON"), {}
+        ),
     }
 
     data_dir = Path(os.environ.get("DATA_DIR", "/data"))

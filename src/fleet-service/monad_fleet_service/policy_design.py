@@ -7,6 +7,15 @@ from typing import Any
 
 RUNTIME_COMMAND_TYPES = {"SHELL", "CAPTURE_CSI", "BLE_SCAN", "WIFI_SCAN"}
 DESIGN_COMMAND_TYPES = {"SYNC", "OBSERVE"}
+DEFAULT_5GHZ_CHANNELS: tuple[int, ...] = (
+    36, 40, 44, 48,
+    52, 56, 60, 64,
+    100, 104, 108, 112,
+    116, 120, 124, 128,
+    132, 136, 140,
+    149, 153, 157, 161, 165,
+)
+ALLOWED_5GHZ_CHANNELS = set(DEFAULT_5GHZ_CHANNELS)
 
 
 def _deep_copy_json(value: Any) -> Any:
@@ -285,6 +294,62 @@ def _iter_group_commands(group: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def _parse_channel_csv(value: Any) -> list[int]:
+    text = _normalize(value)
+    if not text:
+        return []
+    out: list[int] = []
+    for part in text.split(","):
+        token = _normalize(part)
+        if not token:
+            continue
+        try:
+            out.append(int(token))
+        except Exception:
+            continue
+    return out
+
+
+def _enforce_wifi_measurement_policy(policy: dict[str, Any]) -> None:
+    groups = policy.get("command_groups")
+    if not isinstance(groups, list):
+        return
+
+    default_channels_csv = ",".join(str(ch) for ch in DEFAULT_5GHZ_CHANNELS)
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        commands = group.get("commands")
+        if not isinstance(commands, list):
+            continue
+        for cmd in commands:
+            if not isinstance(cmd, dict):
+                continue
+            cmd_type = _normalize(cmd.get("type") or cmd.get("command_type")).upper()
+            if cmd_type != "WIFI_SCAN":
+                continue
+            env = cmd.get("env")
+            if not isinstance(env, dict):
+                env = {}
+                cmd["env"] = env
+            scan_mode = _normalize(env.get("WIFI_SCAN_MODE")).lower()
+            if scan_mode != "passive_monitor":
+                continue
+
+            channels = _parse_channel_csv(env.get("WIFI_SCAN_CHANNELS"))
+            if not channels:
+                env["WIFI_SCAN_CHANNELS"] = default_channels_csv
+                channels = list(DEFAULT_5GHZ_CHANNELS)
+
+            invalid = [str(ch) for ch in channels if ch not in ALLOWED_5GHZ_CHANNELS]
+            if invalid:
+                cmd_id = _normalize(cmd.get("id") or cmd.get("name")) or "wifi-scan"
+                raise ValueError(
+                    f"{cmd_id}: WIFI_SCAN_MODE=passive_monitor requires 5 GHz channels only; "
+                    f"invalid channels={','.join(invalid)}"
+                )
+
+
 def _promote_shell_env_cmdline(cmd: dict[str, Any], cmd_env: dict[str, str]) -> dict[str, str]:
     if _normalize(cmd.get("cmdline") or cmd.get("cmd")):
         return cmd_env
@@ -321,6 +386,7 @@ def runtime_policy_from_design(policy: dict[str, Any]) -> dict[str, Any]:
         return {}
 
     result = _deep_copy_json(policy)
+    _enforce_wifi_measurement_policy(result)
     if not policy_uses_design_commands(result):
         return result
 
@@ -366,4 +432,5 @@ def runtime_policy_from_design(policy: dict[str, Any]) -> dict[str, Any]:
             transformed_groups.append(group)
 
     result["command_groups"] = transformed_groups
+    _enforce_wifi_measurement_policy(result)
     return result
