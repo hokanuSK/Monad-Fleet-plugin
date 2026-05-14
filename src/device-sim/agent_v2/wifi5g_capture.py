@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import signal
 import subprocess
@@ -37,6 +38,12 @@ from typing import Optional
 
 # sbin paths are often absent from non-root PATH on Debian/Raspberry Pi OS.
 _SBIN_SEARCH = ("/usr/sbin", "/sbin")
+
+# On Ubuntu the agent runs as a non-root user and iw/ip need CAP_NET_ADMIN.
+# Prepend "sudo -n" so that a NOPASSWD sudoers rule covers it.
+# On Pi OS the agent typically runs as root or has NOPASSWD for all commands,
+# so we skip the prefix when already root to avoid double-sudo overhead.
+_SUDO_PREFIX: list[str] = [] if os.geteuid() == 0 else ["sudo", "-n"]
 
 
 log = logging.getLogger(__name__)
@@ -125,14 +132,14 @@ def create_monitor_vif(parent_iface: str, mon_iface: Optional[str] = None) -> tu
         return False, "", "iw not found on PATH or in /sbin:/usr/sbin"
     mon = mon_iface or (parent_iface + "mon")
     # Clean up any stale vif from a previous interrupted run.
-    _run(["ip", "link", "set", mon, "down"])
-    _run([iw, "dev", mon, "del"])
-    rc, _, err = _run([iw, "dev", parent_iface, "interface", "add", mon, "type", "monitor"])
+    _run(_SUDO_PREFIX + ["ip", "link", "set", mon, "down"])
+    _run(_SUDO_PREFIX + [iw, "dev", mon, "del"])
+    rc, _, err = _run(_SUDO_PREFIX + [iw, "dev", parent_iface, "interface", "add", mon, "type", "monitor"])
     if rc != 0:
         return False, mon, f"iw add monitor vif failed rc={rc} err={err.strip()[:200]}"
-    rc, _, err = _run(["ip", "link", "set", mon, "up"])
+    rc, _, err = _run(_SUDO_PREFIX + ["ip", "link", "set", mon, "up"])
     if rc != 0:
-        _run([iw, "dev", mon, "del"])
+        _run(_SUDO_PREFIX + [iw, "dev", mon, "del"])
         return False, mon, f"ip link set {mon} up failed rc={rc} err={err.strip()[:200]}"
     return True, mon, "monitor vif created"
 
@@ -140,8 +147,8 @@ def create_monitor_vif(parent_iface: str, mon_iface: Optional[str] = None) -> tu
 def delete_monitor_vif(mon_iface: str) -> None:
     """Best-effort removal of the transient monitor virtual interface."""
     iw = _find_tool("iw") or "iw"
-    _run(["ip", "link", "set", mon_iface, "down"])
-    _run([iw, "dev", mon_iface, "del"])
+    _run(_SUDO_PREFIX + ["ip", "link", "set", mon_iface, "down"])
+    _run(_SUDO_PREFIX + [iw, "dev", mon_iface, "del"])
 
 
 def set_channel(iface: str, channel: int, width_mhz: int = DEFAULT_CHANNEL_WIDTH_MHZ) -> tuple[bool, str]:
@@ -153,7 +160,7 @@ def set_channel(iface: str, channel: int, width_mhz: int = DEFAULT_CHANNEL_WIDTH
     :func:`create_monitor_vif` first).
     """
     iw = _find_tool("iw") or "iw"
-    cmd = [iw, "dev", iface, "set", "channel", str(channel)]
+    cmd = _SUDO_PREFIX + [iw, "dev", iface, "set", "channel", str(channel)]
     if width_mhz == 40:
         cmd.append("HT40+")
     rc, _, err = _run(cmd, timeout=2.0)
@@ -256,7 +263,8 @@ def start_capture(
     # tcpdump writes pcap directly; -U flushes per packet so partial files are
     # valid if we get killed. -s 256 captures management+control headers and a
     # bit of data payload without exploding pcap size.
-    cmd = [
+    # On Ubuntu (non-root) tcpdump needs CAP_NET_RAW; use sudo -n same as iw/ip.
+    cmd = _SUDO_PREFIX + [
         tcpdump,
         "-i", mon_iface,
         "-w", pcap_path,

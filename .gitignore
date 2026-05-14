@@ -28,8 +28,10 @@ AGENT.MD
 
 # Local editor / generated deps
 .vscode/
+.venv-notebooks/
 node_modules/
 .playwright-cli/
+.ipynb_checkpoints/
 .claude/
 docs/diagrams/node_modules/
 docs/diagrams/legacy/
@@ -54,6 +56,11 @@ docs/runbooks/
 docs/knowledge-base/
 docs/DOCS_MAP.md
 docs/measurement_5ghz_ble_plan.md
+
+# Generated Grafana experiment folders. Regenerate with
+# scripts/grafana/provision_experiment_dashboards.py.
+infrastructure/observability/grafana/provisioning/dashboards/experiments/**
+!infrastructure/observability/grafana/provisioning/dashboards/experiments/.gitkeep
 
 # Stale generated scaffold; canonical infra lives under infrastructure/.
 infra/

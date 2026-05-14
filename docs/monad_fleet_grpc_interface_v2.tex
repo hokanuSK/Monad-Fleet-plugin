@@ -1338,17 +1338,22 @@ scripts/smoke/v3_end_to_end_smoke.sh
 \subsection{Grafana dashboard (provisioned)}
 This repository provisions a Grafana dashboard focused on Raspberry Pi wireless smoke runs:
 \begin{itemize}
-  \item dashboard UID: \texttt{monad-fleet-wireless-v3}
-  \item dashboard URL path: \texttt{/d/monad-fleet-wireless-v3/monad-fleet-wireless-sensing-pi-smoke-v3}
+  \item static dashboard folder: \texttt{Monad Fleet}
+  \item generated per-experiment folders: \texttt{experiment-\textless id\textgreater}
   \item provisioning files:
   \begin{itemize}
     \item \texttt{infrastructure/observability/grafana/provisioning/dashboards/monad-fleet.yml}
-    \item \texttt{infrastructure/observability/grafana/provisioning/dashboards/monad-fleet-wireless-sensing-v3.json}
+    \item \texttt{infrastructure/observability/grafana/provisioning/dashboards/static/*.json}
+    \item \texttt{infrastructure/observability/grafana/provisioning/dashboards/experiments/experiment-\textless id\textgreater/*.json}
   \end{itemize}
 \end{itemize}
 
+\textbf{Experiment dashboards include:} Power, BLE, Wi-Fi, and CSI views seeded from the
+experiment target device list. The smoke script regenerates the folder after creating the eLabFTW
+experiment.
 \textbf{Panels include:} Wi-Fi RSSI, BLE advertisement count, Wi-Fi AP count, Wi-Fi connected status,
-BLE scan status, artifact upload counters, command health, full metric snapshot table, and service counters.
+BLE scan status, CSI capture status and frame counters, artifact upload counters, command health,
+full metric snapshot table, and service counters.
 \textbf{Note:} CSI summary counters can be graphed when the agent reports them, but raw CSI captures remain artifact data.
 Use report artifacts and \texttt{scripts/rpi/verify\_real\_run.sh} to validate raw CSI capture.
 

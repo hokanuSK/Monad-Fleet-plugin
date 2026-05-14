@@ -1,6 +1,8 @@
 from concurrent import futures
 import os
 from pathlib import Path
+import threading
+import time
 
 import grpc
 
@@ -9,6 +11,7 @@ import fleet_gateway_v2_pb2_grpc
 import fleet_gateway_v3_pb2_grpc
 
 from . import core
+from .grafana_dashboards import DEFAULT_INSTANCE_MAP_TEXT
 from .servicer_v1 import FleetManagerServicer
 from .servicer_v2 import FleetManagerServicerV2
 
@@ -53,6 +56,30 @@ def serve() -> None:
         "ingest_api_token": os.environ.get("INGEST_API_TOKEN", ""),
         "artifact_max_bytes": int(os.environ.get("ARTIFACT_MAX_BYTES", str(20 * 1024 * 1024))),
         "resource_status_id_map": core.parse_maybe_json(os.environ.get("RESOURCE_STATUS_ID_MAP_JSON"), {}),
+        "grafana_experiment_dashboards_enabled": core.normalize_string(
+            os.environ.get(
+                "GRAFANA_EXPERIMENT_DASHBOARDS_ENABLED",
+                os.environ.get("PROVISION_GRAFANA_EXPERIMENT_DASHBOARDS", "false"),
+            )
+        ).lower()
+        in {"1", "true", "yes", "on"},
+        "grafana_dashboard_template_dir": os.environ.get(
+            "GRAFANA_DASHBOARD_TEMPLATE_DIR",
+            "/etc/grafana/provisioning/dashboards/static",
+        ),
+        "grafana_dashboard_output_root": os.environ.get(
+            "GRAFANA_DASHBOARD_OUTPUT_ROOT",
+            "/etc/grafana/provisioning/dashboards/experiments",
+        ),
+        "grafana_experiment_instance_map": os.environ.get(
+            "GRAFANA_EXPERIMENT_INSTANCE_MAP",
+            DEFAULT_INSTANCE_MAP_TEXT,
+        ),
+        "grafana_experiment_default_instance_regex": os.environ.get("GRAFANA_EXPERIMENT_DEFAULT_INSTANCE_REGEX", ""),
+        "grafana_experiment_scan_interval_s": int(os.environ.get("GRAFANA_EXPERIMENT_SCAN_INTERVAL_S", "60")),
+        "device_interface_overrides_json": core.parse_maybe_json(
+            os.environ.get("DEVICE_INTERFACE_OVERRIDES_JSON"), {}
+        ),
     }
 
     data_dir = Path(os.environ.get("DATA_DIR", "/data"))
@@ -75,6 +102,24 @@ def serve() -> None:
     core.ELAB_CLIENT_FOR_HTTP = elab_client
     v1_servicer = FleetManagerServicer(elab_client, state, cfg)
     v2_servicer = FleetManagerServicerV2(v1_servicer, cfg)
+
+    if cfg["grafana_experiment_dashboards_enabled"]:
+        scan_interval_s = max(5, int(cfg.get("grafana_experiment_scan_interval_s", 60)))
+
+        def dashboard_scan_loop() -> None:
+            while True:
+                try:
+                    v1_servicer.scan_and_provision_grafana_dashboards()
+                except Exception:
+                    core.log.exception("Grafana dashboard background scan failed")
+                time.sleep(scan_interval_s)
+
+        threading.Thread(
+            target=dashboard_scan_loop,
+            name="grafana-dashboard-scan",
+            daemon=True,
+        ).start()
+        core.log.info("Grafana dashboard background scan enabled interval=%ss", scan_interval_s)
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     fleet_gateway_pb2_grpc.add_FleetManagerServicer_to_server(v1_servicer, server)

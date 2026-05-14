@@ -16,6 +16,129 @@ def _raw_command_artifact_stem(cmd_id: str) -> str:
     return f"command-{token}-raw-output"
 
 
+def _policy_env_value(policy: fleet_gateway_v2_pb2.Policy, key: str) -> str:
+    target = normalize(key)
+    if not target:
+        return ""
+    for group in policy.command_groups:
+        for cmd in group.commands:
+            value = normalize(cmd.env.get(target))
+            if value:
+                return value
+    return ""
+
+
+def _policy_execution_config(policy: fleet_gateway_v2_pb2.Policy) -> dict[str, int | str]:
+    mode = normalize(_policy_env_value(policy, "EXECUTION_MODE")).lower() or "once"
+    if mode not in {"once", "recurring"}:
+        mode = "once"
+    interval_s = max(0, parse_int(_policy_env_value(policy, "EXECUTION_INTERVAL_S"), 0))
+    max_runs = max(0, parse_int(_policy_env_value(policy, "EXECUTION_MAX_RUNS"), 0))
+    return {
+        "mode": mode,
+        "interval_s": interval_s,
+        "max_runs": max_runs,
+    }
+
+
+def _policy_execution_key(
+    *,
+    agent_id: str,
+    experiment_id: str,
+    policy_id: str,
+    measurement_from: str,
+    measurement_to: str,
+) -> str:
+    parts = [
+        normalize(agent_id).lower(),
+        normalize(experiment_id),
+        normalize(policy_id),
+        normalize(measurement_from),
+        normalize(measurement_to),
+    ]
+    return "|".join(parts)
+
+
+def _execution_skip_reason(
+    store: RunStore,
+    execution_key: str,
+    execution_cfg: dict[str, int | str],
+) -> str:
+    record = store.get_execution_record(execution_key)
+    if not record:
+        return ""
+    state = normalize(record.get("state")).lower()
+    mode = normalize(execution_cfg.get("mode")).lower() or "once"
+    if state == "in_progress":
+        return "execution already in progress"
+    if mode == "once":
+        if state in {"completed", "reported", "failed"}:
+            return f"execution already {state}"
+        return ""
+    if mode != "recurring":
+        return ""
+    max_runs = max(0, int(execution_cfg.get("max_runs", 0) or 0))
+    completed_runs = max(0, int(record.get("completed_runs", 0) or 0))
+    if max_runs > 0 and completed_runs >= max_runs:
+        return f"recurring execution reached max_runs={max_runs}"
+    interval_s = max(0, int(execution_cfg.get("interval_s", 0) or 0))
+    if interval_s <= 0:
+        return ""
+    last_completed_raw = normalize(record.get("last_completed_at") or record.get("last_started_at"))
+    last_completed = parse_iso(last_completed_raw) if last_completed_raw else None
+    if last_completed is None:
+        return ""
+    next_due = last_completed + timedelta(seconds=interval_s)
+    now = now_utc()
+    if now < next_due:
+        wait_s = max(1, int((next_due - now).total_seconds()))
+        return f"recurring execution not due for another {wait_s}s"
+    return ""
+
+
+def _measurement_window_timeout_ms(
+    policy: fleet_gateway_v2_pb2.Policy,
+    *,
+    default_timeout_ms: int,
+    reserve_ms: int = 2000,
+) -> int:
+    end_ts = getattr(policy, "measurement_to", None)
+    if end_ts is None:
+        return max(1000, int(default_timeout_ms))
+    if int(getattr(end_ts, "seconds", 0) or 0) == 0 and int(getattr(end_ts, "nanos", 0) or 0) == 0:
+        return max(1000, int(default_timeout_ms))
+    remaining_ms = int((ts_to_datetime(end_ts) - now_utc()).total_seconds() * 1000) - max(0, int(reserve_ms))
+    return max(1000, remaining_ms)
+
+
+def _rf_command_timeout_ms(
+    policy: fleet_gateway_v2_pb2.Policy,
+    *,
+    cmd_type: int,
+    cmd_env: dict[str, str],
+    default_timeout_ms: int,
+) -> int:
+    base_timeout_ms = max(1000, int(default_timeout_ms))
+    if int(cmd_type) == int(fleet_gateway_v2_pb2.WIFI_SCAN):
+        scan_mode = normalize(cmd_env.get("WIFI_SCAN_MODE")).lower()
+        use_measure_window = parse_bool(
+            cmd_env.get("WIFI_SCAN_USE_MEASURE_WINDOW"),
+            scan_mode == "passive_monitor",
+        )
+        if use_measure_window:
+            return _measurement_window_timeout_ms(policy, default_timeout_ms=base_timeout_ms)
+        return base_timeout_ms
+    if int(cmd_type) == int(fleet_gateway_v2_pb2.BLE_SCAN):
+        use_measure_window = parse_bool(
+            cmd_env.get("BLE_SCAN_USE_MEASURE_WINDOW"),
+            True,
+        )
+        if use_measure_window:
+            return _measurement_window_timeout_ms(policy, default_timeout_ms=base_timeout_ms)
+        return base_timeout_ms
+    return base_timeout_ms
+
+
 def main() -> None:
     fleet_host = os.environ.get("FLEET_MANAGER_HOST", "monad-fleet-service")
     fleet_port = int(os.environ.get("FLEET_MANAGER_PORT", "50060"))
@@ -316,21 +439,36 @@ def main() -> None:
                     normalize(remote_write_off_reason),
                 )
 
-    hello = stub.Hello(
-        fleet_gateway_v2_pb2.HelloRequest(
-            agent=fleet_gateway_v2_pb2.AgentDescriptor(
-                agent_id=agent_id,
-                hostname=socket.gethostname(),
-                agent_version=agent_version,
-                interfaces=detect_interfaces(),
-                requested_mode=requested_mode,
-                control_plane_iface=control_plane_iface,
-                fleet_manager_target=target,
-                capabilities=capabilities,
+    _hello_attempts = 0
+    _hello_max = 20
+    _hello_backoff_s = 30
+    hello = None
+    while hello is None:
+        _hello_attempts += 1
+        try:
+            hello = stub.Hello(
+                fleet_gateway_v2_pb2.HelloRequest(
+                    agent=fleet_gateway_v2_pb2.AgentDescriptor(
+                        agent_id=agent_id,
+                        hostname=socket.gethostname(),
+                        agent_version=agent_version,
+                        interfaces=detect_interfaces(),
+                        requested_mode=requested_mode,
+                        control_plane_iface=control_plane_iface,
+                        fleet_manager_target=target,
+                        capabilities=capabilities,
+                    )
+                ),
+                timeout=hello_rpc_timeout_s,
             )
-        ),
-        timeout=hello_rpc_timeout_s,
-    )
+        except grpc.RpcError as _exc:
+            if _hello_attempts >= _hello_max:
+                raise
+            log.warning(
+                "Hello(v2) attempt %d/%d failed: %s; retrying in %ds",
+                _hello_attempts, _hello_max, _exc.code(), _hello_backoff_s,
+            )
+            time.sleep(_hello_backoff_s)
     log.info("Hello(v2) ok: allowed_mode=%s reason=%s", int(hello.allowed_mode), hello.mode_reason)
 
     poll = int(hello.recommended_prepare_poll_sec or default_poll_seconds)
@@ -344,13 +482,18 @@ def main() -> None:
     while max_cycles <= 0 or cycles < max_cycles:
         cycles += 1
 
-        policy_resp = stub.GetPolicy(
-            fleet_gateway_v2_pb2.GetPolicyRequest(
-                agent_id=agent_id,
-                last_policy_id=last_policy_id,
-            ),
-            timeout=policy_rpc_timeout_s,
-        )
+        try:
+            policy_resp = stub.GetPolicy(
+                fleet_gateway_v2_pb2.GetPolicyRequest(
+                    agent_id=agent_id,
+                    last_policy_id=last_policy_id,
+                ),
+                timeout=policy_rpc_timeout_s,
+            )
+        except grpc.RpcError as _rpc_exc:
+            log.warning("GetPolicy RPC failed: %s; sleeping %ds before retry", _rpc_exc.code(), poll)
+            time.sleep(poll)
+            continue
         if policy_resp.status == fleet_gateway_v2_pb2.GetPolicyResponse.NO_WORK:
             log.info("No assignment/work")
             flush_pending_reports_guarded("no-work")
@@ -421,6 +564,31 @@ def main() -> None:
         if policy.allowed_mode == fleet_gateway_v2_pb2.DUAL_NIC:
             route_verified = bool(route_iface and route_iface == normalize(policy.control_plane_iface))
 
+        measure_from_iso = ts_to_iso(policy.measurement_from)
+        measure_to_iso = ts_to_iso(policy.measurement_to)
+        execution_cfg = _policy_execution_config(policy)
+        execution_key = _policy_execution_key(
+            agent_id=agent_id,
+            experiment_id=policy.experiment_id,
+            policy_id=policy.policy_id,
+            measurement_from=measure_from_iso,
+            measurement_to=measure_to_iso,
+        )
+        skip_reason = _execution_skip_reason(store, execution_key, execution_cfg)
+        if skip_reason:
+            log.info(
+                "Skip execution for policy_id=%s experiment_id=%s mode=%s reason=%s",
+                normalize(policy.policy_id),
+                normalize(policy.experiment_id),
+                normalize(execution_cfg.get("mode")),
+                skip_reason,
+            )
+            flush_pending_reports_guarded("execution-skipped")
+            if reached_max_cycles(cycles, max_cycles):
+                break
+            time.sleep(poll)
+            continue
+
         prep = stub.AckPrepared(
             fleet_gateway_v2_pb2.AckPreparedRequest(
                 agent_id=agent_id,
@@ -444,6 +612,15 @@ def main() -> None:
             continue
 
         run_id = str(uuid.uuid4())
+        store.mark_execution_state(
+            execution_key,
+            state="in_progress",
+            run_id=run_id,
+            policy_id=normalize(policy.policy_id),
+            experiment_id=normalize(policy.experiment_id),
+            measurement_from=measure_from_iso,
+            measurement_to=measure_to_iso,
+        )
         store.start_run(
             run_id,
             {
@@ -451,6 +628,10 @@ def main() -> None:
                 "agent_id": agent_id,
                 "policy_id": policy.policy_id,
                 "experiment_id": policy.experiment_id,
+                "execution_key": execution_key,
+                "execution_mode": normalize(execution_cfg.get("mode")),
+                "measurement_from": measure_from_iso,
+                "measurement_to": measure_to_iso,
                 "started_at": now_utc().isoformat().replace("+00:00", "Z"),
             },
         )
@@ -546,11 +727,20 @@ def main() -> None:
                     measure_type=measure_type,
                 )
 
-                timeout_ms = int(cmd.timeout_ms or 60000)
+                timeout_ms = _rf_command_timeout_ms(
+                    policy,
+                    cmd_type=int(cmd.type),
+                    cmd_env=cmd_env,
+                    default_timeout_ms=int(cmd.timeout_ms or 60000),
+                )
                 extra_artifacts: list[fleet_gateway_v2_pb2.ArtifactRef] = []
 
                 if int(cmd.type) == int(fleet_gateway_v2_pb2.WIFI_SCAN):
-                    wifi_iface = normalize(os.environ.get("WIFI_SCAN_IFACE") or control_plane_iface)
+                    wifi_iface = normalize(
+                        cmd_env.get("WIFI_SCAN_IFACE")
+                        or os.environ.get("WIFI_SCAN_IFACE")
+                        or control_plane_iface
+                    )
                     requested_interval_s = parse_int(
                         cmd_env.get("WIFI_SAMPLE_INTERVAL_S") or cmd_env.get("SAMPLE_INTERVAL_S"),
                         0,
@@ -606,7 +796,7 @@ def main() -> None:
                             _b.append(collect_wifi_scan(_iface, _tms, _ep, _s, _rid, _cid, override_cmdline=_cl, override_argv=_av, override_env=_ev))
                         _t = threading.Thread(target=_wifi_worker, daemon=True)
                         _t.start()
-                        _async_tasks.append((_t, _box))
+                        _async_tasks.append((_t, _box, "wifi"))
                         exit_code, duration_ms, message, parsed, extra_artifacts = 0, 0, "passive_monitor started async", {"wifi_capture_mode": "passive_monitor", "async": "true"}, []
                     else:
                         exit_code, duration_ms, message, parsed, extra_artifacts = collect_wifi_scan(
@@ -623,6 +813,15 @@ def main() -> None:
                     wifi_ap_count = int(parsed.get("wifi_ap_count", "0") or 0)
                     wifi_ap_total += max(0, wifi_ap_count)
                     event_metrics = parsed
+                    try:
+                        prom_exposition_mod.record_wifi_run_metrics(
+                            experiment_id=policy.experiment_id,
+                            run_id=run_id,
+                            agent_id=agent_id,
+                            metrics=event_metrics,
+                        )
+                    except Exception:
+                        log.debug("Failed to publish wifi run metrics", exc_info=True)
                 elif int(cmd.type) == int(fleet_gateway_v2_pb2.BLE_SCAN):
                     ble_scan_mode = normalize(cmd_env.get("BLE_SCAN_MODE")).lower()
                     ble_run_async = (
@@ -639,7 +838,7 @@ def main() -> None:
                             _b.append(collect_ble_scan(_tms, _ep, _s, _rid, _cid, override_cmdline=_cl, override_argv=_av, override_env=_ev))
                         _bt = threading.Thread(target=_ble_worker, daemon=True)
                         _bt.start()
-                        _async_tasks.append((_bt, _bbox))
+                        _async_tasks.append((_bt, _bbox, "ble"))
                         exit_code, duration_ms, message, parsed, extra_artifacts = 0, 0, "ble advertise started async", {"ble_mode": "advertise", "async": "true"}, []
                     else:
                         exit_code, duration_ms, message, parsed, extra_artifacts = collect_ble_scan(
@@ -655,6 +854,15 @@ def main() -> None:
                     ble_adv_count = int(parsed.get("ble_adv_count", "0") or 0)
                     ble_adv_total += max(0, ble_adv_count)
                     event_metrics = parsed
+                    try:
+                        prom_exposition_mod.record_ble_run_metrics(
+                            experiment_id=policy.experiment_id,
+                            run_id=run_id,
+                            agent_id=agent_id,
+                            metrics=event_metrics,
+                        )
+                    except Exception:
+                        log.debug("Failed to publish BLE run metrics", exc_info=True)
                 elif int(cmd.type) == int(fleet_gateway_v2_pb2.CAPTURE_CSI):
                     exit_code, duration_ms, message, parsed, extra_artifacts = collect_csi_capture(
                         timeout_ms,
@@ -821,10 +1029,27 @@ def main() -> None:
                 if exit_code != 0 and group.failure_mode == fleet_gateway_v2_pb2.FAIL_FAST:
                     break
 
-            for _at, _ab in _async_tasks:
+            for _at, _ab, _atype in _async_tasks:
                 _at.join()
                 if _ab:
-                    _, _, _, _, _aex = _ab[0]
+                    _aec, _adur, _amsg, _aparsed, _aex = _ab[0]
+                    try:
+                        if _atype == "wifi":
+                            prom_exposition_mod.record_wifi_run_metrics(
+                                experiment_id=policy.experiment_id,
+                                run_id=run_id,
+                                agent_id=agent_id,
+                                metrics=_aparsed,
+                            )
+                        elif _atype == "ble":
+                            prom_exposition_mod.record_ble_run_metrics(
+                                experiment_id=policy.experiment_id,
+                                run_id=run_id,
+                                agent_id=agent_id,
+                                metrics=_aparsed,
+                            )
+                    except Exception:
+                        log.debug("Failed to publish async %s run metrics", _atype, exc_info=True)
                     for _art in _aex:
                         artifacts.append(_art)
             _async_tasks.clear()

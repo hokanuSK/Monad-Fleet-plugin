@@ -5,13 +5,32 @@ import json
 import os
 import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import requests
 import urllib3
 
+from .grafana_dashboards import (
+    DashboardProvisioningConfig,
+    DEFAULT_INSTANCE_MAP_TEXT,
+    generate_experiment_dashboards_from_policy,
+    parse_instance_map,
+)
+
 
 urllib3.disable_warnings()
+
+def _repo_root_guess() -> Path:
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "infrastructure/observability/grafana/provisioning/dashboards/static").exists():
+            return parent
+    return Path.cwd()
+
+
+REPO_ROOT = _repo_root_guess()
+DEFAULT_GRAFANA_TEMPLATE_DIR = REPO_ROOT / "infrastructure/observability/grafana/provisioning/dashboards/static"
+DEFAULT_GRAFANA_OUTPUT_ROOT = REPO_ROOT / "infrastructure/observability/grafana/provisioning/dashboards/experiments"
 
 
 def _normalize(value: Any) -> str:
@@ -32,6 +51,13 @@ def _parse_int(value: Any, default: int) -> int:
         return int(text)
     except Exception:
         return default
+
+
+def _parse_bool_env(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _parse_iso(value: Any) -> datetime | None:
@@ -383,9 +409,37 @@ def _create_experiment(metadata: dict[str, Any], *, now: datetime) -> int:
     return experiment_id
 
 
+def _maybe_provision_grafana_dashboards(experiment_id: int, policy: dict[str, Any]) -> None:
+    enabled = _parse_bool_env(
+        "PROVISION_GRAFANA_EXPERIMENT_DASHBOARDS",
+        _parse_bool_env("GRAFANA_EXPERIMENT_DASHBOARDS_ENABLED", False),
+    )
+    if not enabled:
+        return
+
+    template_dir = Path(os.environ.get("GRAFANA_DASHBOARD_TEMPLATE_DIR") or DEFAULT_GRAFANA_TEMPLATE_DIR)
+    output_root = Path(os.environ.get("GRAFANA_DASHBOARD_OUTPUT_ROOT") or DEFAULT_GRAFANA_OUTPUT_ROOT)
+    config = DashboardProvisioningConfig(
+        template_dir=template_dir,
+        output_root=output_root,
+        instance_map=parse_instance_map(os.environ.get("GRAFANA_EXPERIMENT_INSTANCE_MAP", DEFAULT_INSTANCE_MAP_TEXT)),
+        default_instance_regex=_normalize(os.environ.get("GRAFANA_EXPERIMENT_DEFAULT_INSTANCE_REGEX")),
+        folder_name=_normalize(os.environ.get("GRAFANA_EXPERIMENT_FOLDER_NAME")),
+        device_regex=_normalize(os.environ.get("GRAFANA_EXPERIMENT_DEVICE_REGEX")),
+        instance_regex=_normalize(os.environ.get("GRAFANA_EXPERIMENT_INSTANCE_REGEX")),
+    )
+    written = generate_experiment_dashboards_from_policy(
+        experiment_id=experiment_id,
+        policy=policy,
+        config=config,
+    )
+    print(f"Provisioned Grafana dashboards for experiment {experiment_id}: {len(written)} files")
+
+
 def main() -> None:
-    metadata_doc, _, now = _patched_document()
+    metadata_doc, policy, now = _patched_document()
     experiment_id = _create_experiment(metadata_doc, now=now)
+    _maybe_provision_grafana_dashboards(experiment_id, policy)
     print(experiment_id)
 
 

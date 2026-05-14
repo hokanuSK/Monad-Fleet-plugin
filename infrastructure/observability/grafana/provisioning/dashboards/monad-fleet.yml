@@ -1,7 +1,7 @@
 apiVersion: 1
 
 providers:
-  - name: Monad Fleet
+  - name: Monad Fleet Static
     orgId: 1
     folder: Monad Fleet
     type: file
@@ -9,5 +9,14 @@ providers:
     allowUiUpdates: true
     updateIntervalSeconds: 30
     options:
-      path: /etc/grafana/provisioning/dashboards
+      path: /etc/grafana/provisioning/dashboards/static
       foldersFromFilesStructure: false
+  - name: Monad Fleet Experiments
+    orgId: 1
+    type: file
+    disableDeletion: false
+    allowUiUpdates: true
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/provisioning/dashboards/experiments
+      foldersFromFilesStructure: true

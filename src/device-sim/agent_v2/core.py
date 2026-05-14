@@ -1777,8 +1777,16 @@ def _collect_wifi_observability_metrics(iface: str, timeout_ms: int, iw_bin: str
 
 
 def _parse_bluetoothctl_scan(text: str) -> tuple[int, float | None]:
-    # Count unique device addresses observed in output; average RSSI when available.
-    addrs = set(re.findall(r"\b([0-9A-F]{2}(?::[0-9A-F]{2}){5})\b", text, flags=re.IGNORECASE))
+    # Count [CHG] Name: events — each one is a new adv_id payload from the advertiser.
+    # Fall back to unique-address count when no name-change lines are present.
+    name_changes = re.findall(
+        r"\[CHG\]\s+Device\s+[0-9A-F]{2}(?::[0-9A-F]{2}){5}\s+Name:",
+        text,
+        flags=re.IGNORECASE,
+    )
+    count = len(name_changes) if name_changes else len(
+        set(re.findall(r"\b([0-9A-F]{2}(?::[0-9A-F]{2}){5})\b", text, flags=re.IGNORECASE))
+    )
     rssis: list[float] = []
     for m in re.finditer(r"\bRSSI:\s*(-?\d+(?:\.\d+)?)\b", text, flags=re.IGNORECASE):
         try:
@@ -1786,7 +1794,7 @@ def _parse_bluetoothctl_scan(text: str) -> tuple[int, float | None]:
         except Exception:
             continue
     avg_rssi = (sum(rssis) / len(rssis)) if rssis else None
-    return len(addrs), avg_rssi
+    return count, avg_rssi
 
 
 def event_type_for_exit(exit_code: int) -> int:
@@ -1918,6 +1926,7 @@ class RunStore:
         self.pending_dir = root / "pending"
         self.sent_dir = root / "sent"
         self.failed_dir = root / "failed"
+        self.execution_index_path = root / "execution-index.json"
         self.sent_retention_days = max(1, int(sent_retention_days))
         self.pending_dir.mkdir(parents=True, exist_ok=True)
         self.sent_dir.mkdir(parents=True, exist_ok=True)
@@ -1937,6 +1946,72 @@ class RunStore:
 
     def _write_json_atomic(self, path: Path, payload: dict[str, Any]) -> None:
         self._write_text_atomic(path, json.dumps(payload, sort_keys=True, indent=2))
+
+    def _load_execution_index(self) -> dict[str, Any]:
+        if not self.execution_index_path.exists():
+            return {}
+        try:
+            payload = json.loads(self.execution_index_path.read_text(encoding="utf-8"))
+        except Exception:
+            log.exception("Failed to read execution index")
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _write_execution_index(self, payload: dict[str, Any]) -> None:
+        self._write_json_atomic(self.execution_index_path, payload)
+
+    def get_execution_record(self, execution_key: str) -> dict[str, Any]:
+        key = normalize(execution_key)
+        if not key:
+            return {}
+        payload = self._load_execution_index()
+        row = payload.get(key)
+        return row if isinstance(row, dict) else {}
+
+    def mark_execution_state(
+        self,
+        execution_key: str,
+        *,
+        state: str,
+        run_id: str = "",
+        policy_id: str = "",
+        experiment_id: str = "",
+        measurement_from: str = "",
+        measurement_to: str = "",
+    ) -> dict[str, Any]:
+        key = normalize(execution_key)
+        if not key:
+            return {}
+        payload = self._load_execution_index()
+        current = payload.get(key)
+        entry = dict(current) if isinstance(current, dict) else {"execution_key": key}
+        now_iso = now_utc().isoformat().replace("+00:00", "Z")
+        entry["execution_key"] = key
+        entry["state"] = normalize(state) or "unknown"
+        entry["updated_at"] = now_iso
+        if run_id:
+            entry["run_id"] = normalize(run_id)
+        if policy_id:
+            entry["policy_id"] = normalize(policy_id)
+        if experiment_id:
+            entry["experiment_id"] = normalize(experiment_id)
+        if measurement_from:
+            entry["measurement_from"] = normalize(measurement_from)
+        if measurement_to:
+            entry["measurement_to"] = normalize(measurement_to)
+        if state == "in_progress":
+            entry["last_started_at"] = now_iso
+            entry["started_runs"] = max(0, int(entry.get("started_runs", 0) or 0)) + 1
+        elif state in {"completed", "reported"}:
+            entry["last_completed_at"] = now_iso
+            if state == "completed":
+                entry["completed_runs"] = max(0, int(entry.get("completed_runs", 0) or 0)) + 1
+        elif state == "failed":
+            entry["last_failed_at"] = now_iso
+            entry["failed_runs"] = max(0, int(entry.get("failed_runs", 0) or 0)) + 1
+        payload[key] = entry
+        self._write_execution_index(payload)
+        return entry
 
     def start_run(self, run_id: str, context: dict[str, Any]) -> Path:
         run_dir = self._run_dir(run_id)
@@ -2076,10 +2151,20 @@ class RunStore:
     def persist_report(self, report: fleet_gateway_v2_pb2.Report) -> None:
         run_dir = self._run_dir(report.run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
+        context_path = run_dir / "context.json"
+        current_context: dict[str, Any] = {}
+        if context_path.exists():
+            try:
+                loaded = json.loads(context_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    current_context = loaded
+            except Exception:
+                pass
         self._write_json_atomic(run_dir / "report.json", report_to_dict(report))
         self._write_json_atomic(
-            run_dir / "context.json",
+            context_path,
             {
+                **current_context,
                 "state": "measured",
                 "updated_at": now_utc().isoformat().replace("+00:00", "Z"),
                 "run_id": normalize(report.run_id),
@@ -2087,6 +2172,15 @@ class RunStore:
                 "experiment_id": normalize(report.experiment_id),
             },
         )
+        execution_key = normalize(current_context.get("execution_key"))
+        if execution_key:
+            self.mark_execution_state(
+                execution_key,
+                state="completed",
+                run_id=normalize(report.run_id),
+                policy_id=normalize(report.policy_id),
+                experiment_id=normalize(report.experiment_id),
+            )
 
     def pending_run_ids(self) -> list[str]:
         runs: list[tuple[float, str]] = []
@@ -2167,6 +2261,15 @@ class RunStore:
                 target / "failure-reason.txt",
                 f"{now_utc().isoformat().replace('+00:00', 'Z')} {normalize(reason)}\n{detail}\n",
             )
+        execution_key = normalize(payload.get("execution_key"))
+        if execution_key:
+            self.mark_execution_state(
+                execution_key,
+                state="failed",
+                run_id=normalize(run_id),
+                policy_id=normalize(payload.get("policy_id")),
+                experiment_id=normalize(payload.get("experiment_id")),
+            )
         log.warning("Quarantined pending run run_id=%s reason=%s", run_id, normalize(reason))
 
     def mark_sent(self, run_id: str) -> None:
@@ -2193,6 +2296,15 @@ class RunStore:
         payload["state"] = "reported"
         payload["updated_at"] = now_utc().isoformat().replace("+00:00", "Z")
         self._write_json_atomic(context_path, payload)
+        execution_key = normalize(payload.get("execution_key"))
+        if execution_key:
+            self.mark_execution_state(
+                execution_key,
+                state="reported",
+                run_id=normalize(run_id),
+                policy_id=normalize(payload.get("policy_id")),
+                experiment_id=normalize(payload.get("experiment_id")),
+            )
 
     def prune_sent(self) -> None:
         cutoff = now_utc() - timedelta(days=self.sent_retention_days)
