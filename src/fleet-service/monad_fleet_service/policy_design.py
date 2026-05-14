@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 RUNTIME_COMMAND_TYPES = {"SHELL", "CAPTURE_CSI", "BLE_SCAN", "WIFI_SCAN"}
@@ -336,6 +339,11 @@ def _enforce_wifi_measurement_policy(policy: dict[str, Any]) -> None:
             if scan_mode != "passive_monitor":
                 continue
 
+            if not _normalize(env.get("WIFI_SCAN_CHANNEL_DWELL_S")):
+                env["WIFI_SCAN_CHANNEL_DWELL_S"] = "0.5"
+            if not _normalize(env.get("WIFI_SCAN_USE_MEASURE_WINDOW")):
+                env["WIFI_SCAN_USE_MEASURE_WINDOW"] = "true"
+
             channels = _parse_channel_csv(env.get("WIFI_SCAN_CHANNELS"))
             if not channels:
                 env["WIFI_SCAN_CHANNELS"] = default_channels_csv
@@ -344,10 +352,35 @@ def _enforce_wifi_measurement_policy(policy: dict[str, Any]) -> None:
             invalid = [str(ch) for ch in channels if ch not in ALLOWED_5GHZ_CHANNELS]
             if invalid:
                 cmd_id = _normalize(cmd.get("id") or cmd.get("name")) or "wifi-scan"
-                raise ValueError(
-                    f"{cmd_id}: WIFI_SCAN_MODE=passive_monitor requires 5 GHz channels only; "
-                    f"invalid channels={','.join(invalid)}"
+                log.warning(
+                    "%s: passive_monitor mode has non-5GHz channels (%s); overriding to default 5GHz channel list",
+                    cmd_id, ",".join(invalid),
                 )
+                env["WIFI_SCAN_CHANNELS"] = default_channels_csv
+
+
+def _enforce_ble_measurement_policy(policy: dict[str, Any]) -> None:
+    groups = policy.get("command_groups")
+    if not isinstance(groups, list):
+        return
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        commands = group.get("commands")
+        if not isinstance(commands, list):
+            continue
+        for cmd in commands:
+            if not isinstance(cmd, dict):
+                continue
+            cmd_type = _normalize(cmd.get("type") or cmd.get("command_type")).upper()
+            if cmd_type != "BLE_SCAN":
+                continue
+            env = cmd.get("env")
+            if not isinstance(env, dict):
+                env = {}
+                cmd["env"] = env
+            if not _normalize(env.get("BLE_SCAN_USE_MEASURE_WINDOW")):
+                env["BLE_SCAN_USE_MEASURE_WINDOW"] = "true"
 
 
 def _promote_shell_env_cmdline(cmd: dict[str, Any], cmd_env: dict[str, str]) -> dict[str, str]:
@@ -387,6 +420,7 @@ def runtime_policy_from_design(policy: dict[str, Any]) -> dict[str, Any]:
 
     result = _deep_copy_json(policy)
     _enforce_wifi_measurement_policy(result)
+    _enforce_ble_measurement_policy(result)
     if not policy_uses_design_commands(result):
         return result
 
@@ -433,4 +467,5 @@ def runtime_policy_from_design(policy: dict[str, Any]) -> dict[str, Any]:
 
     result["command_groups"] = transformed_groups
     _enforce_wifi_measurement_policy(result)
+    _enforce_ble_measurement_policy(result)
     return result

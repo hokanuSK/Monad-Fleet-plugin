@@ -169,6 +169,26 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
             return None, None
         return item, self._core._select_policy_for_device(item, agent_id)
 
+    def _node_matches_target_selector(
+        self,
+        *,
+        item: dict[str, Any] | None,
+        node: dict[str, Any] | None,
+        agent_id: str,
+    ) -> bool:
+        if not isinstance(node, dict):
+            return True
+        selector = node.get("target_selector")
+        if not isinstance(selector, dict):
+            return True
+        if not isinstance(item, dict):
+            return True
+        return self._core._item_matches_policy_selector(
+            item,
+            {"target_selector": selector},
+            agent_id,
+        )
+
     def _resource_status_title_for_runtime_state(self, state: str) -> str | None:
         token = normalize_string(state).upper()
         mapping = {
@@ -527,8 +547,12 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
         for group in policy.get("command_groups", []):
             if not isinstance(group, dict):
                 continue
+            if not self._node_matches_target_selector(item=item, node=group, agent_id=agent_id):
+                continue
             commands_msg: list[fleet_gateway_v2_pb2.Command] = []
             for cmd in self._iter_commands(group):
+                if not self._node_matches_target_selector(item=item, node=cmd, agent_id=agent_id):
+                    continue
                 retry = cmd.get("retry")
                 retries = int(cmd.get("retries", 0))
                 backoff_ms = 0
@@ -580,6 +604,8 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
                         expected_artifacts=expected_artifacts,
                     )
                 )
+            if not commands_msg:
+                continue
             group_range = group.get("range") if isinstance(group.get("range"), dict) else {}
             group_start = normalize_string(group_range.get("from")) or start_iso
             group_end = normalize_string(group_range.get("to")) or end_iso

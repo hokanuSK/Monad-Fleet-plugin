@@ -75,6 +75,7 @@ What the installer does:
    - `iw`
    - `bluez`
    - `wireless-tools`
+   - `tcpdump`
    - `prometheus`
 3. writes `/etc/prometheus/prometheus.yml` to:
    - scrape `127.0.0.1:<prom_metrics_port>`
@@ -88,6 +89,19 @@ What the installer does:
    - Python imports for `grpc`, `google.protobuf`, `prometheus_client`
    - active `prometheus`
    - active `monad-fleet-agent.service`
+7. validates experiment readiness with `scripts/rpi/validate_bootstrap_install.sh`:
+   - local metrics endpoint responds
+   - configured Wi-Fi scan interface is present
+   - monitor interface creation works when the measurement NIC differs from the control-plane NIC
+
+You can also run the validation step directly after a deploy or after first boot:
+
+```bash
+PI_HOST=<host-or-ip> \
+SSH_PROXY_JUMP=ladamik@34.198.184.128 \
+scripts/rpi/validate_bootstrap_install.sh \
+  artifacts/output/rpi-agent-bootstrap/<timestamp>/<hostname>
+```
 
 ## Runtime Stabilization Included
 
@@ -97,6 +111,8 @@ The runtime side currently includes:
 - fresh Ubuntu package prerequisites are installed before deploy
 - broken WireGuard-provided DNS can be stripped before package install
 - local Prometheus scrape + remote_write is configured as part of bootstrap
+- passive 5 GHz monitor capture dependencies are present on first boot, including `tcpdump`
+- when the measurement NIC differs from the control-plane NIC, bootstrap can now force that interface `UP` before the agent starts
 
 That combination addresses the failure mode we saw on `monad-01`, where the
 agent fell back to `iw link` status collection and never produced a pcap

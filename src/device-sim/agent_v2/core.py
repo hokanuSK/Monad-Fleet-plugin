@@ -1777,8 +1777,16 @@ def _collect_wifi_observability_metrics(iface: str, timeout_ms: int, iw_bin: str
 
 
 def _parse_bluetoothctl_scan(text: str) -> tuple[int, float | None]:
-    # Count unique device addresses observed in output; average RSSI when available.
-    addrs = set(re.findall(r"\b([0-9A-F]{2}(?::[0-9A-F]{2}){5})\b", text, flags=re.IGNORECASE))
+    # Count [CHG] Name: events — each one is a new adv_id payload from the advertiser.
+    # Fall back to unique-address count when no name-change lines are present.
+    name_changes = re.findall(
+        r"\[CHG\]\s+Device\s+[0-9A-F]{2}(?::[0-9A-F]{2}){5}\s+Name:",
+        text,
+        flags=re.IGNORECASE,
+    )
+    count = len(name_changes) if name_changes else len(
+        set(re.findall(r"\b([0-9A-F]{2}(?::[0-9A-F]{2}){5})\b", text, flags=re.IGNORECASE))
+    )
     rssis: list[float] = []
     for m in re.finditer(r"\bRSSI:\s*(-?\d+(?:\.\d+)?)\b", text, flags=re.IGNORECASE):
         try:
@@ -1786,7 +1794,7 @@ def _parse_bluetoothctl_scan(text: str) -> tuple[int, float | None]:
         except Exception:
             continue
     avg_rssi = (sum(rssis) / len(rssis)) if rssis else None
-    return len(addrs), avg_rssi
+    return count, avg_rssi
 
 
 def event_type_for_exit(exit_code: int) -> int:

@@ -396,6 +396,62 @@ def rewrite_pi_targets(dashboard: dict[str, Any]) -> None:
             target["expr"] = rewrite_pi_expr(expr)
 
 
+def replace_experiment_placeholder(dashboard: dict[str, Any], experiment_id: str) -> None:
+    placeholder = "__EXPERIMENT_ID__"
+    for target in walk_targets(dashboard):
+        for key in ("expr", "legendFormat"):
+            value = target.get(key)
+            if isinstance(value, str) and placeholder in value:
+                target[key] = value.replace(placeholder, experiment_id)
+
+
+def _set_panel_expr(dashboard: dict[str, Any], panel_id: int, expr: str, *, title: str | None = None, description: str | None = None) -> None:
+    for panel in dashboard.get("panels", []):
+        if isinstance(panel, dict) and int(panel.get("id", -1)) == int(panel_id):
+            if title is not None:
+                panel["title"] = title
+            if description is not None:
+                panel["description"] = description
+            targets = panel.get("targets")
+            if isinstance(targets, list) and targets and isinstance(targets[0], dict):
+                targets[0]["expr"] = expr
+                targets[0]["legendFormat"] = "{{agent_id}}"
+            return
+
+
+def rewrite_wifi_experiment_dashboard(dashboard: dict[str, Any], experiment_id: str) -> None:
+    exp = normalize_token(experiment_id)
+    base = f'experiment_id="{exp}",agent_id=~"$device_id"'
+    _set_panel_expr(
+        dashboard,
+        1,
+        f"monad_pi_wifi5g_run_capture_ok{{{base}}}",
+        title="Capture success by run",
+        description="1 means the completed WIFI_SCAN run produced a monitor-mode pcap for this experiment.",
+    )
+    _set_panel_expr(
+        dashboard,
+        2,
+        f"monad_pi_wifi5g_run_pcap_bytes{{{base}}}",
+        title="PCAP bytes by run",
+        description="Raw pcap size for the completed WIFI_SCAN run in this experiment.",
+    )
+    _set_panel_expr(
+        dashboard,
+        3,
+        f"monad_pi_wifi5g_run_dwell_changes{{{base}}}",
+        title="Dwell changes by run",
+        description="Observed channel-hop transitions for the completed WIFI_SCAN run in this experiment.",
+    )
+    _set_panel_expr(
+        dashboard,
+        4,
+        f"monad_pi_wifi5g_run_ap_count{{{base}}}",
+        title="AP count / fallback evidence",
+        description="AP count recorded for the completed WIFI_SCAN run. Useful when the run fell back to scan evidence instead of a monitor pcap.",
+    )
+
+
 def stamp_dashboard(
     dashboard: dict[str, Any],
     *,
@@ -438,6 +494,9 @@ def stamp_dashboard(
         else:
             scope_instance_variable(dashboard, instance_regex)
         rewrite_pi_targets(dashboard)
+        if template.slug == "wifi":
+            rewrite_wifi_experiment_dashboard(dashboard, experiment_id)
+    replace_experiment_placeholder(dashboard, experiment_id)
 
     return dashboard
 

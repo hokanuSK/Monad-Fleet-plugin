@@ -56,6 +56,7 @@ FLEET_MANAGER_HOST="${FLEET_MANAGER_HOST:-10.200.0.1}"
 FLEET_MANAGER_PORT="${FLEET_MANAGER_PORT:-50060}"
 CONTROL_PLANE_IFACE="${CONTROL_PLANE_IFACE:-wg0}"
 WIFI_SCAN_IFACE="${WIFI_SCAN_IFACE:-wlan0}"
+WIFI_SCAN_FORCE_UP="${WIFI_SCAN_FORCE_UP:-false}"
 AGENT_ID_IFACE="${AGENT_ID_IFACE:-wlan0}"
 CAPABILITIES="${CAPABILITIES:-csi,ble,wifi}"
 EXECUTE_POLICY="${EXECUTE_POLICY:-true}"
@@ -169,6 +170,7 @@ write_files:
         printf '%s\n' 'CONTROL_PLANE_MODE=RF_SHARING'
         printf '%s\n' 'CONTROL_PLANE_IFACE=${CONTROL_PLANE_IFACE}'
         printf '%s\n' 'WIFI_SCAN_IFACE=${WIFI_SCAN_IFACE}'
+        printf '%s\n' 'WIFI_SCAN_FORCE_UP=${WIFI_SCAN_FORCE_UP}'
         printf '%s\n' 'MAX_SYNC_CYCLES=${MAX_SYNC_CYCLES}'
         printf '%s\n' 'EXECUTE_POLICY=${EXECUTE_POLICY}'
         printf '%s\n' 'CAPABILITIES=${CAPABILITIES}'
@@ -212,11 +214,29 @@ write_files:
         printf '%s\n' '  - url: "${PROM_REMOTE_WRITE_URL}"'
       } >/etc/prometheus/prometheus.yml
 
+      if [[ \"${WIFI_SCAN_FORCE_UP}\" == \"true\" ]]; then
+        {
+          printf '%s\n' '[Unit]'
+          printf '%s\n' 'Description=Bring up Monad measurement interface'
+          printf '%s\n' 'Before=monad-fleet-agent.service'
+          printf '%s\n' 'After=network-online.target'
+          printf '%s\n' 'Wants=network-online.target'
+          printf '\n'
+          printf '%s\n' '[Service]'
+          printf '%s\n' 'Type=oneshot'
+          printf '%s\n' 'ExecStart=/sbin/ip link set ${WIFI_SCAN_IFACE} up'
+          printf '%s\n' 'RemainAfterExit=yes'
+          printf '\n'
+          printf '%s\n' '[Install]'
+          printf '%s\n' 'WantedBy=multi-user.target'
+        } >/etc/systemd/system/monad-measurement-iface-up.service
+      fi
+
       {
         printf '%s\n' '[Unit]'
         printf '%s\n' 'Description=Monad Fleet Agent v2'
-        printf '%s\n' 'After=network-online.target wg-quick@wg0.service'
-        printf '%s\n' 'Wants=network-online.target wg-quick@wg0.service'
+        printf '%s\n' 'After=network-online.target wg-quick@wg0.service monad-measurement-iface-up.service'
+        printf '%s\n' 'Wants=network-online.target wg-quick@wg0.service monad-measurement-iface-up.service'
         printf '\n'
         printf '%s\n' '[Service]'
         printf '%s\n' 'Type=simple'
@@ -234,6 +254,9 @@ write_files:
       } >/etc/systemd/system/monad-fleet-agent.service
 
       systemctl daemon-reload
+      if [[ \"${WIFI_SCAN_FORCE_UP}\" == \"true\" ]]; then
+        systemctl enable --now monad-measurement-iface-up.service
+      fi
       systemctl enable --now prometheus
       systemctl restart prometheus
       systemctl enable --now monad-fleet-agent.service

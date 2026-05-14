@@ -91,6 +91,7 @@ required_columns = [
 ]
 
 optional_columns = [
+    "wifi_scan_force_up",
     "prom_pi_id",
     "prom_site",
     "prom_instance",
@@ -118,6 +119,9 @@ with device_csv.open(newline="", encoding="utf-8") as fh:
         row["artifact_upload_target"] = row["artifact_upload_target"] or "fleet_http"
         row["default_metrics_sinks"] = row["default_metrics_sinks"] or "fleet_http"
         row["grpc_dns_resolver"] = row["grpc_dns_resolver"] or "native"
+        row["wifi_scan_force_up"] = row["wifi_scan_force_up"] or (
+            "true" if row["wifi_scan_iface"] and row["wifi_scan_iface"] != row["control_plane_iface"] else "false"
+        )
         row["prom_pi_id"] = row["prom_pi_id"] or row["hostname"]
         row["prom_site"] = row["prom_site"] or "monad-fleet"
         row["prom_instance"] = row["prom_instance"] or row["hostname"]
@@ -146,6 +150,7 @@ for row in rows:
         "MONAD_CONTROL_PLANE_MODE='RF_SHARING'",
         f"MONAD_CONTROL_PLANE_IFACE='{row['control_plane_iface']}'",
         f"MONAD_WIFI_SCAN_IFACE='{row['wifi_scan_iface']}'",
+        f"MONAD_WIFI_SCAN_FORCE_UP='{row['wifi_scan_force_up']}'",
         f"MONAD_CAPABILITIES='{row['capabilities']}'",
         f"MONAD_EXECUTE_POLICY='{defaults['execute_policy']}'",
         f"MONAD_MAX_SYNC_CYCLES='{defaults['max_sync_cycles']}'",

@@ -28,8 +28,10 @@ AGENT.MD
 
 # Local editor / generated deps
 .vscode/
+.venv-notebooks/
 node_modules/
 .playwright-cli/
+.ipynb_checkpoints/
 .claude/
 docs/diagrams/node_modules/
 docs/diagrams/legacy/

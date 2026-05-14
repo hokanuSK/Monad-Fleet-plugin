@@ -62,8 +62,18 @@ pmic_3v3_sys_voltage_volts = None
 wifi5g_current_channel = None
 wifi5g_dwell_changes_total = None
 wifi5g_capture_active = None
+wifi5g_run_capture_ok = None
+wifi5g_run_status = None
+wifi5g_run_pcap_bytes = None
+wifi5g_run_dwell_changes = None
+wifi5g_run_channels = None
+wifi5g_run_ap_count = None
+wifi5g_run_duration_seconds = None
 ble_tx_total = None
 ble_advertise_active = None
+ble_run_adv_total = None
+ble_run_status = None
+ble_run_duration_seconds = None
 
 
 def _bool_env(name: str, default: bool) -> bool:
@@ -130,6 +140,9 @@ def _build_metrics(registry: "CollectorRegistry") -> None:
     )
 
     global wifi5g_current_channel, wifi5g_dwell_changes_total, wifi5g_capture_active
+    global wifi5g_run_capture_ok, wifi5g_run_status, wifi5g_run_pcap_bytes
+    global wifi5g_run_dwell_changes, wifi5g_run_channels, wifi5g_run_ap_count
+    global wifi5g_run_duration_seconds
     wifi5g_current_channel = Gauge(
         "monad_pi_wifi5g_current_channel",
         "Channel number the 5 GHz monitor-mode capture is dwelling on right now. "
@@ -149,8 +162,50 @@ def _build_metrics(registry: "CollectorRegistry") -> None:
         "annotating Grafana panels with capture windows.",
         registry=registry,
     )
+    wifi5g_run_capture_ok = Gauge(
+        "monad_pi_wifi5g_run_capture_ok",
+        "1 when a completed WIFI_SCAN run produced a monitor-mode pcap, else 0.",
+        ("experiment_id", "run_id", "agent_id"),
+        registry=registry,
+    )
+    wifi5g_run_status = Gauge(
+        "monad_pi_wifi5g_run_status",
+        "Completed WIFI_SCAN run status with a string status label set to 1 for the observed result.",
+        ("experiment_id", "run_id", "agent_id", "status"),
+        registry=registry,
+    )
+    wifi5g_run_pcap_bytes = Gauge(
+        "monad_pi_wifi5g_run_pcap_bytes",
+        "PCAP byte count for a completed monitor-mode WIFI_SCAN run.",
+        ("experiment_id", "run_id", "agent_id"),
+        registry=registry,
+    )
+    wifi5g_run_dwell_changes = Gauge(
+        "monad_pi_wifi5g_run_dwell_changes",
+        "Observed dwell/channel-hop transitions for a completed WIFI_SCAN run.",
+        ("experiment_id", "run_id", "agent_id"),
+        registry=registry,
+    )
+    wifi5g_run_channels = Gauge(
+        "monad_pi_wifi5g_run_channels",
+        "Configured channel count for a completed WIFI_SCAN run.",
+        ("experiment_id", "run_id", "agent_id"),
+        registry=registry,
+    )
+    wifi5g_run_ap_count = Gauge(
+        "monad_pi_wifi5g_run_ap_count",
+        "Observed AP count for a completed WIFI_SCAN run; useful for fallback scan outcomes.",
+        ("experiment_id", "run_id", "agent_id"),
+        registry=registry,
+    )
+    wifi5g_run_duration_seconds = Gauge(
+        "monad_pi_wifi5g_run_duration_seconds",
+        "Completed WIFI_SCAN run duration in seconds.",
+        ("experiment_id", "run_id", "agent_id"),
+        registry=registry,
+    )
 
-    global ble_tx_total, ble_advertise_active
+    global ble_tx_total, ble_advertise_active, ble_run_adv_total, ble_run_status, ble_run_duration_seconds
     ble_tx_total = Counter(
         "monad_pi_ble_tx_total",
         "Cumulative count of BLE advertisement payload-refresh events. The Pi "
@@ -167,6 +222,93 @@ def _build_metrics(registry: "CollectorRegistry") -> None:
         "annotating Grafana panels with advertise windows.",
         registry=registry,
     )
+    ble_run_adv_total = Gauge(
+        "monad_pi_ble_run_adv_total",
+        "Completed BLE run advertisement count or discovery count.",
+        ("experiment_id", "run_id", "agent_id"),
+        registry=registry,
+    )
+    ble_run_status = Gauge(
+        "monad_pi_ble_run_status",
+        "Completed BLE run status with a string status label set to 1 for the observed result.",
+        ("experiment_id", "run_id", "agent_id", "status"),
+        registry=registry,
+    )
+    ble_run_duration_seconds = Gauge(
+        "monad_pi_ble_run_duration_seconds",
+        "Completed BLE run duration in seconds.",
+        ("experiment_id", "run_id", "agent_id"),
+        registry=registry,
+    )
+
+
+def _label_values(experiment_id: str, run_id: str, agent_id: str) -> tuple[str, str, str]:
+    return (
+        (experiment_id or "unknown").strip() or "unknown",
+        (run_id or "unknown").strip() or "unknown",
+        (agent_id or "unknown").strip() or "unknown",
+    )
+
+
+def record_wifi_run_metrics(
+    *,
+    experiment_id: str,
+    run_id: str,
+    agent_id: str,
+    metrics: dict[str, str] | None,
+) -> None:
+    if not metrics:
+        return
+    labels = _label_values(experiment_id, run_id, agent_id)
+    status = (
+        (metrics.get("wifi_capture_status") or "").strip()
+        or ("scan_ok" if (metrics.get("wifi_scan_ok") or "").strip() == "1" else "unknown")
+    )
+    capture_ok = 1.0 if status == "ok" else 0.0
+    try:
+        if wifi5g_run_capture_ok is not None:
+            wifi5g_run_capture_ok.labels(*labels).set(capture_ok)
+        if wifi5g_run_status is not None:
+            wifi5g_run_status.labels(*labels, status).set(1.0)
+        if wifi5g_run_pcap_bytes is not None:
+            wifi5g_run_pcap_bytes.labels(*labels).set(float(metrics.get("wifi_capture_pcap_bytes") or 0.0))
+        if wifi5g_run_dwell_changes is not None:
+            wifi5g_run_dwell_changes.labels(*labels).set(float(metrics.get("wifi_capture_dwell_changes") or 0.0))
+        if wifi5g_run_channels is not None:
+            wifi5g_run_channels.labels(*labels).set(float(metrics.get("wifi_capture_channels") or 0.0))
+        if wifi5g_run_ap_count is not None:
+            wifi5g_run_ap_count.labels(*labels).set(float(metrics.get("wifi_ap_count") or 0.0))
+        if wifi5g_run_duration_seconds is not None:
+            wifi5g_run_duration_seconds.labels(*labels).set(float(metrics.get("wifi_capture_elapsed_s") or 0.0))
+    except Exception:
+        log.debug("Failed to record wifi run metrics", exc_info=True)
+
+
+def record_ble_run_metrics(
+    *,
+    experiment_id: str,
+    run_id: str,
+    agent_id: str,
+    metrics: dict[str, str] | None,
+) -> None:
+    if not metrics:
+        return
+    labels = _label_values(experiment_id, run_id, agent_id)
+    status = (
+        (metrics.get("ble_advertise_status") or "").strip()
+        or ("scan_ok" if (metrics.get("ble_scan_ok") or "").strip() == "1" else "unknown")
+    )
+    total = float(metrics.get("ble_tx_count") or metrics.get("ble_adv_count") or 0.0)
+    duration = float(metrics.get("ble_advertise_elapsed_s") or 0.0)
+    try:
+        if ble_run_adv_total is not None:
+            ble_run_adv_total.labels(*labels).set(total)
+        if ble_run_status is not None:
+            ble_run_status.labels(*labels, status).set(1.0)
+        if ble_run_duration_seconds is not None:
+            ble_run_duration_seconds.labels(*labels).set(duration)
+    except Exception:
+        log.debug("Failed to record BLE run metrics", exc_info=True)
 
 
 def start_exposition_server() -> bool:

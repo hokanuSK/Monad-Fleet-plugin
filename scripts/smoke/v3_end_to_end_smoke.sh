@@ -170,6 +170,9 @@ RF_ROOM_ID="${RF_ROOM_ID:-}"
 RF_SCENARIO_ID="${RF_SCENARIO_ID:-}"
 RF_RUN_LABEL="${RF_RUN_LABEL:-}"
 TARGET_DEVICE_IDS_CSV="${TARGET_DEVICE_IDS_CSV:-}"
+PROVISION_GRAFANA_EXPERIMENT_DASHBOARDS="${PROVISION_GRAFANA_EXPERIMENT_DASHBOARDS:-true}"
+GRAFANA_EXPERIMENT_INSTANCE_REGEX="${GRAFANA_EXPERIMENT_INSTANCE_REGEX:-}"
+GRAFANA_EXPERIMENT_FOLDER_NAME="${GRAFANA_EXPERIMENT_FOLDER_NAME:-}"
 PASSIVE_AGENT_WAIT_S="${PASSIVE_AGENT_WAIT_S:-120}"  # extra wait for passive Pi mode before verification
 PASSIVE_VERIFY_MAX_WAIT_S="${PASSIVE_VERIFY_MAX_WAIT_S:-900}"  # additional async verify window for passive mode
 PASSIVE_VERIFY_POLL_S="${PASSIVE_VERIFY_POLL_S:-15}"  # polling interval for passive async verification
@@ -1213,6 +1216,28 @@ PY"
 )"
 fi
 echo "Created smoke experiment id=${SMOKE_EXPERIMENT_ID}"
+
+if [[ "${PROVISION_GRAFANA_EXPERIMENT_DASHBOARDS}" == "true" ]]; then
+  echo "[4b/8] Provision Grafana dashboards for experiment ${SMOKE_EXPERIMENT_ID}"
+  grafana_device_ids="${TARGET_DEVICE_IDS_CSV}"
+  if [[ -z "${grafana_device_ids}" ]]; then
+    if [[ "${RUN_PI}" == "true" ]]; then
+      grafana_device_ids="${DEVICE_PI}"
+    else
+      grafana_device_ids="${DEVICE_MODEL}"
+    fi
+  fi
+  grafana_args=(--experiment-id "${SMOKE_EXPERIMENT_ID}" --device-ids "${grafana_device_ids}")
+  if [[ -n "${GRAFANA_EXPERIMENT_INSTANCE_REGEX}" ]]; then
+    grafana_args+=(--instance-regex "${GRAFANA_EXPERIMENT_INSTANCE_REGEX}")
+  fi
+  if [[ -n "${GRAFANA_EXPERIMENT_FOLDER_NAME}" ]]; then
+    grafana_args+=(--folder-name "${GRAFANA_EXPERIMENT_FOLDER_NAME}")
+  fi
+  scripts/grafana/provision_experiment_dashboards.py "${grafana_args[@]}"
+else
+  echo "[4b/8] Skip Grafana experiment dashboard provisioning (PROVISION_GRAFANA_EXPERIMENT_DASHBOARDS=${PROVISION_GRAFANA_EXPERIMENT_DASHBOARDS})"
+fi
 
 SMOKE_LAST_STEP="5_run_agent_cycle"
 if [[ "${RUN_PI}" == "true" && "${RUN_PI_PASSIVE}" != "true" ]]; then

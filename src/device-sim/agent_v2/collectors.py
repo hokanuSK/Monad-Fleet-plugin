@@ -829,11 +829,46 @@ def collect_ble_scan(
             [],
         )
 
-    # bluetoothctl is the most common unprivileged interface to BlueZ; it may still fail if bluetoothd isn't running.
-    exit_code, duration_ms, out = _run_capture_args(
-        ["bluetoothctl", "--timeout", str(max(1, int(timeout_ms / 1000))), "scan", "on"],
-        timeout_ms,
-    )
+    # Run bluetoothctl with explicit 'power on' before scanning so the adapter
+    # is always initialised even after a bluetoothd restart. Use Popen with
+    # stdin so we can send the clean teardown sequence (scan off / quit) after
+    # the measurement window expires rather than hard-killing the process.
+    import subprocess as _subprocess
+    _scan_timeout_s = max(1, int(timeout_ms / 1000))
+    _t0 = time.time()
+    try:
+        _btproc = _subprocess.Popen(
+            ["bluetoothctl"],
+            stdin=_subprocess.PIPE,
+            stdout=_subprocess.PIPE,
+            stderr=_subprocess.STDOUT,
+        )
+        _btproc.stdin.write(b"power on\nscan on\n")
+        _btproc.stdin.flush()
+        try:
+            _btout, _ = _btproc.communicate(timeout=_scan_timeout_s)
+            out = _btout.decode("utf-8", errors="replace")
+            exit_code = _btproc.returncode if _btproc.returncode is not None else 0
+        except _subprocess.TimeoutExpired:
+            try:
+                _btproc.stdin.write(b"scan off\nquit\n")
+                _btproc.stdin.flush()
+            except Exception:
+                pass
+            try:
+                _btout, _ = _btproc.communicate(timeout=5)
+                out = _btout.decode("utf-8", errors="replace") if _btout else ""
+            except Exception:
+                _btproc.kill()
+                out = ""
+            exit_code = 124
+    except FileNotFoundError:
+        out = "missing: bluetoothctl"
+        exit_code = 127
+    except Exception as _ble_exc:
+        out = str(_ble_exc)
+        exit_code = 1
+    duration_ms = int((time.time() - _t0) * 1000)
     adv_count, avg_rssi = _parse_bluetoothctl_scan(out)
     metrics["ble_adv_count"] = str(max(0, int(adv_count)))
     if avg_rssi is not None:

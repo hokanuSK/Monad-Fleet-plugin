@@ -250,6 +250,49 @@ Current important fields:
 - `failure_mode`
 - `commands`
 
+Optional targeting fields:
+
+- `target_selector` on the command group
+- `target_selector` on an individual command
+
+These selectors are evaluated server-side during runtime policy emission. A matched
+device still has to satisfy the policy-level selector first, then:
+
+- non-matching command groups are omitted for that device
+- non-matching commands are omitted for that device
+- empty groups are omitted for that device
+
+Example:
+
+```json
+{
+  "id": "ble-role-split",
+  "failure_mode": "CONTINUE_ON_ERROR",
+  "commands": [
+    {
+      "id": "ble-advertise-monad-02",
+      "type": "BLE_SCAN",
+      "target_selector": {
+        "device_ids": ["24:eb:16:e3:6a:07"]
+      },
+      "env": {
+        "BLE_SCAN_MODE": "advertise"
+      }
+    },
+    {
+      "id": "ble-collect-monad-03",
+      "type": "BLE_SCAN",
+      "target_selector": {
+        "device_ids": ["2c:cf:67:80:f5:86"]
+      },
+      "env": {
+        "BLE_SCAN_MODE": "continuous"
+      }
+    }
+  ]
+}
+```
+
 ### `failure_mode`
 
 The checked-in example uses `FAIL_FAST`, meaning a failure should stop later commands in the group. If you change this later, document the intended failure semantics clearly because it changes how the run behaves operationally.
