@@ -51,19 +51,19 @@ for IP in 10.200.0.11 10.200.0.13 10.200.0.14 10.200.0.15; do
     scp $SSH_OPTS /tmp/$F monad@$IP:/tmp/$F
   done
   ssh $SSH_OPTS monad@$IP "
-    for F in $FILES; do echo monad | sudo -S cp /tmp/\$F $AGENT_DIR/\$F 2>/dev/null; done
-    echo monad | sudo -S systemctl restart monad-fleet-agent 2>/dev/null
+    for F in $FILES; do sudo -n cp /tmp/\$F $AGENT_DIR/\$F 2>/dev/null; done
+    sudo -n systemctl restart monad-fleet-agent 2>/dev/null
     sleep 1; systemctl is-active monad-fleet-agent
   "
 done
 RELAY
 ```
 
-Note: `sshpass` is NOT available on EC2. For password-auth deploys the **Mac must be the origin** using `sshpass -p monad ssh -J ladamik@34.198.184.128 monad@<ip>`. From EC2 directly, use key auth (EC2 key already in monad-03/05/06 authorized_keys; monad-04 needs it added).
+Note: `sshpass` is NOT available on EC2. For password-auth deploys the **Mac must be the origin** using `sshpass -p "$PI_PASSWORD" ssh -J ladamik@34.198.184.128 monad@<ip>`. From EC2 directly, use key auth (EC2 key already in monad-03/05/06 authorized_keys; monad-04 needs it added).
 
-SSH Pi credentials: user=`monad`, password=`monad`, proxy=`ladamik@34.198.184.128`.
+SSH Pi login: user=`monad`, password from local ops credential store, proxy=`ladamik@34.198.184.128`.
 
-Sudo on all Pis: use `printf 'monad\n' | sudo -S` — do NOT use `echo monad | sudo -S` inside a heredoc (heredoc consumes stdin before sudo can read it). Grant passwordless sudo first on fresh installs: `printf 'monad\n' | sudo -S bash -c 'echo "monad ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/monad-nopasswd && chmod 440 /etc/sudoers.d/monad-nopasswd'`
+Sudo on all Pis: use `printf "$PI_PASSWORD\n" | sudo -S` — do NOT use `echo "$PI_PASSWORD" | sudo -S` inside a heredoc (heredoc consumes stdin before sudo can read it). Grant passwordless sudo first on fresh installs: `printf "$PI_PASSWORD\n" | sudo -S bash -c 'echo "monad ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/monad-nopasswd && chmod 440 /etc/sudoers.d/monad-nopasswd'`
 
 ---
 
@@ -234,9 +234,9 @@ The agent records each policy execution in `/home/monad/monad-fleet-agent/data/e
 
 Fix for both: delete the index and restart.
 ```bash
-sshpass -p monad ssh -J ladamik@34.198.184.128 monad@<ip> \
+sshpass -p "$PI_PASSWORD" ssh -J ladamik@34.198.184.128 monad@<ip> \
   'rm -f /home/monad/monad-fleet-agent/data/execution-index.json && \
-   printf "monad\n" | sudo -S systemctl restart monad-fleet-agent'
+   sudo -n systemctl restart monad-fleet-agent'
 ```
 
 ### parse_iso Bug (FIXED 2026-05-21)
@@ -268,10 +268,10 @@ If fleet service is healthy but agent still DEADLINE_EXCEEDED, check the Pi's Wi
 If agent logs `Deferring PublishReport until artifact finalization succeeds` in a loop:
 ```bash
 # Clear pending uploads and execution index
-sshpass -p monad ssh -J ladamik@34.198.184.128 monad@<ip> \
+sshpass -p "$PI_PASSWORD" ssh -J ladamik@34.198.184.128 monad@<ip> \
   'rm -rf /home/monad/monad-fleet-agent/data/pending/ \
          /home/monad/monad-fleet-agent/data/execution-index.json && \
-   printf "monad\n" | sudo -S systemctl restart monad-fleet-agent'
+   sudo -n systemctl restart monad-fleet-agent'
 ```
 
 ---
