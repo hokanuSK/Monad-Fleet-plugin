@@ -1,6 +1,7 @@
 from .core import *  # noqa: F401,F403
 from pathlib import Path
 import threading
+import time
 
 from .grafana_dashboards import (
     DashboardProvisioningConfig,
@@ -15,6 +16,9 @@ class FleetManagerServicer(fleet_gateway_pb2_grpc.FleetManagerServicer):
         self._state = local_state
         self._cfg = cfg
         self._metadata_patch_supported = True
+        self._device_item_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._device_item_cache_lock = threading.Lock()
+        self._device_item_cache_ttl_s = max(0, int(cfg.get("device_item_cache_ttl_s", 600) or 0))
         policy_keys = cfg.get("policy_metadata_keys") or []
         if not isinstance(policy_keys, list):
             policy_keys = []
@@ -141,10 +145,23 @@ class FleetManagerServicer(fleet_gateway_pb2_grpc.FleetManagerServicer):
             log.warning("patch_item_body fallback failed for item_id=%s: %s", item_id, exc)
 
     def _get_or_create_device_item(self, device_id: str, agent_info: fleet_gateway_pb2.AgentInfo | None = None) -> dict[str, Any]:
+        cache_key = normalize_device_id(device_id)
+        if cache_key and self._device_item_cache_ttl_s > 0:
+            now_s = time.time()
+            with self._device_item_cache_lock:
+                cached = self._device_item_cache.get(cache_key)
+                if cached is not None:
+                    cached_at_s, cached_item = cached
+                    if now_s - cached_at_s <= self._device_item_cache_ttl_s:
+                        return dict(cached_item)
+
         item = self._find_device_item(device_id)
         if item is None:
             log.info("Creating new resource item for device_id=%s", device_id)
             item = self._elab_client.create_device_item(device_id)
+        if cache_key and self._device_item_cache_ttl_s > 0:
+            with self._device_item_cache_lock:
+                self._device_item_cache[cache_key] = (time.time(), dict(item))
         return item
 
     def _fetch_fleet_experiments(self, max_total: int | None = None) -> list[dict[str, Any]]:

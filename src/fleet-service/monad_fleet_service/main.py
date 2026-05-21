@@ -38,6 +38,7 @@ def serve() -> None:
         "experiments_batch_size": int(os.environ.get("EXPERIMENTS_BATCH_SIZE", "200")),
         "max_experiments_to_scan": int(os.environ.get("MAX_EXPERIMENTS_TO_SCAN", "20")),
         "max_event_history": int(os.environ.get("MAX_EVENT_HISTORY", "100")),
+        "device_item_cache_ttl_s": int(os.environ.get("DEVICE_ITEM_CACHE_TTL_S", "600")),
         "event_duration_minutes": int(os.environ.get("EVENT_DURATION_MINUTES", "60")),
         "book_max_minutes": int(os.environ.get("BOOK_MAX_MINUTES", "180")),
         "book_can_overlap": core.normalize_string(os.environ.get("BOOK_CAN_OVERLAP", "true")).lower() in {"1", "true", "yes"},

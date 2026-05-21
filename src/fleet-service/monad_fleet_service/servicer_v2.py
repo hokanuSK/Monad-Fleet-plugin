@@ -772,7 +772,8 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
             }
             def _async_presence():
                 try:
-                    self._update_v2_presence(item, agent)
+                    if bool(self._cfg.get("enable_v2_device_state_patch", True)):
+                        self._update_v2_presence(item, agent)
                     self._set_device_runtime_state(agent_id, "ONLINE", item=item, details=details)
                 except Exception:
                     pass

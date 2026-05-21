@@ -69,6 +69,7 @@ Python gRPC service that integrates devices with eLabFTW for Wi-Fi/BLE/CSI fleet
 - `POLICY_METADATA_KEYS` (`fleet.policy,policy,fleet_policy,policy_json`)
 - `DATA_DIR` (`/data`)
 - `HELLO_POLL_INTERVAL_S` (`30`; AWS compose defaults to `60`)
+- `DEVICE_ITEM_CACHE_TTL_S` (`600`; caches eLabFTW resource lookups so Hello/GetPolicy do not hammer MySQL)
 - `REQUIRED_MIN_AGENT_VERSION` (empty by default)
 - `ALLOW_LIVE_EVENTS` (`false`)
 - `ENABLE_V2_DEVICE_STATE_PATCH` (`true`; set `false` to disable v2 item metadata runtime-state patching)
