@@ -829,11 +829,22 @@ def collect_ble_scan(
             [],
         )
 
-    # Run bluetoothctl with explicit 'power on' before scanning so the adapter
-    # is always initialised even after a bluetoothd restart. Use Popen with
-    # stdin so we can send the clean teardown sequence (scan off / quit) after
-    # the measurement window expires rather than hard-killing the process.
+    # Run bluetoothctl keeping stdin open for the full scan window.
+    # IMPORTANT: calling communicate() closes stdin immediately, which sends
+    # EOF to bluetoothctl causing it to exit in ~14 ms instead of scanning.
+    # Fix: keep stdin open, drain stdout via a background thread to prevent
+    # pipe-buffer deadlock, then send "scan off\nquit\n" after the window.
+    try:
+        from . import prom_exposition as _prom_ble
+    except Exception:
+        _prom_ble = None
+    if _prom_ble is not None and getattr(_prom_ble, "ble_scan_active", None) is not None:
+        try:
+            _prom_ble.ble_scan_active.set(1.0)
+        except Exception:
+            pass
     import subprocess as _subprocess
+    import threading as _threading
     _scan_timeout_s = max(1, int(timeout_ms / 1000))
     _t0 = time.time()
     try:
@@ -843,25 +854,52 @@ def collect_ble_scan(
             stdout=_subprocess.PIPE,
             stderr=_subprocess.STDOUT,
         )
-        _btproc.stdin.write(b"power on\nscan on\n")
+        # Disable duplicate-advertisement filtering so BlueZ reports every
+        # [CHG] Name: event when the advertiser MAC is static. Without this,
+        # BlueZ suppresses repeated PDUs from the same address after first discovery.
+        _btproc.stdin.write(b"power on\nmenu scan\nduplicate-data off\nback\nscan on\n")
         _btproc.stdin.flush()
+        # Drain stdout continuously so the pipe buffer never fills and deadlocks.
+        _chunks: list[bytes] = []
+        def _drain() -> None:
+            while True:
+                chunk = _btproc.stdout.read(4096)
+                if not chunk:
+                    break
+                _chunks.append(chunk)
+        _drain_thread = _threading.Thread(target=_drain, daemon=True)
+        _drain_thread.start()
+        # Wait for the scan window, checking for early exit every 0.5 s.
+        _waited = 0.0
+        while _waited < _scan_timeout_s:
+            if _btproc.poll() is not None:
+                break
+            time.sleep(min(0.5, _scan_timeout_s - _waited))
+            _waited += 0.5
+        # Graceful stop.
         try:
-            _btout, _ = _btproc.communicate(timeout=_scan_timeout_s)
-            out = _btout.decode("utf-8", errors="replace")
-            exit_code = _btproc.returncode if _btproc.returncode is not None else 0
+            _btproc.stdin.write(b"scan off\nquit\n")
+            _btproc.stdin.flush()
+            _btproc.stdin.close()
+        except Exception:
+            pass
+        try:
+            _btproc.wait(timeout=5)
         except _subprocess.TimeoutExpired:
+            _btproc.kill()
             try:
-                _btproc.stdin.write(b"scan off\nquit\n")
-                _btproc.stdin.flush()
+                _btproc.wait(timeout=2)
             except Exception:
                 pass
-            try:
-                _btout, _ = _btproc.communicate(timeout=5)
-                out = _btout.decode("utf-8", errors="replace") if _btout else ""
-            except Exception:
-                _btproc.kill()
-                out = ""
-            exit_code = 124
+        _drain_thread.join(timeout=3)
+        out = b"".join(_chunks).decode("utf-8", errors="replace")
+        exit_code = _btproc.returncode if _btproc.returncode is not None else 0
+        if "discovering: yes" not in out.lower() and "discovery started" not in out.lower():
+            log.warning(
+                "ble_scan: BLE discovery may not have started — 'Discovery started' missing from "
+                "bluetoothctl output; check hci0 adapter state. output_head=%r",
+                out[:300],
+            )
     except FileNotFoundError:
         out = "missing: bluetoothctl"
         exit_code = 127
@@ -869,7 +907,19 @@ def collect_ble_scan(
         out = str(_ble_exc)
         exit_code = 1
     duration_ms = int((time.time() - _t0) * 1000)
+    # Mark scan as finished in Prometheus.
+    if _prom_ble is not None and getattr(_prom_ble, "ble_scan_active", None) is not None:
+        try:
+            _prom_ble.ble_scan_active.set(0.0)
+        except Exception:
+            pass
     adv_count, avg_rssi = _parse_bluetoothctl_scan(out)
+    # Increment RX counter by number of detected advertisements.
+    if _prom_ble is not None and getattr(_prom_ble, "ble_rx_total", None) is not None and adv_count > 0:
+        try:
+            _prom_ble.ble_rx_total.inc(adv_count)
+        except Exception:
+            pass
     metrics["ble_adv_count"] = str(max(0, int(adv_count)))
     if avg_rssi is not None:
         metrics["ble_avg_rssi_dbm"] = f"{avg_rssi:.2f}"

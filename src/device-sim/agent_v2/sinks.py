@@ -186,7 +186,7 @@ def _artifact_upload_endpoint_and_limit(override_env: dict[str, str] | None = No
     host = normalize(env.get("FLEET_MANAGER_HOST") or os.environ.get("FLEET_MANAGER_HOST"))
     if not host:
         return None
-    port = parse_int(env.get("METRICS_PORT") or os.environ.get("METRICS_PORT"), 9108)
+    port = parse_int(env.get("FLEET_ARTIFACT_INGEST_PORT") or os.environ.get("FLEET_ARTIFACT_INGEST_PORT"), 9108)
     endpoint = normalize(env.get("FLEET_ARTIFACT_INGEST_URL") or os.environ.get("FLEET_ARTIFACT_INGEST_URL")) or f"http://{host}:{max(1, port)}/ingest/v1/artifacts"
     max_bytes = max(1024, parse_int(env.get("ARTIFACT_UPLOAD_MAX_BYTES") or os.environ.get("ARTIFACT_UPLOAD_MAX_BYTES"), 20 * 1024 * 1024))
     return endpoint, max_bytes

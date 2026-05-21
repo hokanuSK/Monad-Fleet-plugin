@@ -36,6 +36,7 @@ def serve() -> None:
         "poll_interval_s": int(os.environ.get("HELLO_POLL_INTERVAL_S", "30")),
         "required_min_agent_version": os.environ.get("REQUIRED_MIN_AGENT_VERSION", ""),
         "experiments_batch_size": int(os.environ.get("EXPERIMENTS_BATCH_SIZE", "200")),
+        "max_experiments_to_scan": int(os.environ.get("MAX_EXPERIMENTS_TO_SCAN", "20")),
         "max_event_history": int(os.environ.get("MAX_EVENT_HISTORY", "100")),
         "event_duration_minutes": int(os.environ.get("EVENT_DURATION_MINUTES", "60")),
         "book_max_minutes": int(os.environ.get("BOOK_MAX_MINUTES", "180")),
@@ -104,7 +105,7 @@ def serve() -> None:
     v2_servicer = FleetManagerServicerV2(v1_servicer, cfg)
 
     if cfg["grafana_experiment_dashboards_enabled"]:
-        scan_interval_s = max(5, int(cfg.get("grafana_experiment_scan_interval_s", 60)))
+        scan_interval_s = max(60, int(cfg.get("grafana_experiment_scan_interval_s", 600)))
 
         def dashboard_scan_loop() -> None:
             while True:
@@ -121,7 +122,15 @@ def serve() -> None:
         ).start()
         core.log.info("Grafana dashboard background scan enabled interval=%ss", scan_interval_s)
 
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    # Add 4 MB headroom for gRPC framing on top of the artifact payload limit.
+    grpc_max_bytes = cfg["artifact_max_bytes"] + 4 * 1024 * 1024
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=10),
+        options=[
+            ("grpc.max_receive_message_length", grpc_max_bytes),
+            ("grpc.max_send_message_length", grpc_max_bytes),
+        ],
+    )
     fleet_gateway_pb2_grpc.add_FleetManagerServicer_to_server(v1_servicer, server)
     # Primary endpoint (v3).
     fleet_gateway_v3_pb2_grpc.add_FleetManagerServicer_to_server(v2_servicer, server)

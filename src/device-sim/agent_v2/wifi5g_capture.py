@@ -119,36 +119,111 @@ def parse_channel_list(raw: str) -> list[int]:
     return out or list(DEFAULT_5GHZ_CHANNELS)
 
 
-def create_monitor_vif(parent_iface: str, mon_iface: Optional[str] = None) -> tuple[bool, str, str]:
-    """Create a transient monitor-mode virtual interface off ``parent_iface``.
+def _iface_driver(iface: str) -> str:
+    """Return the kernel driver name for ``iface`` (empty string on failure)."""
+    try:
+        import subprocess as _sp
+        out = _sp.check_output(["ethtool", "-i", iface], text=True, timeout=3,
+                               stderr=_sp.DEVNULL)
+        for line in out.splitlines():
+            if line.startswith("driver:"):
+                return line.split(":", 1)[1].strip().lower()
+    except Exception:
+        pass
+    return ""
 
-    ``parent_iface`` stays in managed mode so VPN / SSH / control-plane
-    connectivity is preserved. Returns ``(ok, mon_iface_name, message)``.
-    The caller is responsible for calling :func:`delete_monitor_vif` when done.
-    Requires root (CAP_NET_ADMIN).
+
+def _iface_is_associated(iface: str) -> bool:
+    """Return True if ``iface`` is currently associated with an AP.
+
+    Used to prevent type-change monitor mode on management interfaces (e.g.
+    monad-02 where the AX210 is wlan0 and also carries WireGuard).  For those
+    we fall back to VIF-based monitor which preserves the STA association.
+    """
+    iw = _find_tool("iw")
+    if not iw:
+        return False
+    try:
+        rc, out, _ = _run([iw, "dev", iface, "link"])
+        return rc == 0 and ("Connected" in out or "SSID" in out)
+    except Exception:
+        return False
+
+
+def create_monitor_vif(parent_iface: str, mon_iface: Optional[str] = None) -> tuple[bool, str, str]:
+    """Create a monitor-mode capture interface off ``parent_iface``.
+
+    For most drivers (brcmfmac, ath9k, …) this creates a transient VIF
+    (``<parent>mon``) that leaves ``parent_iface`` in managed mode so the
+    control plane stays up.
+
+    Intel AX210 / iwlwifi requires a direct type-change (``iw dev set type
+    monitor``) because the VIF approach creates the interface but the hardware
+    never passes frames to userspace.  In that case ``parent_iface`` is brought
+    down briefly, its type flipped to ``monitor``, and the function returns
+    ``mon_iface == parent_iface`` as the signal to :func:`delete_monitor_vif`
+    that a type-restore is needed rather than a VIF deletion.
+
+    Returns ``(ok, capture_iface, message)``.
     """
     iw = _find_tool("iw")
     if not iw:
         return False, "", "iw not found on PATH or in /sbin:/usr/sbin"
     mon = mon_iface or (parent_iface + "mon")
+
     # Clean up any stale vif from a previous interrupted run.
     _run(_SUDO_PREFIX + ["ip", "link", "set", mon, "down"])
     _run(_SUDO_PREFIX + [iw, "dev", mon, "del"])
-    rc, _, err = _run(_SUDO_PREFIX + [iw, "dev", parent_iface, "interface", "add", mon, "type", "monitor"])
+
+    # iwlwifi (Intel AX210): VIF-based monitor creates the interface but the
+    # hardware silently produces empty pcaps.  Use direct type-change instead.
+    # Exception: if the interface is already associated with an AP (e.g. monad-02
+    # where wlan0 is both AX210 and management/WireGuard), taking it down would
+    # drop the VPN.  In that case use VIF approach; it will capture on the AP's
+    # current channel without disrupting connectivity.
+    use_type_change = (
+        _iface_driver(parent_iface) == "iwlwifi"
+        and not _iface_is_associated(parent_iface)
+    )
+
+    if not use_type_change:
+        rc, _, err = _run(_SUDO_PREFIX + [iw, "dev", parent_iface, "interface", "add", mon, "type", "monitor"])
+        if rc == 0:
+            rc2, _, err2 = _run(_SUDO_PREFIX + ["ip", "link", "set", mon, "up"])
+            if rc2 == 0:
+                _run(_SUDO_PREFIX + [iw, "dev", mon, "set", "monitor", "otherbss", "fcsfail"])
+                return True, mon, "monitor vif created"
+            _run(_SUDO_PREFIX + [iw, "dev", mon, "del"])
+        # VIF creation failed; fall through to type-change.
+        use_type_change = True
+
+    # Direct type-change: parent_iface goes down briefly, type set to monitor.
+    _run(_SUDO_PREFIX + ["ip", "link", "set", parent_iface, "down"])
+    rc, _, err = _run(_SUDO_PREFIX + [iw, "dev", parent_iface, "set", "type", "monitor"])
     if rc != 0:
-        return False, mon, f"iw add monitor vif failed rc={rc} err={err.strip()[:200]}"
-    rc, _, err = _run(_SUDO_PREFIX + ["ip", "link", "set", mon, "up"])
-    if rc != 0:
-        _run(_SUDO_PREFIX + [iw, "dev", mon, "del"])
-        return False, mon, f"ip link set {mon} up failed rc={rc} err={err.strip()[:200]}"
-    return True, mon, "monitor vif created"
+        _run(_SUDO_PREFIX + ["ip", "link", "set", parent_iface, "up"])
+        return False, parent_iface, f"set type monitor failed rc={rc} err={err.strip()[:200]}"
+    _run(_SUDO_PREFIX + ["ip", "link", "set", parent_iface, "up"])
+    _run(_SUDO_PREFIX + [iw, "dev", parent_iface, "set", "monitor", "otherbss", "fcsfail"])
+    # Return parent_iface as capture iface; caller detects mon==parent as type-change mode.
+    return True, parent_iface, "monitor mode via type change (iwlwifi)"
 
 
-def delete_monitor_vif(mon_iface: str) -> None:
-    """Best-effort removal of the transient monitor virtual interface."""
+def delete_monitor_vif(mon_iface: str, parent_iface: str = "") -> None:
+    """Remove the monitor interface created by :func:`create_monitor_vif`.
+
+    When ``parent_iface`` is given and equals ``mon_iface`` (type-change mode),
+    restores the interface to managed mode instead of deleting a VIF.
+    """
     iw = _find_tool("iw") or "iw"
-    _run(_SUDO_PREFIX + ["ip", "link", "set", mon_iface, "down"])
-    _run(_SUDO_PREFIX + [iw, "dev", mon_iface, "del"])
+    if parent_iface and mon_iface == parent_iface:
+        # Restore parent from monitor back to managed.
+        _run(_SUDO_PREFIX + ["ip", "link", "set", mon_iface, "down"])
+        _run(_SUDO_PREFIX + [iw, "dev", mon_iface, "set", "type", "managed"])
+        _run(_SUDO_PREFIX + ["ip", "link", "set", mon_iface, "up"])
+    else:
+        _run(_SUDO_PREFIX + ["ip", "link", "set", mon_iface, "down"])
+        _run(_SUDO_PREFIX + [iw, "dev", mon_iface, "del"])
 
 
 def set_channel(iface: str, channel: int, width_mhz: int = DEFAULT_CHANNEL_WIDTH_MHZ) -> tuple[bool, str]:
@@ -254,7 +329,7 @@ def start_capture(
     ch_list = list(channels) if channels else list(DEFAULT_5GHZ_CHANNELS)
     if not ch_list:
         log.warning("wifi5g_capture: empty channel list; aborting")
-        delete_monitor_vif(mon_iface)
+        delete_monitor_vif(mon_iface, parent_iface=iface)
         return None
 
     # Park on the first channel so tcpdump starts seeing frames immediately.
@@ -281,7 +356,7 @@ def start_capture(
         )
     except FileNotFoundError as exc:
         log.warning("wifi5g_capture: tcpdump spawn failed: %s", exc)
-        delete_monitor_vif(mon_iface)
+        delete_monitor_vif(mon_iface, parent_iface=iface)
         return None
 
     # Give tcpdump a moment to bind to the iface; if it dies immediately, bail.
@@ -289,7 +364,7 @@ def start_capture(
     if proc.poll() is not None:
         err = proc.stderr.read() if proc.stderr else ""
         log.warning("wifi5g_capture: tcpdump exited rc=%s err=%s", proc.returncode, err.strip()[:200])
-        delete_monitor_vif(mon_iface)
+        delete_monitor_vif(mon_iface, parent_iface=iface)
         return None
 
     handles = CaptureHandles(
@@ -341,7 +416,7 @@ def stop_capture(handles: CaptureHandles) -> dict:
         except Exception:
             pass
 
-    delete_monitor_vif(handles.iface)
+    delete_monitor_vif(handles.iface, parent_iface=handles.parent_iface)
 
     # Flush the dwell schedule to disk as JSONL.
     try:

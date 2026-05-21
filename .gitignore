@@ -12,6 +12,7 @@ tools/
 # Local scratch / secrets
 scripts/rpi/keys/
 tests/e2e/.auth/
+/Bakalarka/
 .env.aws
 .env.aws.local
 Poznamky.md
@@ -28,6 +29,11 @@ AGENT.MD
 
 # Local editor / generated deps
 .vscode/
+.ipython/
+.jupyter-config/
+.jupyter-data/
+.jupyter-runtime/
+Untitled.ipynb
 .venv-notebooks/
 node_modules/
 .playwright-cli/

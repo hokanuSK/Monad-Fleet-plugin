@@ -70,6 +70,11 @@ def _execution_skip_reason(
     state = normalize(record.get("state")).lower()
     mode = normalize(execution_cfg.get("mode")).lower() or "once"
     if state == "in_progress":
+        measure_to_raw = normalize(record.get("measurement_to"))
+        if measure_to_raw:
+            measure_to_dt = parse_iso(measure_to_raw)
+            if measure_to_dt is not None and now_utc() > measure_to_dt:
+                return ""
         return "execution already in progress"
     if mode == "once":
         if state in {"completed", "reported", "failed"}:
@@ -589,20 +594,28 @@ def main() -> None:
             time.sleep(poll)
             continue
 
-        prep = stub.AckPrepared(
-            fleet_gateway_v2_pb2.AckPreparedRequest(
-                agent_id=agent_id,
-                experiment_id=policy.experiment_id,
-                policy_id=policy.policy_id,
-                preparation_id=str(uuid.uuid4()),
-                mode=policy.allowed_mode,
-                control_plane_iface=policy.control_plane_iface,
-                route_verified=route_verified,
-                checks_ok=["route_verified"] if route_verified else [],
-                warnings=[] if route_verified else [f"route via {route_iface or 'unknown'}"],
-            ),
-            timeout=ack_prepared_rpc_timeout_s,
-        )
+        try:
+            prep = stub.AckPrepared(
+                fleet_gateway_v2_pb2.AckPreparedRequest(
+                    agent_id=agent_id,
+                    experiment_id=policy.experiment_id,
+                    policy_id=policy.policy_id,
+                    preparation_id=str(uuid.uuid4()),
+                    mode=policy.allowed_mode,
+                    control_plane_iface=policy.control_plane_iface,
+                    route_verified=route_verified,
+                    checks_ok=["route_verified"] if route_verified else [],
+                    warnings=[] if route_verified else [f"route via {route_iface or 'unknown'}"],
+                ),
+                timeout=ack_prepared_rpc_timeout_s,
+            )
+        except grpc.RpcError as exc:
+            log.warning("AckPrepared RPC failed: %s; will retry", exc.code())
+            flush_pending_reports_guarded("ack-prepared-rpc-error")
+            if reached_max_cycles(cycles, max_cycles):
+                break
+            time.sleep(poll)
+            continue
         if prep.status != fleet_gateway_v2_pb2.AckPreparedResponse.ACCEPTED:
             log.warning("AckPrepared rejected: %s", prep.reason)
             flush_pending_reports_guarded("ack-prepared-rejected")
@@ -796,7 +809,7 @@ def main() -> None:
                             _b.append(collect_wifi_scan(_iface, _tms, _ep, _s, _rid, _cid, override_cmdline=_cl, override_argv=_av, override_env=_ev))
                         _t = threading.Thread(target=_wifi_worker, daemon=True)
                         _t.start()
-                        _async_tasks.append((_t, _box, "wifi"))
+                        _async_tasks.append((_t, _box, "wifi", upload_during_measure, artifact_upload_target))
                         exit_code, duration_ms, message, parsed, extra_artifacts = 0, 0, "passive_monitor started async", {"wifi_capture_mode": "passive_monitor", "async": "true"}, []
                     else:
                         exit_code, duration_ms, message, parsed, extra_artifacts = collect_wifi_scan(
@@ -838,7 +851,7 @@ def main() -> None:
                             _b.append(collect_ble_scan(_tms, _ep, _s, _rid, _cid, override_cmdline=_cl, override_argv=_av, override_env=_ev))
                         _bt = threading.Thread(target=_ble_worker, daemon=True)
                         _bt.start()
-                        _async_tasks.append((_bt, _bbox, "ble"))
+                        _async_tasks.append((_bt, _bbox, "ble", upload_during_measure, artifact_upload_target))
                         exit_code, duration_ms, message, parsed, extra_artifacts = 0, 0, "ble advertise started async", {"ble_mode": "advertise", "async": "true"}, []
                     else:
                         exit_code, duration_ms, message, parsed, extra_artifacts = collect_ble_scan(
@@ -1029,7 +1042,7 @@ def main() -> None:
                 if exit_code != 0 and group.failure_mode == fleet_gateway_v2_pb2.FAIL_FAST:
                     break
 
-            for _at, _ab, _atype in _async_tasks:
+            for _at, _ab, _atype, _async_upload_during, _async_upload_target in _async_tasks:
                 _at.join()
                 if _ab:
                     _aec, _adur, _amsg, _aparsed, _aex = _ab[0]
@@ -1052,6 +1065,18 @@ def main() -> None:
                         log.debug("Failed to publish async %s run metrics", _atype, exc_info=True)
                     for _art in _aex:
                         artifacts.append(_art)
+                    if _async_upload_during and _aex:
+                        _up, _fail = opportunistic_upload_artifacts_to_elab(
+                            run_id,
+                            policy.experiment_id,
+                            agent_id,
+                            _aex,
+                            store,
+                            enabled=True,
+                            target=_async_upload_target,
+                        )
+                        artifacts_uploaded_during_measure += _up
+                        artifacts_upload_failed_during_measure += _fail
             _async_tasks.clear()
 
         status = "OK" if commands_failed == 0 else "FAILED"

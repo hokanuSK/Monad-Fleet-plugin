@@ -1,0 +1,501 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Pi 5 power telemetry from vcgencmd pmic_read_adc — all MXL7704 PMIC rails. Sourced from Pi-side Prometheus → remote_write → Mimir.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "CPU temperature",
+      "description": "Pi CPU temp from /sys/class/thermal. Watch for throttling (>80 °C).",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 65 },
+              { "color": "red", "value": 80 }
+            ]
+          },
+          "unit": "celsius",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_cpu_temp_celsius{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "datasource": { "type": "prometheus" }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "USB-C input voltage (EXT5V)",
+      "description": "Nominal 5.0 V. Drops indicate PSU overload or cable resistance under load.",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 4.75 },
+              { "color": "green", "value": 4.9 }
+            ]
+          },
+          "unit": "volt",
+          "decimals": 3
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_pmic_ext5v_voltage_volts{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "datasource": { "type": "prometheus" }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "WiFi/BT rail current (3V7_WL_SW)",
+      "description": "Current drawn by the WiFi + BT power domain. Key for monitoring AX210 5 GHz scan load.",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.3 },
+              { "color": "red", "value": 0.6 }
+            ]
+          },
+          "unit": "amp",
+          "decimals": 3
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_pmic_3v7_wl_sw_current_amps{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "datasource": { "type": "prometheus" }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "CPU rail current (VDD_CORE)",
+      "description": "CPU core current. Correlates with CPU load and active frequency.",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 2.0 },
+              { "color": "red", "value": 4.0 }
+            ]
+          },
+          "unit": "amp",
+          "decimals": 3
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_pmic_vdd_core_current_amps{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "datasource": { "type": "prometheus" }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "All PMIC rail currents",
+      "description": "Per-rail current in amps. 3V7_WL_SW = WiFi+BT, 3V3_SYS = M.2/AX210, VDD_CORE = CPU, 0V8_SW = GPU/ISP, 1V1_SYS = LPDDR, 1V8_SYS = IO, HDMI.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 4 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "unit": "amp"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "right" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_pmic_vdd_core_current_amps{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} CPU (VDD_CORE)"
+        },
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_pmic_3v7_wl_sw_current_amps{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} WiFi/BT (3V7_WL_SW)"
+        },
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_pmic_3v3_sys_current_amps{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} M.2/AX210 (3V3_SYS)"
+        },
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_pmic_1v8_sys_current_amps{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} IO (1V8_SYS)"
+        },
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_pmic_1v1_sys_current_amps{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} LPDDR (1V1_SYS)"
+        },
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_pmic_0v8_sw_current_amps{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} GPU/ISP (0V8_SW)"
+        },
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_pmic_hdmi_current_amps{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} HDMI"
+        }
+      ],
+      "datasource": { "type": "prometheus" }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Per-rail estimated power",
+      "description": "V × A for rails with measured voltage. Remaining rails use nominal: 1V8_SYS×1.8, 1V1_SYS×1.1, 0V8_SW×0.8, HDMI×1.1.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 12 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "unit": "watt"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "right" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_pmic_vdd_core_current_amps{instance=~\"$instance\"} * on(instance) monad_pi_pmic_vdd_core_voltage_volts{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} CPU (VDD_CORE)"
+        },
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_pmic_3v7_wl_sw_current_amps{instance=~\"$instance\"} * on(instance) monad_pi_pmic_3v7_wl_sw_voltage_volts{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} WiFi/BT (3V7_WL_SW)"
+        },
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_pmic_3v3_sys_current_amps{instance=~\"$instance\"} * on(instance) monad_pi_pmic_3v3_sys_voltage_volts{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} M.2/AX210 (3V3_SYS)"
+        },
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_pmic_1v8_sys_current_amps{instance=~\"$instance\"} * 1.8",
+          "legendFormat": "{{instance}} IO (1V8_SYS, nom)"
+        },
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_pmic_1v1_sys_current_amps{instance=~\"$instance\"} * 1.1",
+          "legendFormat": "{{instance}} LPDDR (1V1_SYS, nom)"
+        },
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_pmic_0v8_sw_current_amps{instance=~\"$instance\"} * 0.8",
+          "legendFormat": "{{instance}} GPU/ISP (0V8_SW, nom)"
+        },
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_pmic_hdmi_current_amps{instance=~\"$instance\"} * 1.1",
+          "legendFormat": "{{instance}} HDMI (nom)"
+        }
+      ],
+      "datasource": { "type": "prometheus" }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "WiFi/BT + M.2 power detail",
+      "description": "3V7_WL_SW feeds WiFi+BT; 3V3_SYS feeds the M.2 slot (AX210 on RPi M.2 HAT+). Both are measured V×A.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 15 },
+          "unit": "watt"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max", "min"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_pmic_3v7_wl_sw_current_amps{instance=~\"$instance\"} * on(instance) monad_pi_pmic_3v7_wl_sw_voltage_volts{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} 3V7_WL_SW (WiFi+BT)"
+        },
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_pmic_3v3_sys_current_amps{instance=~\"$instance\"} * on(instance) monad_pi_pmic_3v3_sys_voltage_volts{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} 3V3_SYS (M.2/AX210)"
+        }
+      ],
+      "datasource": { "type": "prometheus" }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "CPU + GPU/ISP power detail",
+      "description": "VDD_CORE = CPU, 0V8_SW = GPU/ISP (nominal 0.8 V). Useful for correlating compute load with WiFi capture.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 15 },
+          "unit": "watt"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max", "min"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_pmic_vdd_core_current_amps{instance=~\"$instance\"} * on(instance) monad_pi_pmic_vdd_core_voltage_volts{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} VDD_CORE (CPU)"
+        },
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_pmic_0v8_sw_current_amps{instance=~\"$instance\"} * 0.8",
+          "legendFormat": "{{instance}} 0V8_SW (GPU/ISP, nom)"
+        }
+      ],
+      "datasource": { "type": "prometheus" }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "PMIC rail voltages",
+      "description": "Measured rail voltages for VDD_CORE, 3V7_WL_SW, 3V3_SYS. Deviations indicate load-induced droop.",
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 28 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 1, "fillOpacity": 0 },
+          "unit": "volt",
+          "decimals": 4
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "min", "max"], "displayMode": "table", "placement": "right" },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_pmic_vdd_core_voltage_volts{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} VDD_CORE"
+        },
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_pmic_3v7_wl_sw_voltage_volts{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} 3V7_WL_SW"
+        },
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_pmic_3v3_sys_voltage_volts{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} 3V3_SYS"
+        },
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_pmic_ext5v_voltage_volts{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} EXT5V"
+        }
+      ],
+      "datasource": { "type": "prometheus" }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "CPU temperature over time",
+      "description": "Correlate temp spikes with CPU rail current and WiFi scan activity.",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 34 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "unit": "celsius",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 65 },
+              { "color": "red", "value": 80 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_cpu_temp_celsius{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "datasource": { "type": "prometheus" }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Under-voltage / throttle events",
+      "description": "monad_pi_under_voltage = 1 indicates active PSU under-voltage. monad_pi_throttled_state is the raw vcgencmd get_throttled bitfield.",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 34 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_under_voltage{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} under-voltage"
+        },
+        {
+          "datasource": { "type": "prometheus" },
+          "expr": "monad_pi_throttled_state{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} throttle bitfield"
+        }
+      ],
+      "datasource": { "type": "prometheus" }
+    }
+  ],
+  "refresh": "15s",
+  "schemaVersion": 38,
+  "tags": ["monad", "power", "pmic", "pi"],
+  "templating": {
+    "list": [
+      {
+        "name": "instance",
+        "label": "Pi instance",
+        "type": "query",
+        "query": {
+          "query": "label_values(monad_pi_cpu_temp_celsius, instance)",
+          "refId": "MimirVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Pi 5 Power (PMIC ADC)",
+  "uid": "monad-pi-power",
+  "version": 1
+}
