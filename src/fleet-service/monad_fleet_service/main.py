@@ -56,6 +56,7 @@ def serve() -> None:
         ),
         "ingest_api_token": os.environ.get("INGEST_API_TOKEN", ""),
         "artifact_max_bytes": int(os.environ.get("ARTIFACT_MAX_BYTES", str(20 * 1024 * 1024))),
+        "elab_request_timeout_s": int(os.environ.get("ELAB_REQUEST_TIMEOUT_S", "20")),
         "resource_status_id_map": core.parse_maybe_json(os.environ.get("RESOURCE_STATUS_ID_MAP_JSON"), {}),
         "grafana_experiment_dashboards_enabled": core.normalize_string(
             os.environ.get(
@@ -99,7 +100,12 @@ def serve() -> None:
     core.log.info("fleet.v3 device state metadata patching enabled=%s", cfg["enable_v2_device_state_patch"])
     state = core.LocalState(data_dir / "state.json", max_event_ids=cfg["max_dedupe_events"])
 
-    elab_client = core.ElabFTWClient(base_url=base_url, api_key=api_key, verify_tls=verify_tls)
+    elab_client = core.ElabFTWClient(
+        base_url=base_url,
+        api_key=api_key,
+        verify_tls=verify_tls,
+        request_timeout_s=int(cfg["elab_request_timeout_s"]),
+    )
     core.ELAB_CLIENT_FOR_HTTP = elab_client
     v1_servicer = FleetManagerServicer(elab_client, state, cfg)
     v2_servicer = FleetManagerServicerV2(v1_servicer, cfg)

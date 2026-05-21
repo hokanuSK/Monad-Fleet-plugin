@@ -62,12 +62,13 @@ Python gRPC service that integrates devices with eLabFTW for Wi-Fi/BLE/CSI fleet
 - `ELAB_BASE_URL` (default: `https://web/api/v2`)
 - `ELAB_API_KEY`
 - `ELAB_VERIFY_TLS` (`false` by default)
+- `ELAB_REQUEST_TIMEOUT_S` (`20`; AWS compose defaults to `180` for large artifact finalization)
 - `GATEWAY_PORT` (`50060` by default)
 - `FLEET_EXPERIMENT_TAG` (`fleet`)
 - `RESOURCE_TAG_PREFIX` (`device:`)
 - `POLICY_METADATA_KEYS` (`fleet.policy,policy,fleet_policy,policy_json`)
 - `DATA_DIR` (`/data`)
-- `HELLO_POLL_INTERVAL_S` (`30`)
+- `HELLO_POLL_INTERVAL_S` (`30`; AWS compose defaults to `60`)
 - `REQUIRED_MIN_AGENT_VERSION` (empty by default)
 - `ALLOW_LIVE_EVENTS` (`false`)
 - `ENABLE_V2_DEVICE_STATE_PATCH` (`true`; set `false` to disable v2 item metadata runtime-state patching)
@@ -77,7 +78,7 @@ Python gRPC service that integrates devices with eLabFTW for Wi-Fi/BLE/CSI fleet
 - `METRICS_EXCLUDE_PREFIXES` (empty by default; comma-separated metric-name prefixes to suppress from Prometheus/Mimir export)
 - `ENABLE_METRICS_INGEST_JOURNAL` (`false`; set `true` only for short-lived HTTP ingest debugging)
 - `INGEST_API_TOKEN` (empty by default; set to require `x-ingest-token` on HTTP ingest)
-- `ARTIFACT_MAX_BYTES` (max accepted artifact bytes for `/ingest/v1/artifacts`, default `20971520`)
+- `ARTIFACT_MAX_BYTES` (max accepted artifact bytes for `/ingest/v1/artifacts`, default `20971520`; AWS compose defaults to `536870912` for PCAP uploads)
 
 ## Build/run
 Protobuf code is generated during Docker build from repo-root context (`shared/proto` is copied directly):

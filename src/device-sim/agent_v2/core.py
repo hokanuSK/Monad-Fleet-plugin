@@ -351,22 +351,32 @@ def _upload_window_send_allowed(
         return True, "window_not_configured"
 
     if end_dt <= start_dt:
-        return False, "window_invalid"
+        if required:
+            return False, "window_invalid"
+        if now_dt < start_dt:
+            return False, "before_upload_window"
+        return True, "window_invalid_not_required"
 
     if now_dt < start_dt:
         return False, "before_upload_window"
     if now_dt > end_dt:
-        return False, "after_upload_window"
+        if required:
+            return False, "after_upload_window"
+        return True, "after_upload_window_not_required"
 
     slot_start, slot_end = _upload_slot_window_bounds(cfg, agent_id)
     if slot_start is None or slot_end is None:
         return True, "window_active_no_slot"
     if slot_end <= slot_start:
-        return False, "slot_invalid"
+        if required:
+            return False, "slot_invalid"
+        return True, "slot_invalid_not_required"
     if now_dt < slot_start:
         return False, "before_device_slot"
     if now_dt > slot_end:
-        return False, "after_device_slot"
+        if required:
+            return False, "after_device_slot"
+        return True, "after_device_slot_not_required"
     return True, "slot_active"
 
 
