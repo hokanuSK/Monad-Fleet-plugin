@@ -379,15 +379,28 @@ def main() -> None:
                 exc,
             )
 
-    def flush_pending_reports_guarded(reason: str) -> set[str]:
+    def flush_pending_reports_guarded(reason: str, *, bypass_slot_gate: bool = False) -> set[str]:
         upload_allowed, upload_reason = core_mod._upload_window_send_allowed(active_upload_cfg, agent_id)
         if not upload_allowed:
-            log.info(
-                "Skip flush_pending_reports (%s): upload gate=%s",
-                normalize(reason),
-                normalize(upload_reason),
-            )
-            return set()
+            # Slot-related blocks ("before_device_slot", "after_device_slot") mean we're within
+            # the upload window but outside our assigned time slice.  For replay of runs that
+            # were queued while the gate was closed (e.g. scan finished 1-2 s before window
+            # opened), respecting the slot can prevent the upload from ever being retried during
+            # the window.  bypass_slot_gate lets callers (execution-skipped path) proceed as
+            # long as the outer window is open.
+            if bypass_slot_gate and upload_reason in ("before_device_slot", "after_device_slot"):
+                log.info(
+                    "flush_pending_reports (%s): slot gate=%s bypassed for pending-run replay",
+                    normalize(reason),
+                    normalize(upload_reason),
+                )
+            else:
+                log.info(
+                    "Skip flush_pending_reports (%s): upload gate=%s",
+                    normalize(reason),
+                    normalize(upload_reason),
+                )
+                return set()
 
         if single_radio_route_gate:
             ready, route_iface = wait_for_route_ready(
@@ -501,6 +514,7 @@ def main() -> None:
             continue
         if policy_resp.status == fleet_gateway_v2_pb2.GetPolicyResponse.NO_WORK:
             log.info("No assignment/work")
+            active_upload_cfg = dict(base_upload_cfg)
             flush_pending_reports_guarded("no-work")
             if reached_max_cycles(cycles, max_cycles):
                 break
@@ -526,6 +540,7 @@ def main() -> None:
                 log.info("Policy not modified: using locally cached policy_id=%s", last_policy_id)
             else:
                 log.warning("Policy not modified but no cached policy body is available; skipping execution")
+                active_upload_cfg = dict(base_upload_cfg)
                 flush_pending_reports_guarded("policy-not-modified-no-cache")
                 if reached_max_cycles(cycles, max_cycles):
                     break
@@ -533,6 +548,7 @@ def main() -> None:
                 continue
         elif policy_resp.status != fleet_gateway_v2_pb2.GetPolicyResponse.OK:
             log.info("No policy available")
+            active_upload_cfg = dict(base_upload_cfg)
             flush_pending_reports_guarded("policy-unavailable")
             if reached_max_cycles(cycles, max_cycles):
                 break
@@ -545,6 +561,7 @@ def main() -> None:
 
         if policy is None:
             log.warning("No executable policy payload after policy resolution; skipping cycle")
+            active_upload_cfg = dict(base_upload_cfg)
             flush_pending_reports_guarded("policy-empty")
             if reached_max_cycles(cycles, max_cycles):
                 break
@@ -588,7 +605,7 @@ def main() -> None:
                 normalize(execution_cfg.get("mode")),
                 skip_reason,
             )
-            flush_pending_reports_guarded("execution-skipped")
+            flush_pending_reports_guarded("execution-skipped", bypass_slot_gate=True)
             if reached_max_cycles(cycles, max_cycles):
                 break
             time.sleep(poll)

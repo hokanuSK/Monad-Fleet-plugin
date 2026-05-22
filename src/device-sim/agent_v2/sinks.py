@@ -217,7 +217,7 @@ def _upload_spool_artifact_to_elab(
     path = store.artifact_path(run_id, artifact.name)
     if path is None:
         log.warning("artifact upload skipped: local file missing run_id=%s name=%s", run_id, artifact.name)
-        return "failed"
+        return "skipped"
 
     try:
         size_bytes = int(path.stat().st_size)
@@ -290,7 +290,7 @@ def _upload_spool_artifact_to_fleet_grpc(
     path = store.artifact_path(run_id, artifact.name)
     if path is None:
         log.warning("artifact gRPC upload skipped: local file missing run_id=%s name=%s", run_id, artifact.name)
-        return "failed"
+        return "skipped"
 
     try:
         size_bytes = int(path.stat().st_size)
