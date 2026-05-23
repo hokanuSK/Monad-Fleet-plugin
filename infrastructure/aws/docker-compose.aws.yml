@@ -55,6 +55,8 @@ services:
       - "${ELAB_WEB_PORT:-9443}:443"
     volumes:
       - web-uploads:/elabftw/uploads
+      - ./nginx-uploads.conf:/etc/nginx/conf.d/uploads.conf:ro
+      - ./php-fleet-uploads.ini:/etc/php84/conf.d/99_fleet_uploads.ini:ro
     networks:
       - elabftw-net
 

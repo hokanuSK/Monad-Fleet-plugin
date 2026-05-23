@@ -453,7 +453,11 @@ def upload_report_artifacts_to_elab(
     timeout_s = max(10, parse_int(os.environ.get("ARTIFACT_UPLOAD_TIMEOUT_S"), 300))
     ingest_token = normalize(os.environ.get("INGEST_API_TOKEN"))
 
-    for artifact in report.artifacts:
+    artifacts = sorted(
+        report.artifacts,
+        key=lambda a: 1 if Path(normalize(a.name) or "").name == "run-summary.json" else 0,
+    )
+    for artifact in artifacts:
         if target == "fleet_grpc":
             status = _upload_spool_artifact_to_fleet_grpc(
                 artifact,
