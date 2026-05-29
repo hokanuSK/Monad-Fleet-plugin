@@ -611,6 +611,24 @@ def main() -> None:
             time.sleep(poll)
             continue
 
+        # Defer execution if measure window hasn't opened yet. Without this,
+        # in_window() at the per-group level returns False, every group is
+        # skipped, and the agent commits an empty "completed" run that future
+        # polls then skip with `execution already completed`.
+        measure_from_dt = parse_iso(measure_from_iso) if measure_from_iso else None
+        if measure_from_dt is not None and measure_from_dt > now_utc():
+            wait_s = max(0.0, (measure_from_dt - now_utc()).total_seconds())
+            log.info(
+                "Measure window not yet open: deferring (opens in %.0fs at %s)",
+                wait_s,
+                measure_from_iso,
+            )
+            flush_pending_reports_guarded("waiting-for-measure-window", bypass_slot_gate=True)
+            if reached_max_cycles(cycles, max_cycles):
+                break
+            time.sleep(poll)
+            continue
+
         try:
             prep = stub.AckPrepared(
                 fleet_gateway_v2_pb2.AckPreparedRequest(
