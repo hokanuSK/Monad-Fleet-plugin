@@ -70,6 +70,11 @@ def _execution_skip_reason(
     state = normalize(record.get("state")).lower()
     mode = normalize(execution_cfg.get("mode")).lower() or "once"
     if state == "in_progress":
+        measure_to_raw = normalize(record.get("measurement_to"))
+        if measure_to_raw:
+            measure_to_dt = parse_iso(measure_to_raw)
+            if measure_to_dt is not None and now_utc() > measure_to_dt:
+                return ""
         return "execution already in progress"
     if mode == "once":
         if state in {"completed", "reported", "failed"}:
@@ -374,15 +379,28 @@ def main() -> None:
                 exc,
             )
 
-    def flush_pending_reports_guarded(reason: str) -> set[str]:
+    def flush_pending_reports_guarded(reason: str, *, bypass_slot_gate: bool = False) -> set[str]:
         upload_allowed, upload_reason = core_mod._upload_window_send_allowed(active_upload_cfg, agent_id)
         if not upload_allowed:
-            log.info(
-                "Skip flush_pending_reports (%s): upload gate=%s",
-                normalize(reason),
-                normalize(upload_reason),
-            )
-            return set()
+            # Slot-related blocks ("before_device_slot", "after_device_slot") mean we're within
+            # the upload window but outside our assigned time slice.  For replay of runs that
+            # were queued while the gate was closed (e.g. scan finished 1-2 s before window
+            # opened), respecting the slot can prevent the upload from ever being retried during
+            # the window.  bypass_slot_gate lets callers (execution-skipped path) proceed as
+            # long as the outer window is open.
+            if bypass_slot_gate and upload_reason in ("before_device_slot", "after_device_slot"):
+                log.info(
+                    "flush_pending_reports (%s): slot gate=%s bypassed for pending-run replay",
+                    normalize(reason),
+                    normalize(upload_reason),
+                )
+            else:
+                log.info(
+                    "Skip flush_pending_reports (%s): upload gate=%s",
+                    normalize(reason),
+                    normalize(upload_reason),
+                )
+                return set()
 
         if single_radio_route_gate:
             ready, route_iface = wait_for_route_ready(
@@ -496,6 +514,7 @@ def main() -> None:
             continue
         if policy_resp.status == fleet_gateway_v2_pb2.GetPolicyResponse.NO_WORK:
             log.info("No assignment/work")
+            active_upload_cfg = dict(base_upload_cfg)
             flush_pending_reports_guarded("no-work")
             if reached_max_cycles(cycles, max_cycles):
                 break
@@ -521,6 +540,7 @@ def main() -> None:
                 log.info("Policy not modified: using locally cached policy_id=%s", last_policy_id)
             else:
                 log.warning("Policy not modified but no cached policy body is available; skipping execution")
+                active_upload_cfg = dict(base_upload_cfg)
                 flush_pending_reports_guarded("policy-not-modified-no-cache")
                 if reached_max_cycles(cycles, max_cycles):
                     break
@@ -528,6 +548,7 @@ def main() -> None:
                 continue
         elif policy_resp.status != fleet_gateway_v2_pb2.GetPolicyResponse.OK:
             log.info("No policy available")
+            active_upload_cfg = dict(base_upload_cfg)
             flush_pending_reports_guarded("policy-unavailable")
             if reached_max_cycles(cycles, max_cycles):
                 break
@@ -540,6 +561,7 @@ def main() -> None:
 
         if policy is None:
             log.warning("No executable policy payload after policy resolution; skipping cycle")
+            active_upload_cfg = dict(base_upload_cfg)
             flush_pending_reports_guarded("policy-empty")
             if reached_max_cycles(cycles, max_cycles):
                 break
@@ -583,26 +605,52 @@ def main() -> None:
                 normalize(execution_cfg.get("mode")),
                 skip_reason,
             )
-            flush_pending_reports_guarded("execution-skipped")
+            flush_pending_reports_guarded("execution-skipped", bypass_slot_gate=True)
             if reached_max_cycles(cycles, max_cycles):
                 break
             time.sleep(poll)
             continue
 
-        prep = stub.AckPrepared(
-            fleet_gateway_v2_pb2.AckPreparedRequest(
-                agent_id=agent_id,
-                experiment_id=policy.experiment_id,
-                policy_id=policy.policy_id,
-                preparation_id=str(uuid.uuid4()),
-                mode=policy.allowed_mode,
-                control_plane_iface=policy.control_plane_iface,
-                route_verified=route_verified,
-                checks_ok=["route_verified"] if route_verified else [],
-                warnings=[] if route_verified else [f"route via {route_iface or 'unknown'}"],
-            ),
-            timeout=ack_prepared_rpc_timeout_s,
-        )
+        # Defer execution if measure window hasn't opened yet. Without this,
+        # in_window() at the per-group level returns False, every group is
+        # skipped, and the agent commits an empty "completed" run that future
+        # polls then skip with `execution already completed`.
+        measure_from_dt = parse_iso(measure_from_iso) if measure_from_iso else None
+        if measure_from_dt is not None and measure_from_dt > now_utc():
+            wait_s = max(0.0, (measure_from_dt - now_utc()).total_seconds())
+            log.info(
+                "Measure window not yet open: deferring (opens in %.0fs at %s)",
+                wait_s,
+                measure_from_iso,
+            )
+            flush_pending_reports_guarded("waiting-for-measure-window", bypass_slot_gate=True)
+            if reached_max_cycles(cycles, max_cycles):
+                break
+            time.sleep(poll)
+            continue
+
+        try:
+            prep = stub.AckPrepared(
+                fleet_gateway_v2_pb2.AckPreparedRequest(
+                    agent_id=agent_id,
+                    experiment_id=policy.experiment_id,
+                    policy_id=policy.policy_id,
+                    preparation_id=str(uuid.uuid4()),
+                    mode=policy.allowed_mode,
+                    control_plane_iface=policy.control_plane_iface,
+                    route_verified=route_verified,
+                    checks_ok=["route_verified"] if route_verified else [],
+                    warnings=[] if route_verified else [f"route via {route_iface or 'unknown'}"],
+                ),
+                timeout=ack_prepared_rpc_timeout_s,
+            )
+        except grpc.RpcError as exc:
+            log.warning("AckPrepared RPC failed: %s; will retry", exc.code())
+            flush_pending_reports_guarded("ack-prepared-rpc-error")
+            if reached_max_cycles(cycles, max_cycles):
+                break
+            time.sleep(poll)
+            continue
         if prep.status != fleet_gateway_v2_pb2.AckPreparedResponse.ACCEPTED:
             log.warning("AckPrepared rejected: %s", prep.reason)
             flush_pending_reports_guarded("ack-prepared-rejected")
@@ -796,7 +844,7 @@ def main() -> None:
                             _b.append(collect_wifi_scan(_iface, _tms, _ep, _s, _rid, _cid, override_cmdline=_cl, override_argv=_av, override_env=_ev))
                         _t = threading.Thread(target=_wifi_worker, daemon=True)
                         _t.start()
-                        _async_tasks.append((_t, _box, "wifi"))
+                        _async_tasks.append((_t, _box, "wifi", upload_during_measure, artifact_upload_target))
                         exit_code, duration_ms, message, parsed, extra_artifacts = 0, 0, "passive_monitor started async", {"wifi_capture_mode": "passive_monitor", "async": "true"}, []
                     else:
                         exit_code, duration_ms, message, parsed, extra_artifacts = collect_wifi_scan(
@@ -838,7 +886,7 @@ def main() -> None:
                             _b.append(collect_ble_scan(_tms, _ep, _s, _rid, _cid, override_cmdline=_cl, override_argv=_av, override_env=_ev))
                         _bt = threading.Thread(target=_ble_worker, daemon=True)
                         _bt.start()
-                        _async_tasks.append((_bt, _bbox, "ble"))
+                        _async_tasks.append((_bt, _bbox, "ble", upload_during_measure, artifact_upload_target))
                         exit_code, duration_ms, message, parsed, extra_artifacts = 0, 0, "ble advertise started async", {"ble_mode": "advertise", "async": "true"}, []
                     else:
                         exit_code, duration_ms, message, parsed, extra_artifacts = collect_ble_scan(
@@ -1029,7 +1077,7 @@ def main() -> None:
                 if exit_code != 0 and group.failure_mode == fleet_gateway_v2_pb2.FAIL_FAST:
                     break
 
-            for _at, _ab, _atype in _async_tasks:
+            for _at, _ab, _atype, _async_upload_during, _async_upload_target in _async_tasks:
                 _at.join()
                 if _ab:
                     _aec, _adur, _amsg, _aparsed, _aex = _ab[0]
@@ -1052,6 +1100,18 @@ def main() -> None:
                         log.debug("Failed to publish async %s run metrics", _atype, exc_info=True)
                     for _art in _aex:
                         artifacts.append(_art)
+                    if _async_upload_during and _aex:
+                        _up, _fail = opportunistic_upload_artifacts_to_elab(
+                            run_id,
+                            policy.experiment_id,
+                            agent_id,
+                            _aex,
+                            store,
+                            enabled=True,
+                            target=_async_upload_target,
+                        )
+                        artifacts_uploaded_during_measure += _up
+                        artifacts_upload_failed_during_measure += _fail
             _async_tasks.clear()
 
         status = "OK" if commands_failed == 0 else "FAILED"

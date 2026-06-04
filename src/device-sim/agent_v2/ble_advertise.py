@@ -171,13 +171,58 @@ def start_advertise(
         return None
 
     _setup_pipeline(proc, payload_prefix)
-    time.sleep(0.4)
+    # Longer wait so BlueZ has time to enable the advertisement before we verify.
+    time.sleep(1.0)
     if proc.poll() is not None:
         log.warning(
             "ble_advertise: bluetoothctl exited during setup rc=%s",
             proc.returncode,
         )
         return None
+
+    # Verify advertising is active via btmgmt before we start counting tx.
+    # Retry once after a short delay to allow BlueZ to propagate the change.
+    _btmgmt = shutil.which("btmgmt")
+    if _btmgmt:
+        _advertising_confirmed = False
+        for _attempt in range(2):
+            try:
+                _info = subprocess.run(
+                    [_btmgmt, "info"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                _in_current = False
+                for _line in (_info.stdout + _info.stderr).splitlines():
+                    if "current settings" in _line.lower():
+                        _in_current = True
+                    if _in_current and "advertising" in _line.lower():
+                        _advertising_confirmed = True
+                        break
+                if _advertising_confirmed:
+                    break
+            except Exception:
+                log.debug("ble_advertise: btmgmt info check failed", exc_info=True)
+                break
+            if _attempt == 0:
+                time.sleep(1.0)
+        if not _advertising_confirmed:
+            log.warning(
+                "ble_advertise: btmgmt info current settings do not include 'advertising'; "
+                "advertise on failed — aborting to avoid false tx counts"
+            )
+            try:
+                _teardown_pipeline(proc)
+                proc.wait(timeout=3)
+            except Exception:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=1)
+                except Exception:
+                    pass
+            return None
+        log.info("ble_advertise: advertising confirmed via btmgmt info")
 
     handles = AdvertiseHandles(
         log_path=log_path,

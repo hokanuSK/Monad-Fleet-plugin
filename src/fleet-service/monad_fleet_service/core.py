@@ -1007,12 +1007,24 @@ class LocalState:
 
 
 class ElabFTWClient:
-    def __init__(self, base_url: str, api_key: str | None, verify_tls: bool = False):
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str | None,
+        verify_tls: bool = False,
+        request_timeout_s: int = 20,
+    ):
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._verify_tls = verify_tls
+        self._request_timeout_s = max(2, int(request_timeout_s or 20))
 
-        log.info("Configuring eLabFTW client base_url=%s verify_tls=%s", self._base_url, self._verify_tls)
+        log.info(
+            "Configuring eLabFTW client base_url=%s verify_tls=%s timeout_s=%d",
+            self._base_url,
+            self._verify_tls,
+            self._request_timeout_s,
+        )
         if not self._verify_tls:
             urllib3.disable_warnings(InsecureRequestWarning)
         if not self._api_key:
@@ -1058,7 +1070,7 @@ class ElabFTWClient:
             method_upper,
             url,
             headers=headers,
-            timeout=20,
+            timeout=self._request_timeout_s,
             verify=self._verify_tls,
             **kwargs,
         )
@@ -1074,7 +1086,7 @@ class ElabFTWClient:
                     method_upper,
                     url,
                     headers=headers,
-                    timeout=20,
+                    timeout=self._request_timeout_s,
                     verify=self._verify_tls,
                     **retry_kwargs,
                 )

@@ -74,7 +74,7 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
         ).lower()
 
         measurement_candidates = [name for name in reported_ifaces if name and name != control_plane and not name.startswith("wg")]
-        if configured and (not reported_set or configured in reported_set):
+        if configured:
             return configured
         if preferred and preferred in measurement_candidates:
             return preferred
@@ -748,25 +748,9 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
         try:
             v1 = self._agent_to_v1(agent)
             item = self._core._get_or_create_device_item(agent_id, v1)
-            self._update_v2_presence(item, agent)
             allowed_mode, reason = self._choose_allowed_mode(agent)
-            self._set_device_runtime_state(
-                agent_id,
-                "ONLINE",
-                item=item,
-                details={
-                    "last_hello": {
-                        "allowed_mode": mode_enum_to_text(allowed_mode),
-                        "mode_reason": normalize_string(reason),
-                        "requested_mode": mode_enum_to_text(int(agent.requested_mode)),
-                        "control_plane_iface": normalize_string(agent.control_plane_iface),
-                        "fleet_manager_target": normalize_string(agent.fleet_manager_target),
-                        "at": utc_now_iso(),
-                    }
-                },
-            )
             mark_device_seen(agent_id)
-            return fleet_gateway_v2_pb2.HelloResponse(
+            response = fleet_gateway_v2_pb2.HelloResponse(
                 server_version="monad-fleet-service-v2-draft",
                 server_time=timestamp_from_unix_ms(int(time.time() * 1000)),
                 recommended_prepare_poll_sec=max(1, int(self._cfg["poll_interval_s"])),
@@ -774,9 +758,37 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
                 allowed_mode=allowed_mode,
                 mode_reason=reason,
             )
+            # Presence and state patches are slow MySQL writes; run async so they
+            # don't hold up the Hello response.
+            details = {
+                "last_hello": {
+                    "allowed_mode": mode_enum_to_text(allowed_mode),
+                    "mode_reason": normalize_string(reason),
+                    "requested_mode": mode_enum_to_text(int(agent.requested_mode)),
+                    "control_plane_iface": normalize_string(agent.control_plane_iface),
+                    "fleet_manager_target": normalize_string(agent.fleet_manager_target),
+                    "at": utc_now_iso(),
+                }
+            }
+            def _async_presence():
+                try:
+                    if bool(self._cfg.get("enable_v2_device_state_patch", True)):
+                        self._update_v2_presence(item, agent)
+                    self._set_device_runtime_state(agent_id, "ONLINE", item=item, details=details)
+                except Exception:
+                    pass
+            threading.Thread(target=_async_presence, daemon=True).start()
+            return response
         except Exception as exc:
             log.exception("Hello(v2) failed for agent_id=%s", agent_id)
             context.abort(grpc.StatusCode.INTERNAL, f"Hello(v2) failed: {exc}")
+
+    def _fire_state_async(self, agent_id: str, state: str, *, item: Any, details: dict[str, Any]) -> None:
+        threading.Thread(
+            target=self._set_device_runtime_state,
+            kwargs={"agent_id": agent_id, "state": state, "item": item, "details": details},
+            daemon=True,
+        ).start()
 
     def GetPolicy(self, request, context):
         agent_id = normalize_device_id(request.agent_id)
@@ -785,19 +797,11 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
         try:
             item, policy_ctx = self._resolve_item_and_policy_ctx(agent_id)
             if not policy_ctx:
-                self._set_device_runtime_state(
-                    agent_id,
-                    "IDLE",
-                    item=item,
+                self._fire_state_async(
+                    agent_id, "IDLE", item=item,
                     details={
-                        "last_assignment": {
-                            "status": "NO_WORK",
-                            "at": utc_now_iso(),
-                        },
-                        "last_policy_fetch": {
-                            "status": "NO_WORK",
-                            "at": utc_now_iso(),
-                        }
+                        "last_assignment": {"status": "NO_WORK", "at": utc_now_iso()},
+                        "last_policy_fetch": {"status": "NO_WORK", "at": utc_now_iso()},
                     },
                 )
                 return fleet_gateway_v2_pb2.GetPolicyResponse(
@@ -807,10 +811,8 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
             start_iso, end_iso = self._measurement_window(policy)
             experiment_id = normalize_string(policy.get("experiment_id"))
             policy_id = normalize_string(policy_ctx["policy_revision"])
-            self._set_device_runtime_state(
-                agent_id,
-                "ASSIGNED",
-                item=item,
+            self._fire_state_async(
+                agent_id, "ASSIGNED", item=item,
                 details={
                     "last_assignment": {
                         "status": "ASSIGNED",
@@ -824,10 +826,8 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
             )
             requested_experiment_id = normalize_string(request.experiment_id)
             if requested_experiment_id and requested_experiment_id != experiment_id:
-                self._set_device_runtime_state(
-                    agent_id,
-                    "WAITING_POLICY",
-                    item=item,
+                self._fire_state_async(
+                    agent_id, "WAITING_POLICY", item=item,
                     details={
                         "last_policy_fetch": {
                             "status": "NO_WORK",
@@ -847,10 +847,8 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
                     measurement_to=timestamp_from_iso(end_iso),
                 )
             if normalize_string(request.last_policy_id) == policy_id:
-                self._set_device_runtime_state(
-                    agent_id,
-                    "POLICY_CACHED",
-                    item=item,
+                self._fire_state_async(
+                    agent_id, "POLICY_CACHED", item=item,
                     details={
                         "last_policy_fetch": {
                             "status": "NOT_MODIFIED",
@@ -867,10 +865,8 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
                     measurement_from=timestamp_from_iso(start_iso),
                     measurement_to=timestamp_from_iso(end_iso),
                 )
-            self._set_device_runtime_state(
-                agent_id,
-                "POLICY_READY",
-                item=item,
+            self._fire_state_async(
+                agent_id, "POLICY_READY", item=item,
                 details={
                     "last_policy_fetch": {
                         "status": "OK",
@@ -1217,9 +1213,10 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
         agent_id = normalize_device_id(request.agent_id)
         preparation_id = normalize_string(request.preparation_id)
         if not agent_id or not preparation_id:
-            self._set_device_runtime_state(
+            self._fire_state_async(
                 agent_id,
                 "PREPARE_REJECTED",
+                item=None,
                 details={
                     "last_prepare": {
                         "status": "REJECTED",
@@ -1236,9 +1233,10 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
                 reason="agent_id and preparation_id are required",
             )
         if self._state.has_preparation(preparation_id):
-            self._set_device_runtime_state(
+            self._fire_state_async(
                 agent_id,
                 "PREPARED",
+                item=None,
                 details={
                     "last_prepare": {
                         "status": "ACCEPTED",
@@ -1262,9 +1260,10 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
         iface = normalize_string(request.control_plane_iface).lower()
         if requested_mode == fleet_gateway_v2_pb2.DUAL_NIC:
             if not request.route_verified:
-                self._set_device_runtime_state(
+                self._fire_state_async(
                     agent_id,
                     "PREPARE_REJECTED",
+                    item=None,
                     details={
                         "last_prepare": {
                             "status": "REJECTED",
@@ -1284,9 +1283,10 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
                     reason="DUAL_NIC requires route_verified=true",
                 )
             if iface and not iface.startswith("eth"):
-                self._set_device_runtime_state(
+                self._fire_state_async(
                     agent_id,
                     "PREPARE_REJECTED",
+                    item=None,
                     details={
                         "last_prepare": {
                             "status": "REJECTED",
@@ -1306,57 +1306,11 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
                     reason="DUAL_NIC requires ethernet control_plane_iface",
                 )
 
-        policy_ctx = self._resolve_policy_ctx(agent_id)
-        if not policy_ctx:
-            self._set_device_runtime_state(
-                agent_id,
-                "PREPARE_REJECTED",
-                details={
-                    "last_prepare": {
-                        "status": "REJECTED",
-                        "reason": "no policy assigned",
-                        "preparation_id": preparation_id,
-                        "policy_id": normalize_string(request.policy_id),
-                        "experiment_id": normalize_string(request.experiment_id),
-                        "mode": mode_enum_to_text(requested_mode),
-                        "control_plane_iface": normalize_string(request.control_plane_iface),
-                        "route_verified": bool(request.route_verified),
-                        "at": utc_now_iso(),
-                    }
-                },
-            )
-            return fleet_gateway_v2_pb2.AckPreparedResponse(
-                status=fleet_gateway_v2_pb2.AckPreparedResponse.REJECTED,
-                reason="no policy assigned",
-            )
-        if normalize_string(request.policy_id) != normalize_string(policy_ctx["policy_revision"]):
-            self._set_device_runtime_state(
-                agent_id,
-                "PREPARE_REJECTED",
-                details={
-                    "last_prepare": {
-                        "status": "REJECTED",
-                        "reason": "policy_id mismatch",
-                        "preparation_id": preparation_id,
-                        "policy_id": normalize_string(request.policy_id),
-                        "expected_policy_id": normalize_string(policy_ctx["policy_revision"]),
-                        "experiment_id": normalize_string(request.experiment_id),
-                        "mode": mode_enum_to_text(requested_mode),
-                        "control_plane_iface": normalize_string(request.control_plane_iface),
-                        "route_verified": bool(request.route_verified),
-                        "at": utc_now_iso(),
-                    }
-                },
-            )
-            return fleet_gateway_v2_pb2.AckPreparedResponse(
-                status=fleet_gateway_v2_pb2.AckPreparedResponse.REJECTED,
-                reason="policy_id mismatch",
-            )
-
         self._state.mark_preparation(preparation_id)
-        self._set_device_runtime_state(
+        self._fire_state_async(
             agent_id,
             "PREPARED",
+            item=None,
             details={
                 "last_prepare": {
                     "status": "ACCEPTED",

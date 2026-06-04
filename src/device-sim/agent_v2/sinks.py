@@ -186,9 +186,15 @@ def _artifact_upload_endpoint_and_limit(override_env: dict[str, str] | None = No
     host = normalize(env.get("FLEET_MANAGER_HOST") or os.environ.get("FLEET_MANAGER_HOST"))
     if not host:
         return None
-    port = parse_int(env.get("METRICS_PORT") or os.environ.get("METRICS_PORT"), 9108)
+    port = parse_int(env.get("FLEET_ARTIFACT_INGEST_PORT") or os.environ.get("FLEET_ARTIFACT_INGEST_PORT"), 9108)
     endpoint = normalize(env.get("FLEET_ARTIFACT_INGEST_URL") or os.environ.get("FLEET_ARTIFACT_INGEST_URL")) or f"http://{host}:{max(1, port)}/ingest/v1/artifacts"
-    max_bytes = max(1024, parse_int(env.get("ARTIFACT_UPLOAD_MAX_BYTES") or os.environ.get("ARTIFACT_UPLOAD_MAX_BYTES"), 20 * 1024 * 1024))
+    max_bytes = max(
+        1024,
+        parse_int(
+            env.get("ARTIFACT_UPLOAD_MAX_BYTES") or os.environ.get("ARTIFACT_UPLOAD_MAX_BYTES"),
+            512 * 1024 * 1024,
+        ),
+    )
     return endpoint, max_bytes
 
 
@@ -211,7 +217,7 @@ def _upload_spool_artifact_to_elab(
     path = store.artifact_path(run_id, artifact.name)
     if path is None:
         log.warning("artifact upload skipped: local file missing run_id=%s name=%s", run_id, artifact.name)
-        return "failed"
+        return "skipped"
 
     try:
         size_bytes = int(path.stat().st_size)
@@ -284,7 +290,7 @@ def _upload_spool_artifact_to_fleet_grpc(
     path = store.artifact_path(run_id, artifact.name)
     if path is None:
         log.warning("artifact gRPC upload skipped: local file missing run_id=%s name=%s", run_id, artifact.name)
-        return "failed"
+        return "skipped"
 
     try:
         size_bytes = int(path.stat().st_size)
@@ -388,7 +394,7 @@ def opportunistic_upload_artifacts_to_elab(
         return (0, 0)
 
     endpoint, max_bytes = config
-    timeout_s = max(2, parse_int(os.environ.get("ARTIFACT_UPLOAD_DURING_MEASURE_TIMEOUT_S"), 3))
+    timeout_s = max(2, parse_int(os.environ.get("ARTIFACT_UPLOAD_DURING_MEASURE_TIMEOUT_S"), 30))
     ingest_token = normalize(os.environ.get("INGEST_API_TOKEN"))
     uploaded = 0
     failed = 0
@@ -433,7 +439,7 @@ def upload_report_artifacts_to_elab(
         return (0, 0)
 
     target = _artifact_upload_target(os.environ.get("ARTIFACT_UPLOAD_TARGET"))
-    max_bytes = max(1024, parse_int(os.environ.get("ARTIFACT_UPLOAD_MAX_BYTES"), 20 * 1024 * 1024))
+    max_bytes = max(1024, parse_int(os.environ.get("ARTIFACT_UPLOAD_MAX_BYTES"), 512 * 1024 * 1024))
     endpoint = ""
     if target != "fleet_grpc":
         config = _artifact_upload_endpoint_and_limit()
@@ -444,10 +450,14 @@ def upload_report_artifacts_to_elab(
     uploaded = 0
     failed = 0
     agent_id = normalize(report.agent_id) or normalize(fallback_agent_id)
-    timeout_s = max(10, min(60, parse_int(os.environ.get("ARTIFACT_UPLOAD_TIMEOUT_S"), 30)))
+    timeout_s = max(10, parse_int(os.environ.get("ARTIFACT_UPLOAD_TIMEOUT_S"), 300))
     ingest_token = normalize(os.environ.get("INGEST_API_TOKEN"))
 
-    for artifact in report.artifacts:
+    artifacts = sorted(
+        report.artifacts,
+        key=lambda a: 1 if Path(normalize(a.name) or "").name == "run-summary.json" else 0,
+    )
+    for artifact in artifacts:
         if target == "fleet_grpc":
             status = _upload_spool_artifact_to_fleet_grpc(
                 artifact,

@@ -59,6 +59,15 @@ power_throttled_state = None
 cpu_temp_celsius = None
 pmic_3v3_sys_current_amps = None
 pmic_3v3_sys_voltage_volts = None
+pmic_vdd_core_current_amps = None
+pmic_vdd_core_voltage_volts = None
+pmic_ext5v_voltage_volts = None
+pmic_3v7_wl_sw_current_amps = None
+pmic_3v7_wl_sw_voltage_volts = None
+pmic_1v8_sys_current_amps = None
+pmic_1v1_sys_current_amps = None
+pmic_0v8_sw_current_amps = None
+pmic_hdmi_current_amps = None
 wifi5g_current_channel = None
 wifi5g_dwell_changes_total = None
 wifi5g_capture_active = None
@@ -71,6 +80,8 @@ wifi5g_run_ap_count = None
 wifi5g_run_duration_seconds = None
 ble_tx_total = None
 ble_advertise_active = None
+ble_rx_total = None
+ble_scan_active = None
 ble_run_adv_total = None
 ble_run_status = None
 ble_run_duration_seconds = None
@@ -104,6 +115,11 @@ def _build_metrics(registry: "CollectorRegistry") -> None:
     global power_voltage_volts, power_under_voltage
     global power_throttled_state, cpu_temp_celsius
     global pmic_3v3_sys_current_amps, pmic_3v3_sys_voltage_volts
+    global pmic_vdd_core_current_amps, pmic_vdd_core_voltage_volts
+    global pmic_ext5v_voltage_volts
+    global pmic_3v7_wl_sw_current_amps, pmic_3v7_wl_sw_voltage_volts
+    global pmic_1v8_sys_current_amps, pmic_1v1_sys_current_amps
+    global pmic_0v8_sw_current_amps, pmic_hdmi_current_amps
 
     power_voltage_volts = Gauge(
         "monad_pi_voltage_volts",
@@ -136,6 +152,51 @@ def _build_metrics(registry: "CollectorRegistry") -> None:
     pmic_3v3_sys_voltage_volts = Gauge(
         "monad_pi_pmic_3v3_sys_voltage_volts",
         "Pi 5 PMIC 3V3_SYS rail voltage in volts (typically ~3.30 V).",
+        registry=registry,
+    )
+    pmic_vdd_core_current_amps = Gauge(
+        "monad_pi_pmic_vdd_core_current_amps",
+        "Pi 5 PMIC VDD_CORE rail current in amps (CPU power domain).",
+        registry=registry,
+    )
+    pmic_vdd_core_voltage_volts = Gauge(
+        "monad_pi_pmic_vdd_core_voltage_volts",
+        "Pi 5 PMIC VDD_CORE rail voltage in volts.",
+        registry=registry,
+    )
+    pmic_ext5v_voltage_volts = Gauge(
+        "monad_pi_pmic_ext5v_voltage_volts",
+        "Pi 5 PMIC EXT5V rail voltage in volts (USB-C input, nominally 5.0 V).",
+        registry=registry,
+    )
+    pmic_3v7_wl_sw_current_amps = Gauge(
+        "monad_pi_pmic_3v7_wl_sw_current_amps",
+        "Pi 5 PMIC 3V7_WL_SW rail current in amps (WiFi + BT power domain).",
+        registry=registry,
+    )
+    pmic_3v7_wl_sw_voltage_volts = Gauge(
+        "monad_pi_pmic_3v7_wl_sw_voltage_volts",
+        "Pi 5 PMIC 3V7_WL_SW rail voltage in volts.",
+        registry=registry,
+    )
+    pmic_1v8_sys_current_amps = Gauge(
+        "monad_pi_pmic_1v8_sys_current_amps",
+        "Pi 5 PMIC 1V8_SYS rail current in amps (IO power domain).",
+        registry=registry,
+    )
+    pmic_1v1_sys_current_amps = Gauge(
+        "monad_pi_pmic_1v1_sys_current_amps",
+        "Pi 5 PMIC 1V1_SYS rail current in amps (LPDDR memory power domain).",
+        registry=registry,
+    )
+    pmic_0v8_sw_current_amps = Gauge(
+        "monad_pi_pmic_0v8_sw_current_amps",
+        "Pi 5 PMIC 0V8_SW rail current in amps (GPU/ISP power domain).",
+        registry=registry,
+    )
+    pmic_hdmi_current_amps = Gauge(
+        "monad_pi_pmic_hdmi_current_amps",
+        "Pi 5 PMIC HDMI rail current in amps.",
         registry=registry,
     )
 
@@ -205,7 +266,8 @@ def _build_metrics(registry: "CollectorRegistry") -> None:
         registry=registry,
     )
 
-    global ble_tx_total, ble_advertise_active, ble_run_adv_total, ble_run_status, ble_run_duration_seconds
+    global ble_tx_total, ble_advertise_active, ble_rx_total, ble_scan_active
+    global ble_run_adv_total, ble_run_status, ble_run_duration_seconds
     ble_tx_total = Counter(
         "monad_pi_ble_tx_total",
         "Cumulative count of BLE advertisement payload-refresh events. The Pi "
@@ -220,6 +282,18 @@ def _build_metrics(registry: "CollectorRegistry") -> None:
         "monad_pi_ble_advertise_active",
         "1 while the BLE advertise runner is broadcasting, else 0. Useful for "
         "annotating Grafana panels with advertise windows.",
+        registry=registry,
+    )
+    ble_rx_total = Counter(
+        "monad_pi_ble_rx_total",
+        "Cumulative [CHG] Name: events detected by a BLE listener device. Each "
+        "tick = one monad-02 adv_id refresh received. A flat curve during "
+        "BLE_SCAN_MODE=continuous means bluetoothctl is not seeing advertisements.",
+        registry=registry,
+    )
+    ble_scan_active = Gauge(
+        "monad_pi_ble_scan_active",
+        "1 while a BLE continuous scan is running on this device, else 0.",
         registry=registry,
     )
     ble_run_adv_total = Gauge(

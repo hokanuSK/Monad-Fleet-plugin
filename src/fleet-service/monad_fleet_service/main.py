@@ -36,7 +36,9 @@ def serve() -> None:
         "poll_interval_s": int(os.environ.get("HELLO_POLL_INTERVAL_S", "30")),
         "required_min_agent_version": os.environ.get("REQUIRED_MIN_AGENT_VERSION", ""),
         "experiments_batch_size": int(os.environ.get("EXPERIMENTS_BATCH_SIZE", "200")),
+        "max_experiments_to_scan": int(os.environ.get("MAX_EXPERIMENTS_TO_SCAN", "20")),
         "max_event_history": int(os.environ.get("MAX_EVENT_HISTORY", "100")),
+        "device_item_cache_ttl_s": int(os.environ.get("DEVICE_ITEM_CACHE_TTL_S", "600")),
         "event_duration_minutes": int(os.environ.get("EVENT_DURATION_MINUTES", "60")),
         "book_max_minutes": int(os.environ.get("BOOK_MAX_MINUTES", "180")),
         "book_can_overlap": core.normalize_string(os.environ.get("BOOK_CAN_OVERLAP", "true")).lower() in {"1", "true", "yes"},
@@ -55,6 +57,7 @@ def serve() -> None:
         ),
         "ingest_api_token": os.environ.get("INGEST_API_TOKEN", ""),
         "artifact_max_bytes": int(os.environ.get("ARTIFACT_MAX_BYTES", str(20 * 1024 * 1024))),
+        "elab_request_timeout_s": int(os.environ.get("ELAB_REQUEST_TIMEOUT_S", "20")),
         "resource_status_id_map": core.parse_maybe_json(os.environ.get("RESOURCE_STATUS_ID_MAP_JSON"), {}),
         "grafana_experiment_dashboards_enabled": core.normalize_string(
             os.environ.get(
@@ -98,13 +101,18 @@ def serve() -> None:
     core.log.info("fleet.v3 device state metadata patching enabled=%s", cfg["enable_v2_device_state_patch"])
     state = core.LocalState(data_dir / "state.json", max_event_ids=cfg["max_dedupe_events"])
 
-    elab_client = core.ElabFTWClient(base_url=base_url, api_key=api_key, verify_tls=verify_tls)
+    elab_client = core.ElabFTWClient(
+        base_url=base_url,
+        api_key=api_key,
+        verify_tls=verify_tls,
+        request_timeout_s=int(cfg["elab_request_timeout_s"]),
+    )
     core.ELAB_CLIENT_FOR_HTTP = elab_client
     v1_servicer = FleetManagerServicer(elab_client, state, cfg)
     v2_servicer = FleetManagerServicerV2(v1_servicer, cfg)
 
     if cfg["grafana_experiment_dashboards_enabled"]:
-        scan_interval_s = max(5, int(cfg.get("grafana_experiment_scan_interval_s", 60)))
+        scan_interval_s = max(60, int(cfg.get("grafana_experiment_scan_interval_s", 600)))
 
         def dashboard_scan_loop() -> None:
             while True:
@@ -121,7 +129,15 @@ def serve() -> None:
         ).start()
         core.log.info("Grafana dashboard background scan enabled interval=%ss", scan_interval_s)
 
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    # Add 4 MB headroom for gRPC framing on top of the artifact payload limit.
+    grpc_max_bytes = cfg["artifact_max_bytes"] + 4 * 1024 * 1024
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=10),
+        options=[
+            ("grpc.max_receive_message_length", grpc_max_bytes),
+            ("grpc.max_send_message_length", grpc_max_bytes),
+        ],
+    )
     fleet_gateway_pb2_grpc.add_FleetManagerServicer_to_server(v1_servicer, server)
     # Primary endpoint (v3).
     fleet_gateway_v3_pb2_grpc.add_FleetManagerServicer_to_server(v2_servicer, server)

@@ -74,6 +74,13 @@ def ts_to_iso(ts: Timestamp) -> str:
     return ts_to_datetime(ts).isoformat().replace("+00:00", "Z")
 
 
+def parse_iso(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(normalize(value).replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+
+
 def iso_to_ts(value: str) -> Timestamp:
     ts = Timestamp()
     dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -344,22 +351,32 @@ def _upload_window_send_allowed(
         return True, "window_not_configured"
 
     if end_dt <= start_dt:
-        return False, "window_invalid"
+        if required:
+            return False, "window_invalid"
+        if now_dt < start_dt:
+            return False, "before_upload_window"
+        return True, "window_invalid_not_required"
 
     if now_dt < start_dt:
         return False, "before_upload_window"
     if now_dt > end_dt:
-        return False, "after_upload_window"
+        if required:
+            return False, "after_upload_window"
+        return True, "after_upload_window_not_required"
 
     slot_start, slot_end = _upload_slot_window_bounds(cfg, agent_id)
     if slot_start is None or slot_end is None:
         return True, "window_active_no_slot"
     if slot_end <= slot_start:
-        return False, "slot_invalid"
+        if required:
+            return False, "slot_invalid"
+        return True, "slot_invalid_not_required"
     if now_dt < slot_start:
         return False, "before_device_slot"
     if now_dt > slot_end:
-        return False, "after_device_slot"
+        if required:
+            return False, "after_device_slot"
+        return True, "after_device_slot_not_required"
     return True, "slot_active"
 
 
@@ -1643,25 +1660,33 @@ def _collect_device_status_metrics() -> dict[str, str]:
                     except Exception:
                         pass
 
-    # Pi 5 PMIC ADC: 3V3_SYS rail is the M.2 slot's feed on the official RPi
-    # M.2 HAT+. With no other 3.3 V loads on this Pi (operator-confirmed) the
-    # rail is dominated by AX210 + a small Pi baseline; subtract a once-measured
-    # baseline in Grafana to approximate AX210 watts to ~+/- 10 %.
-    pmic = _read_pi_pmic_rails(("3V3_SYS",))
-    rail = pmic.get("3V3_SYS")
-    if rail is not None:
-        if "current_a" in rail:
-            metrics["device_pmic_3v3_sys_current_a"] = f"{rail['current_a']:.4f}"
-            if _prom is not None and getattr(_prom, "pmic_3v3_sys_current_amps", None) is not None:
+    _PMIC_RAILS = (
+        ("VDD_CORE",  "vdd_core"),
+        ("EXT5V",     "ext5v"),
+        ("3V7_WL_SW", "3v7_wl_sw"),
+        ("3V3_SYS",   "3v3_sys"),
+        ("1V8_SYS",   "1v8_sys"),
+        ("1V1_SYS",   "1v1_sys"),
+        ("0V8_SW",    "0v8_sw"),
+        ("HDMI",      "hdmi"),
+    )
+    pmic = _read_pi_pmic_rails(tuple(r for r, _ in _PMIC_RAILS))
+    for rail_name, slug in _PMIC_RAILS:
+        rail_data = pmic.get(rail_name)
+        if rail_data is None:
+            continue
+        for kind, suffix, gauge_suffix in (
+            ("current_a", "current_a", "current_amps"),
+            ("voltage_v", "voltage_v", "voltage_volts"),
+        ):
+            if kind not in rail_data:
+                continue
+            val = rail_data[kind]
+            metrics[f"device_pmic_{slug}_{suffix}"] = f"{val:.4f}"
+            gauge_attr = f"pmic_{slug}_{gauge_suffix}"
+            if _prom is not None and getattr(_prom, gauge_attr, None) is not None:
                 try:
-                    _prom.pmic_3v3_sys_current_amps.set(rail["current_a"])
-                except Exception:
-                    pass
-        if "voltage_v" in rail:
-            metrics["device_pmic_3v3_sys_voltage_v"] = f"{rail['voltage_v']:.4f}"
-            if _prom is not None and getattr(_prom, "pmic_3v3_sys_voltage_volts", None) is not None:
-                try:
-                    _prom.pmic_3v3_sys_voltage_volts.set(rail["voltage_v"])
+                    getattr(_prom, gauge_attr).set(val)
                 except Exception:
                     pass
 
@@ -1777,14 +1802,16 @@ def _collect_wifi_observability_metrics(iface: str, timeout_ms: int, iw_bin: str
 
 
 def _parse_bluetoothctl_scan(text: str) -> tuple[int, float | None]:
-    # Count [CHG] Name: events — each one is a new adv_id payload from the advertiser.
-    # Fall back to unique-address count when no name-change lines are present.
-    name_changes = re.findall(
-        r"\[CHG\]\s+Device\s+[0-9A-F]{2}(?::[0-9A-F]{2}){5}\s+Name:",
+    # Count [NEW] and [CHG] Name: events — each is a new adv_id payload from the advertiser.
+    # [NEW] fires on first discovery of a MAC; [CHG] fires on subsequent name changes.
+    # Both must be counted when DuplicateData filtering is off.
+    # Fall back to unique-address count when no name lines are present.
+    name_events = re.findall(
+        r"\[(?:NEW|CHG)\]\s+Device\s+[0-9A-F]{2}(?::[0-9A-F]{2}){5}\s+Name:",
         text,
         flags=re.IGNORECASE,
     )
-    count = len(name_changes) if name_changes else len(
+    count = len(name_events) if name_events else len(
         set(re.findall(r"\b([0-9A-F]{2}(?::[0-9A-F]{2}){5})\b", text, flags=re.IGNORECASE))
     )
     rssis: list[float] = []
