@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import signal
 import subprocess
@@ -56,6 +57,8 @@ class AdvertiseHandles:
     runner_thread: threading.Thread
     started_monotonic_ns: int = 0
     events: list[dict] = field(default_factory=list)
+    btctl_output_lines: list[str] = field(default_factory=list)
+    output_thread: threading.Thread | None = None
 
 
 def _send(proc: subprocess.Popen, line: str) -> None:
@@ -63,10 +66,38 @@ def _send(proc: subprocess.Popen, line: str) -> None:
     if proc.stdin is None:
         return
     try:
-        proc.stdin.write((line + "\n").encode("utf-8"))
+        proc.stdin.write(line + "\n")
         proc.stdin.flush()
     except Exception:
         log.debug("ble_advertise: stdin write failed for line=%r", line, exc_info=True)
+
+
+def _collect_stdout(proc: subprocess.Popen, sink: list[str], *, limit: int = 200) -> None:
+    """Drain bluetoothctl stdout so the pipe does not fill during long runs."""
+    stdout = proc.stdout
+    if stdout is None:
+        return
+    try:
+        for line in stdout:
+            text = line.rstrip("\r\n")
+            sink.append(text)
+            if len(sink) > limit:
+                del sink[: len(sink) - limit]
+    except Exception:
+        log.debug("ble_advertise: stdout collector failed", exc_info=True)
+
+
+def _startup_output_confirms_advertising(lines: list[str]) -> bool:
+    """Best-effort parse of bluetoothctl's own success signals."""
+    active_instances = 0
+    for line in lines:
+        plain = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", line)
+        if "advertising object registered" in plain.lower():
+            return True
+        match = re.search(r"ActiveInstances:\s*0x[0-9a-fA-F]+\s*\((\d+)\)", plain)
+        if match:
+            active_instances = max(active_instances, int(match.group(1)))
+    return active_instances > 0
 
 
 def _setup_pipeline(proc: subprocess.Popen, payload_prefix: str) -> None:
@@ -157,12 +188,23 @@ def start_advertise(
         proc = subprocess.Popen(
             ["bluetoothctl"],
             stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
         )
     except FileNotFoundError as exc:
         log.warning("ble_advertise: spawn failed: %s", exc)
         return None
+
+    startup_output: list[str] = []
+    output_thread = threading.Thread(
+        target=_collect_stdout,
+        args=(proc, startup_output),
+        name="ble-advertise-stdout",
+        daemon=True,
+    )
+    output_thread.start()
 
     # Give bluetoothctl a beat to print its banner and accept stdin.
     time.sleep(0.3)
@@ -185,6 +227,7 @@ def start_advertise(
     _btmgmt = shutil.which("btmgmt")
     if _btmgmt:
         _advertising_confirmed = False
+        _confirmation_source = "btmgmt"
         for _attempt in range(2):
             try:
                 _info = subprocess.run(
@@ -207,10 +250,19 @@ def start_advertise(
                 break
             if _attempt == 0:
                 time.sleep(1.0)
+        if not _advertising_confirmed and _startup_output_confirms_advertising(startup_output):
+            log.warning(
+                "ble_advertise: btmgmt info did not show 'advertising', "
+                "but bluetoothctl reported a successful advertising registration; continuing"
+            )
+            _advertising_confirmed = True
+            _confirmation_source = "bluetoothctl"
         if not _advertising_confirmed:
+            recent = "\n".join(startup_output[-12:])
             log.warning(
                 "ble_advertise: btmgmt info current settings do not include 'advertising'; "
-                "advertise on failed — aborting to avoid false tx counts"
+                "advertise on failed — aborting to avoid false tx counts. recent bluetoothctl output:\n%s",
+                recent or "<none>",
             )
             try:
                 _teardown_pipeline(proc)
@@ -222,7 +274,7 @@ def start_advertise(
                 except Exception:
                     pass
             return None
-        log.info("ble_advertise: advertising confirmed via btmgmt info")
+        log.info("ble_advertise: advertising confirmed via %s", _confirmation_source)
 
     handles = AdvertiseHandles(
         log_path=log_path,
@@ -230,6 +282,8 @@ def start_advertise(
         stop_event=threading.Event(),
         runner_thread=None,  # type: ignore[arg-type]
         started_monotonic_ns=time.monotonic_ns(),
+        btctl_output_lines=startup_output,
+        output_thread=output_thread,
     )
 
     try:

@@ -53,7 +53,7 @@ def iso(dt):
 
 def build_policy(stamp):
     now = datetime.now(timezone.utc).replace(microsecond=0)
-    measure_from = now - timedelta(seconds=5)
+    measure_from = now + timedelta(minutes=2)
     measure_to = measure_from + timedelta(seconds=MEASURE_WINDOW_S)
     upload_from = measure_to
     upload_to = upload_from + timedelta(minutes=5)
@@ -66,7 +66,7 @@ def build_policy(stamp):
         "DISABLE_CSI_CAPTURE": "true",
         "REQUIRE_REAL_CSI": "false",
         "ARTIFACT_UPLOAD_DURING_MEASURE": "false",
-        "ARTIFACT_UPLOAD_TARGET": "fleet_grpc",
+        "ARTIFACT_UPLOAD_TARGET": "fleet_http",
         "GRPC_ARTIFACT_CHUNK_BYTES": "65536",
         "ENABLE_COMMAND_STATUS_REPORTS": "false",
         "ENABLE_UPLOAD_STATUS_REPORTS": "false",
@@ -100,7 +100,7 @@ def build_policy(stamp):
                 **common_env,
                 **upload_env,
                 "WIFI_SCAN_MODE": "passive_monitor",
-                "WIFI_SCAN_IFACE": "wlan0",
+                "WIFI_SCAN_IFACE": "wlp1s0",
                 "WIFI_SCAN_CHANNELS": WIFI_CHANNELS,
                 "WIFI_SCAN_CHANNEL_DWELL_S": "0.5",
                 "WIFI_SCAN_CHANNEL_WIDTH_MHZ": "20",
@@ -140,7 +140,7 @@ def build_policy(stamp):
         "notes": {
             "profile": "monad02-phase4-concurrent",
             "purpose": "Phase 4 concurrent dispatch: WIFI passive_monitor + BLE advertise in same group",
-            "artifact_upload_target": "fleet_grpc",
+            "artifact_upload_target": "fleet_http",
         },
         "command_groups": [
             {

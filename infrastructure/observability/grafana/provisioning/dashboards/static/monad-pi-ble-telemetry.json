@@ -26,7 +26,7 @@
       "id": 1,
       "type": "stat",
       "title": "Advertise active right now",
-      "description": "1 = bluetoothctl advertise pipeline is running, 0 = idle.",
+      "description": "Current-state panel only. 1 = bluetoothctl advertise pipeline is running now, 0 = idle now. Outside the experiment window this should return to 0 even when the selected time range contains successful BLE activity.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -100,8 +100,8 @@
     {
       "id": 2,
       "type": "stat",
-      "title": "Total adv_id refreshes",
-      "description": "Cumulative count of BLE payload refreshes since agent start. Each refresh = one new adv_id broadcast. Ticks once per BLE_ADV_UPDATE_INTERVAL_S, not once per radio broadcast.",
+      "title": "Transmissions In Selected Range",
+      "description": "BLE payload refreshes observed within the current dashboard time range. Uses counter increase so agent restarts do not reset the panel to zero.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -129,7 +129,7 @@
       "options": {
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "sum"
           ],
           "fields": "",
           "values": false
@@ -142,7 +142,7 @@
       },
       "targets": [
         {
-          "expr": "monad_pi_ble_tx_total{instance=~\"$instance\"}",
+          "expr": "increase(monad_pi_ble_tx_total{instance=~\"$instance\"}[$__range])",
           "legendFormat": "{{instance}}",
           "refId": "A"
         }
@@ -151,8 +151,8 @@
     {
       "id": 3,
       "type": "stat",
-      "title": "adv_id refresh rate (last 1 min)",
-      "description": "Payload refreshes per second over the last minute. Expected: 1 / BLE_ADV_UPDATE_INTERVAL_S (e.g. 0.5/s at 2s interval). 0 while idle or if the bluetoothctl pipeline is stuck.",
+      "title": "Transmissions In Last 5 Min",
+      "description": "BLE payload refreshes observed in the last 5 minutes. More stable than a 1-minute instantaneous rate for post-run reading and sparse windows.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -172,13 +172,17 @@
                 "value": null
               },
               {
+                "color": "yellow",
+                "value": 0.5
+              },
+              {
                 "color": "blue",
-                "value": 0.1
+                "value": 1
               }
             ]
           },
-          "unit": "ops",
-          "decimals": 3
+          "unit": "short",
+          "decimals": 0
         }
       },
       "options": {
@@ -197,7 +201,7 @@
       },
       "targets": [
         {
-          "expr": "rate(monad_pi_ble_tx_total{instance=~\"$instance\"}[1m])",
+          "expr": "increase(monad_pi_ble_tx_total{instance=~\"$instance\"}[5m])",
           "legendFormat": "{{instance}}",
           "refId": "A"
         }
@@ -304,8 +308,8 @@
     {
       "id": 6,
       "type": "timeseries",
-      "title": "BLE adv_id refresh rate over time",
-      "description": "rate(monad_pi_ble_tx_total[1m]). Expected ~0.5/s at BLE_ADV_UPDATE_INTERVAL_S=2.0. A flat zero while advertise_active=1 means the bluetoothctl pipeline is stuck.",
+      "title": "Transmissions Over Time (5m Window)",
+      "description": "Rolling 5-minute increase of BLE payload refreshes. Better for post-run interpretation than an instantaneous per-second rate.",
       "gridPos": {
         "h": 7,
         "w": 12,
@@ -325,8 +329,8 @@
             "showPoints": "never",
             "spanNulls": false
           },
-          "unit": "ops",
-          "decimals": 3,
+          "unit": "short",
+          "decimals": 0,
           "min": 0
         }
       },
@@ -341,8 +345,8 @@
       },
       "targets": [
         {
-          "expr": "rate(monad_pi_ble_tx_total{instance=~\"$instance\"}[1m])",
-          "legendFormat": "tx rate {{instance}}",
+          "expr": "increase(monad_pi_ble_tx_total{instance=~\"$instance\"}[5m])",
+          "legendFormat": "tx window {{instance}}",
           "refId": "A"
         }
       ]
@@ -350,8 +354,8 @@
     {
       "id": 7,
       "type": "timeseries",
-      "title": "Cumulative adv_id refreshes (counter)",
-      "description": "Raw monad_pi_ble_tx_total counter. Resets on agent restart. Slope = refresh rate; compare between Pis to confirm all are advertising.",
+      "title": "Cumulative adv_id refreshes (lifetime counter)",
+      "description": "Raw monad_pi_ble_tx_total counter since agent start. Resets on agent restart. Keep this as a diagnostic panel, not the primary post-run success signal.",
       "gridPos": {
         "h": 7,
         "w": 12,
@@ -410,7 +414,7 @@
       "id": 9,
       "type": "stat",
       "title": "Scan active right now",
-      "description": "1 = bluetoothctl continuous scan is running, 0 = idle.",
+      "description": "Current-state panel only. 1 = bluetoothctl continuous scan is running now, 0 = idle now. Outside the experiment window this should return to 0 even when the selected time range contains successful BLE receptions.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -477,8 +481,8 @@
     {
       "id": 10,
       "type": "stat",
-      "title": "Total adv_id receptions",
-      "description": "Cumulative [CHG] Name: events detected. Each tick = one monad-02 advertisement received.",
+      "title": "Receptions In Selected Range",
+      "description": "BLE discoveries observed within the current dashboard time range. Uses counter increase so agent restarts do not reset the panel to zero.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -517,7 +521,7 @@
           "datasource": {
             "type": "prometheus"
           },
-          "expr": "monad_pi_ble_rx_total{instance=~\"$instance\"}",
+          "expr": "increase(monad_pi_ble_rx_total{instance=~\"$instance\"}[$__range])",
           "legendFormat": "{{instance}}"
         }
       ],
@@ -528,8 +532,8 @@
     {
       "id": 11,
       "type": "stat",
-      "title": "adv_id reception rate (last 1 min)",
-      "description": "Per-second rate of monad-02 advertisements detected.",
+      "title": "Receptions In Last 5 Min",
+      "description": "BLE discoveries observed in the last 5 minutes. More stable than a 1-minute instantaneous rate for sparse listener traffic.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -558,7 +562,7 @@
               }
             ]
           },
-          "unit": "ops"
+          "unit": "short"
         },
         "overrides": []
       },
@@ -577,7 +581,7 @@
           "datasource": {
             "type": "prometheus"
           },
-          "expr": "rate(monad_pi_ble_rx_total{instance=~\"$instance\"}[1m])",
+          "expr": "increase(monad_pi_ble_rx_total{instance=~\"$instance\"}[5m])",
           "legendFormat": "{{instance}}"
         }
       ],
@@ -630,7 +634,7 @@
     {
       "id": 13,
       "type": "timeseries",
-      "title": "adv_id reception rate over time",
+      "title": "Receptions Over Time (5m Window)",
       "gridPos": {
         "h": 6,
         "w": 12,
@@ -645,7 +649,7 @@
           "custom": {
             "lineWidth": 2
           },
-          "unit": "ops"
+          "unit": "short"
         },
         "overrides": []
       },
@@ -661,7 +665,7 @@
           "datasource": {
             "type": "prometheus"
           },
-          "expr": "rate(monad_pi_ble_rx_total{instance=~\"$instance\"}[1m])",
+          "expr": "increase(monad_pi_ble_rx_total{instance=~\"$instance\"}[5m])",
           "legendFormat": "{{instance}}"
         }
       ],

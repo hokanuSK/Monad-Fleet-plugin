@@ -1,0 +1,9 @@
+This PR bundles the current FleetManager working tree into one follow-on update on top of `agent/defer-future-measure-window` and targets `develop`.
+
+The changes span three areas that were moving together in the workspace. First, the runtime path for long experiments was tightened in the agent and AWS upload stack. The device agent now includes BLE advertise/listen fixes, report replay adjustments, collector updates, and Wi-Fi 5 GHz capture rotation support so long runs can split PCAP output into smaller artifacts instead of relying on one large file. The AWS upload config and BLE Grafana dashboard provisioning were updated alongside that runtime work so the deployed stack can present the right BLE panels and use the matching upload settings.
+
+Second, this PR carries the experiment-analysis and notebook preparation work that was created locally while validating the fleet runs. That includes new analysis scripts for BLE parsing, vendor/environment figure generation, PCAP validation, AP inventory fixes, and dataset preparation, plus updated notebooks and one per-experiment notebook for experiment 183. The handoff note and auxiliary diagram renderer are included as part of the same operational thread.
+
+Third, the PR updates the `src/elabftw` submodule pointer to commit `5dbe0b8645e9c0a3ca393113ea4abc91983c62a4` from branch `codex-metadata-table-and-entity-sql-updates` on `hokanuSK/elabftw`. Those submodule changes are required for the metadata table/entity rendering updates that were present in the local worktree.
+
+Validation in this repo was focused and pragmatic. I ran `python3 -m py_compile` across the modified Python entry points and analysis scripts, and `jq empty` against the modified Grafana dashboard JSON. Those checks passed. I did not run notebook execution or a full end-to-end fleet experiment as part of this PR creation step.

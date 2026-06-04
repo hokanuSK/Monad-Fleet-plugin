@@ -105,10 +105,11 @@ def strip_ansi(text: str) -> str:
 
 
 def normalize_pi_from_name(path: Path) -> str:
-    stem = path.name.lower()
-    match = re.search(r"monad[-_]?(\d+)", stem)
-    if match:
-        return f"monad-{int(match.group(1)):02d}"
+    for candidate in [path.name, *path.parts[-4:]]:
+        stem = candidate.lower()
+        match = re.search(r"monad[-_]?(\d+)", stem)
+        if match:
+            return f"monad-{int(match.group(1)):02d}"
     return ""
 
 
@@ -334,6 +335,16 @@ def write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
             fh.write(json.dumps(row, sort_keys=True) + "\n")
 
 
+def unique_raw_copy_path(raw_dir: Path, src: Path) -> Path:
+    candidate = raw_dir / src.name
+    if not candidate.exists():
+        return candidate
+    tagged = raw_dir / f"{normalize_pi_from_name(src) or src.parent.name}__{src.name}"
+    if not tagged.exists():
+        return tagged
+    return raw_dir / f"{src.stem}__{src.parent.name}{src.suffix}"
+
+
 def parse_wifi_capture_summary(status_rows: list[dict[str, str]]) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for row in status_rows:
@@ -415,15 +426,13 @@ def run_tshark(pcap: Path, pi_id: str, out_csv: Path) -> int:
         "-e", "wlan_radio.signal_dbm",
         "-e", "wlan.ssid",
     ]
-    cmd = [tshark, "-r", str(pcap), "-T", "fields", "-E", "separator=,", "-E", "quote=d", *fields]
-    proc = subprocess.run(cmd, text=True, capture_output=True, timeout=120)
-    if proc.returncode != 0:
-        return 0
-
     rows = 0
+    cmd = [tshark, "-r", str(pcap), "-T", "fields", "-E", "separator=,", "-E", "quote=d", *fields]
     with out_csv.open("a", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
-        for line in proc.stdout.splitlines():
+        proc = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert proc.stdout is not None
+        for line in proc.stdout:
             if not line.strip():
                 continue
             parsed = next(csv.reader([line]))
@@ -450,6 +459,9 @@ def run_tshark(pcap: Path, pi_id: str, out_csv: Path) -> int:
                 ]
             )
             rows += 1
+        _, stderr = proc.communicate()
+    if proc.returncode != 0:
+        return 0
     return rows
 
 
@@ -520,18 +532,20 @@ def run_tcpdump(pcap: Path, pi_id: str, out_csv: Path) -> int:
     if not tcpdump:
         return 0
     cmd = [tcpdump, "-r", str(pcap), "-tttt", "-e", "-n"]
-    proc = subprocess.run(cmd, text=True, capture_output=True, timeout=120)
-    if proc.returncode != 0:
-        return 0
     rows = 0
     with out_csv.open("a", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
-        for line in proc.stdout.splitlines():
+        proc = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert proc.stdout is not None
+        for line in proc.stdout:
             row = tcpdump_line_to_row(line, pi_id, pcap)
             if row is None:
                 continue
             writer.writerow(row)
             rows += 1
+        _, stderr = proc.communicate()
+    if proc.returncode != 0:
+        return 0
     return rows
 
 
@@ -577,7 +591,7 @@ def prepare_dataset(args: argparse.Namespace) -> dict[str, object]:
     pcap_rows_written = 0
     pcap_inputs = [path.resolve() for path in args.pcap]
     for pcap in pcap_inputs:
-        dst = raw_dir / pcap.name
+        dst = unique_raw_copy_path(raw_dir, pcap)
         if pcap.resolve() != dst.resolve():
             shutil.copy2(pcap, dst)
         pi_id = pcap_pi_id_from_bundles(pcap, bundles)
