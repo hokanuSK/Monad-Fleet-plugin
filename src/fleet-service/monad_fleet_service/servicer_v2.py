@@ -74,7 +74,7 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
         ).lower()
 
         measurement_candidates = [name for name in reported_ifaces if name and name != control_plane and not name.startswith("wg")]
-        if configured and (not reported_set or configured in reported_set):
+        if configured:
             return configured
         if preferred and preferred in measurement_candidates:
             return preferred
