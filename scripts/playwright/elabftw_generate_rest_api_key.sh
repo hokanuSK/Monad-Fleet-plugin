@@ -11,6 +11,8 @@ umask 077
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 # ---- Config (override via env) ----
+export TMPDIR="${PLAYWRIGHT_TMPDIR:-/private/tmp}"
+
 ELAB_BASE_URL="${ELAB_BASE_URL:-https://localhost:8443}"
 ELAB_EMAIL="${ELAB_EMAIL:-toto@yopmail.com}"
 ELAB_PASSWORD="${ELAB_PASSWORD:-totototototo}"
@@ -70,7 +72,13 @@ mkdir -p "${out_dir}"
 session="elabftw-${run_id}"
 
 pw() {
-  "${PWCLI}" --session "${session}" --config "${out_dir}/playwright-cli.json" "$@"
+  local cmd="${1:-}"
+  shift || true
+  if [[ "${cmd}" == "open" ]]; then
+    "${PWCLI}" --session "${session}" open --config "${out_dir}/playwright-cli.json" "$@"
+  else
+    "${PWCLI}" --session "${session}" "${cmd}" "$@"
+  fi
 }
 
 cat >"${out_dir}/playwright-cli.json" <<JSON
@@ -94,6 +102,16 @@ export ELAB_BASE_URL ELAB_EMAIL ELAB_PASSWORD ELAB_KEY_NAME ELAB_KEY_CANWRITE
 login_url="${ELAB_BASE_URL%/}/login.php?letmein"
 ucp_url="${ELAB_BASE_URL%/}/ucp.php"
 
+json_string() {
+  python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$1"
+}
+
+ELAB_BASE_URL_JS="$(json_string "${ELAB_BASE_URL%/}")"
+ELAB_EMAIL_JS="$(json_string "${ELAB_EMAIL}")"
+ELAB_PASSWORD_JS="$(json_string "${ELAB_PASSWORD}")"
+ELAB_KEY_NAME_JS="$(json_string "${ELAB_KEY_NAME}")"
+ELAB_KEY_CANWRITE_JS="$(json_string "${ELAB_KEY_CANWRITE}")"
+
 if [[ "${TRACE}" == "true" ]]; then
   pw tracing-start
 fi
@@ -101,28 +119,25 @@ fi
 pw open "${login_url}"
 
 # Use run-code for stable selectors (avoid snapshot element refs).
-pw run-code "(
-  async () => {
+pw run-code "async (page) => {
     await page.waitForSelector('form#login', { timeout: 30_000 });
-    await page.fill('#email', process.env.ELAB_EMAIL || '');
-    await page.fill('#password', process.env.ELAB_PASSWORD || '');
+    await page.fill('#email', ${ELAB_EMAIL_JS});
+    await page.fill('#password', ${ELAB_PASSWORD_JS});
     const navPromise = page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => null);
     await page.click(\"form#login button[type='submit']\");
     await navPromise;
-  }
-)()"
+  }"
 
-pw run-code "(
-  async () => {
-    await page.goto(process.env.ELAB_BASE_URL.replace(/\\/+$/, '') + '/ucp.php', { waitUntil: 'domcontentloaded' });
+pw run-code "async (page) => {
+    await page.goto(${ELAB_BASE_URL_JS} + '/ucp.php', { waitUntil: 'domcontentloaded' });
     // The UCP uses a loading spinner while fetching user data.
     await page.waitForSelector('#loading-spinner', { state: 'hidden', timeout: 30_000 }).catch(() => {});
     await page.waitForSelector('ul.tabbed-menu', { timeout: 30_000 });
 
     await page.click(\"button[data-action='switch-tab'][data-tabtarget='3']\");
     await page.waitForSelector('#apikeyName', { state: 'visible', timeout: 30_000 });
-    await page.fill('#apikeyName', process.env.ELAB_KEY_NAME || 'codex');
-    await page.selectOption('#apikeyCanwrite', (process.env.ELAB_KEY_CANWRITE === '1') ? '1' : '0');
+    await page.fill('#apikeyName', ${ELAB_KEY_NAME_JS});
+    await page.selectOption('#apikeyCanwrite', (${ELAB_KEY_CANWRITE_JS} === '1') ? '1' : '0');
     await page.click(\"button[data-action='create-apikey']\");
 
     // The key is only shown once; wait for the value to be populated.
@@ -130,13 +145,12 @@ pw run-code "(
       const el = document.querySelector('#newApiKeyInput');
       return el && el.value && el.value.length > 0;
     }, null, { timeout: 30_000 });
-  }
-)()"
+  }"
 
 pw screenshot
 
 # Extract the one-time key from the page.
-api_key="$(pw eval \"document.querySelector('#newApiKeyInput').value\" | tail -n 1 | tr -d '\r')"
+api_key="$(pw eval '() => document.querySelector("#newApiKeyInput")?.value' | tail -n 1 | tr -d '\r')"
 # Some CLIs wrap strings; strip a single pair of surrounding quotes if present.
 api_key="${api_key%\"}"
 api_key="${api_key#\"}"

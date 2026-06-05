@@ -1,4 +1,13 @@
 from .core import *  # noqa: F401,F403
+from pathlib import Path
+import threading
+import time
+
+from .grafana_dashboards import (
+    DashboardProvisioningConfig,
+    generate_experiment_dashboards_from_policy,
+    parse_instance_map,
+)
 from .policy_design import runtime_policy_from_design
 
 class FleetManagerServicer(fleet_gateway_pb2_grpc.FleetManagerServicer):
@@ -7,11 +16,24 @@ class FleetManagerServicer(fleet_gateway_pb2_grpc.FleetManagerServicer):
         self._state = local_state
         self._cfg = cfg
         self._metadata_patch_supported = True
+        self._device_item_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._device_item_cache_lock = threading.Lock()
+        self._device_item_cache_ttl_s = max(0, int(cfg.get("device_item_cache_ttl_s", 600) or 0))
         policy_keys = cfg.get("policy_metadata_keys") or []
         if not isinstance(policy_keys, list):
             policy_keys = []
         normalized_keys = [normalize_string(key) for key in policy_keys if normalize_string(key)]
         self._policy_metadata_keys = normalized_keys or list(DEFAULT_POLICY_METADATA_KEYS)
+        self._grafana_provisioned_experiments: set[str] = set()
+        self._grafana_provision_lock = threading.Lock()
+        self._grafana_dashboard_config: DashboardProvisioningConfig | None = None
+        if bool(cfg.get("grafana_experiment_dashboards_enabled")):
+            self._grafana_dashboard_config = DashboardProvisioningConfig(
+                template_dir=Path(normalize_string(cfg.get("grafana_dashboard_template_dir"))),
+                output_root=Path(normalize_string(cfg.get("grafana_dashboard_output_root"))),
+                instance_map=parse_instance_map(cfg.get("grafana_experiment_instance_map")),
+                default_instance_regex=normalize_string(cfg.get("grafana_experiment_default_instance_regex")),
+            )
 
     def _find_device_item(self, device_id: str) -> dict[str, Any] | None:
         candidates = self._elab_client.list_items(search=device_id, limit=100)
@@ -122,27 +144,44 @@ class FleetManagerServicer(fleet_gateway_pb2_grpc.FleetManagerServicer):
         except Exception as exc:
             log.warning("patch_item_body fallback failed for item_id=%s: %s", item_id, exc)
 
-    def _get_or_create_device_item(self, device_id: str, agent_info: fleet_gateway_pb2.AgentInfo | None) -> dict[str, Any]:
+    def _get_or_create_device_item(self, device_id: str, agent_info: fleet_gateway_pb2.AgentInfo | None = None) -> dict[str, Any]:
+        cache_key = normalize_device_id(device_id)
+        if cache_key and self._device_item_cache_ttl_s > 0:
+            now_s = time.time()
+            with self._device_item_cache_lock:
+                cached = self._device_item_cache.get(cache_key)
+                if cached is not None:
+                    cached_at_s, cached_item = cached
+                    if now_s - cached_at_s <= self._device_item_cache_ttl_s:
+                        return dict(cached_item)
+
         item = self._find_device_item(device_id)
         if item is None:
             log.info("Creating new resource item for device_id=%s", device_id)
             item = self._elab_client.create_device_item(device_id)
-
-        self._update_item_presence(item, agent_info)
+        if cache_key and self._device_item_cache_ttl_s > 0:
+            with self._device_item_cache_lock:
+                self._device_item_cache[cache_key] = (time.time(), dict(item))
         return item
 
-    def _fetch_fleet_experiments(self) -> list[dict[str, Any]]:
+    def _fetch_fleet_experiments(self, max_total: int | None = None) -> list[dict[str, Any]]:
         tag = self._cfg["fleet_experiment_tag"]
-        limit = int(self._cfg["experiments_batch_size"])
+        page_size = int(self._cfg["experiments_batch_size"])
         offset = 0
         rows: list[dict[str, Any]] = []
 
         while True:
+            limit = page_size
+            if max_total is not None:
+                remaining = max_total - len(rows)
+                if remaining <= 0:
+                    break
+                limit = min(limit, remaining)
             batch = self._elab_client.list_experiments_by_tag(tag, limit=limit, offset=offset)
             if not batch:
                 break
             rows.extend(batch)
-            if len(batch) < limit:
+            if len(batch) < limit or (max_total is not None and len(rows) >= max_total):
                 break
             offset += len(batch)
 
@@ -282,8 +321,73 @@ class FleetManagerServicer(fleet_gateway_pb2_grpc.FleetManagerServicer):
             return 1  # future
         return 2  # active or unspecified
 
+    def _maybe_provision_grafana_dashboards(self, experiment: dict[str, Any], policy: dict[str, Any]) -> None:
+        config = self._grafana_dashboard_config
+        if config is None:
+            return
+
+        experiment_id = normalize_string(experiment.get("id"))
+        if not experiment_id:
+            return
+        with self._grafana_provision_lock:
+            if experiment_id in self._grafana_provisioned_experiments:
+                return
+
+        dashboard_policy = self._extract_policy_from_experiment(experiment) or policy
+        try:
+            written = generate_experiment_dashboards_from_policy(
+                experiment_id=experiment_id,
+                policy=dashboard_policy,
+                config=config,
+            )
+        except Exception as exc:
+            log.warning("Grafana dashboard auto-provision failed for experiment %s: %s", experiment_id, exc)
+            return
+
+        with self._grafana_provision_lock:
+            self._grafana_provisioned_experiments.add(experiment_id)
+        folder = str(written[0].parent) if written else ""
+        log.info(
+            "Grafana dashboard auto-provisioned experiment=%s files=%d folder=%s",
+            experiment_id,
+            len(written),
+            folder,
+        )
+
+    def scan_and_provision_grafana_dashboards(self) -> None:
+        config = self._grafana_dashboard_config
+        if config is None:
+            return
+
+        max_scan = int(self._cfg.get("max_experiments_to_scan", 20))
+        for experiment_ref in self._fetch_fleet_experiments(max_total=max_scan):
+            exp_id = experiment_ref.get("id")
+            if exp_id is None:
+                continue
+
+            experiment = experiment_ref if isinstance(experiment_ref, dict) else None
+            if not isinstance(experiment, dict):
+                continue
+
+            if "metadata" not in experiment or "tags" not in experiment:
+                fetched = self._elab_client.get_experiment(int(exp_id))
+                if not fetched:
+                    continue
+                experiment = fetched
+
+            try:
+                policy_ctx = self._load_policy_context(experiment)
+            except Exception:
+                log.exception("Grafana dashboard scan: failed to parse policy for experiment %s", exp_id)
+                continue
+            if not policy_ctx:
+                continue
+
+            self._maybe_provision_grafana_dashboards(experiment, policy_ctx["policy"])
+
     def _select_policy_for_device(self, item: dict[str, Any], device_id: str) -> dict[str, Any] | None:
-        experiments = self._fetch_fleet_experiments()
+        max_scan = int(self._cfg.get("max_experiments_to_scan", 20))
+        experiments = self._fetch_fleet_experiments(max_total=max_scan)
         now_utc = utc_now()
         skip_expired = bool(self._cfg.get("skip_expired_policies", True))
         candidates: list[tuple[int, int, int, int, dict[str, Any]]] = []
@@ -324,6 +428,8 @@ class FleetManagerServicer(fleet_gateway_pb2_grpc.FleetManagerServicer):
             window_bucket = self._policy_window_bucket(policy_ctx["policy"], now_utc)
             if skip_expired and window_bucket == 0:
                 continue
+
+            self._maybe_provision_grafana_dashboards(experiment, policy_ctx["policy"])
 
             start_dt, _ = self._policy_measurement_window(policy_ctx["policy"])
             start_rank = int(start_dt.timestamp()) if start_dt is not None else 0
@@ -486,13 +592,23 @@ class FleetManagerServicer(fleet_gateway_pb2_grpc.FleetManagerServicer):
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "device_id is required")
 
         try:
-            self._get_or_create_device_item(device_id, request)
+            item = self._find_device_item(device_id)
+            if item is None:
+                item = self._elab_client.create_device_item(device_id)
             mark_device_seen(device_id)
-            return fleet_gateway_pb2.ServerConfig(
+            response = fleet_gateway_pb2.ServerConfig(
                 server_unix_time_ms=int(time.time() * 1000),
                 poll_interval_s=int(self._cfg["poll_interval_s"]),
                 required_min_agent_version=self._cfg["required_min_agent_version"],
             )
+            # Update presence metadata async so slow MySQL writes don't delay Hello response.
+            agent_info = request
+            threading.Thread(
+                target=self._update_item_presence,
+                args=(item, agent_info),
+                daemon=True,
+            ).start()
+            return response
         except Exception as exc:
             log.exception("Hello failed for device_id=%s", device_id)
             context.abort(grpc.StatusCode.INTERNAL, f"Hello failed: {exc}")

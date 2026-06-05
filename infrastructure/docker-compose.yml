@@ -92,12 +92,19 @@ services:
       - "BOOK_IS_CANCELLABLE=true"
       - "DATA_DIR=/data"
       - "METRICS_PORT=9108"
-      - "METRICS_EXCLUDE_PREFIXES=csi_"
+      - "METRICS_EXCLUDE_PREFIXES="
+      - "ENABLE_METRICS_INGEST_JOURNAL=false"
       - "INGEST_API_TOKEN="
+      - "DEVICE_INTERFACE_OVERRIDES_JSON="
+      - "GRAFANA_EXPERIMENT_DASHBOARDS_ENABLED=true"
+      - "GRAFANA_DASHBOARD_TEMPLATE_DIR=/etc/grafana/provisioning/dashboards/static"
+      - "GRAFANA_DASHBOARD_OUTPUT_ROOT=/etc/grafana/provisioning/dashboards/experiments"
+      - "GRAFANA_EXPERIMENT_INSTANCE_MAP=2c:cf:67:81:00:45=monad-01,24:eb:16:e3:6a:07=monad-02,2c:cf:67:80:f5:86=monad-03,2c:cf:67:80:f4:bf=monad-04"
       # TU DOSAĎ SVOJ REST API KEY (celý reťazec z My Profile → API Keys → REST API key)
       - ELAB_API_KEY=${ELAB_API_KEY:-apiKey4Test}
     volumes:
       - ./artifacts/data/fleet:/data
+      - ./infrastructure/observability/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
     networks:
       - elabftw-net
     ports:
@@ -145,6 +152,7 @@ services:
       - FLEET_MANAGER_PORT=50060
       - MAX_SYNC_CYCLES=0
       - EXECUTE_POLICY=false
+      - DEFAULT_METRICS_SINKS=fleet_http
     mac_address: 02:42:ac:14:00:04
     networks:
       - elabftw-net
@@ -161,6 +169,25 @@ services:
       - mimir-data:/data
     ports:
       - "9009:9009"
+    networks:
+      - elabftw-net
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: prometheus
+    restart: always
+    depends_on:
+      - monad-fleet-service
+      - mimir
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
     networks:
       - elabftw-net
 
@@ -190,4 +217,5 @@ networks:
 
 volumes:
   mimir-data:
+  prometheus-data:
   grafana-data:

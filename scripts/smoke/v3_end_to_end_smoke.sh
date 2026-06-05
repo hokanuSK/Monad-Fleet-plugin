@@ -12,7 +12,7 @@ MAX_SYNC_CYCLES="${MAX_SYNC_CYCLES:-1}"
 RESET_STATE="${RESET_STATE:-true}"
 RESET_METRICS="${RESET_METRICS:-true}"
 RESET_GRAFANA="${RESET_GRAFANA:-false}"
-VERIFY_MIMIR="${VERIFY_MIMIR:-false}"
+VERIFY_MIMIR="${VERIFY_MIMIR:-true}"
 CLEANUP="${CLEANUP:-false}"
 DO_BUILD="${DO_BUILD:-false}"
 SKIP_CORE_SERVICES_RESTART="${SKIP_CORE_SERVICES_RESTART:-false}"
@@ -84,7 +84,7 @@ SYSTEMD_AGENT_SERVICE="${SYSTEMD_AGENT_SERVICE:-monad-fleet-agent.service}"
 ENABLE_ELAB_ARTIFACT_UPLOAD="${ENABLE_ELAB_ARTIFACT_UPLOAD:-true}"
 ARTIFACT_UPLOAD_MAX_BYTES="${ARTIFACT_UPLOAD_MAX_BYTES:-20971520}"
 ARTIFACT_UPLOAD_TARGET="${ARTIFACT_UPLOAD_TARGET:-elabftw}"
-ARTIFACT_UPLOAD_DURING_MEASURE="${ARTIFACT_UPLOAD_DURING_MEASURE:-true}"
+ARTIFACT_UPLOAD_DURING_MEASURE="${ARTIFACT_UPLOAD_DURING_MEASURE:-false}"
 ARTIFACT_EVICT_AFTER_UPLOAD="${ARTIFACT_EVICT_AFTER_UPLOAD:-false}"
 ARTIFACT_UPLOAD_DURING_MEASURE_TIMEOUT_S="${ARTIFACT_UPLOAD_DURING_MEASURE_TIMEOUT_S:-3}"
 ARTIFACT_UPLOAD_BACKOFF_S="${ARTIFACT_UPLOAD_BACKOFF_S:-15}"
@@ -97,8 +97,9 @@ UPLOAD_SLOT_JITTER_S="${UPLOAD_SLOT_JITTER_S:-0}"
 PROM_REMOTE_WRITE_ON_CMD="${PROM_REMOTE_WRITE_ON_CMD:-}"
 PROM_REMOTE_WRITE_OFF_CMD="${PROM_REMOTE_WRITE_OFF_CMD:-}"
 PROM_REMOTE_WRITE_CMD_TIMEOUT_S="${PROM_REMOTE_WRITE_CMD_TIMEOUT_S:-12}"
+DEFAULT_METRICS_SINKS="${DEFAULT_METRICS_SINKS:-fleet_http}"
 DATA_SINKS="${DATA_SINKS:-}"
-METRICS_SINKS="${METRICS_SINKS:-}"
+METRICS_SINKS="${METRICS_SINKS:-fleet_http}"
 EVENT_SINKS="${EVENT_SINKS:-}"
 ARTIFACT_SINKS="${ARTIFACT_SINKS:-}"
 WEBHOOK_URL="${WEBHOOK_URL:-}"
@@ -169,6 +170,9 @@ RF_ROOM_ID="${RF_ROOM_ID:-}"
 RF_SCENARIO_ID="${RF_SCENARIO_ID:-}"
 RF_RUN_LABEL="${RF_RUN_LABEL:-}"
 TARGET_DEVICE_IDS_CSV="${TARGET_DEVICE_IDS_CSV:-}"
+PROVISION_GRAFANA_EXPERIMENT_DASHBOARDS="${PROVISION_GRAFANA_EXPERIMENT_DASHBOARDS:-true}"
+GRAFANA_EXPERIMENT_INSTANCE_REGEX="${GRAFANA_EXPERIMENT_INSTANCE_REGEX:-}"
+GRAFANA_EXPERIMENT_FOLDER_NAME="${GRAFANA_EXPERIMENT_FOLDER_NAME:-}"
 PASSIVE_AGENT_WAIT_S="${PASSIVE_AGENT_WAIT_S:-120}"  # extra wait for passive Pi mode before verification
 PASSIVE_VERIFY_MAX_WAIT_S="${PASSIVE_VERIFY_MAX_WAIT_S:-900}"  # additional async verify window for passive mode
 PASSIVE_VERIFY_POLL_S="${PASSIVE_VERIFY_POLL_S:-15}"  # polling interval for passive async verification
@@ -563,12 +567,12 @@ else
   else
     echo "Skipping build (DO_BUILD=false)"
   fi
-  docker compose up -d --force-recreate --no-build monad-fleet-service model-device mimir grafana
+  docker compose up -d --force-recreate --no-build monad-fleet-service model-device mimir prometheus grafana
 fi
 
 SMOKE_LAST_STEP="2_reset_fleet_state"
 if [[ "${RESET_STATE}" == "true" ]]; then
-  echo "[2/8] Reset Fleet service state (dedupe + ingest journal) only"
+  echo "[2/8] Reset Fleet service state only"
   docker compose exec -T monad-fleet-service sh -lc "rm -f /data/state.json /data/ingest-metrics.ndjson || true"
   docker compose restart monad-fleet-service >/dev/null
 else
@@ -577,7 +581,13 @@ fi
 
 SMOKE_LAST_STEP="3_reset_metrics"
 if [[ "${RESET_METRICS}" == "true" ]]; then
-  echo "[3/8] Reset Mimir data only (does not touch eLabFTW/MySQL)"
+  echo "[3/8] Reset Prometheus + Mimir data (does not touch eLabFTW/MySQL)"
+  if docker compose ps --services --status running | grep -qx "prometheus"; then
+    docker compose exec -T prometheus sh -lc "rm -rf /prometheus/* || true"
+    docker compose restart prometheus >/dev/null
+  else
+    echo "Prometheus is not running; skipping Prometheus reset."
+  fi
   if docker compose ps --services --status running | grep -qx "mimir"; then
     docker compose exec -T mimir sh -lc "rm -rf /data/* || true"
     docker compose restart mimir >/dev/null
@@ -1207,6 +1217,28 @@ PY"
 fi
 echo "Created smoke experiment id=${SMOKE_EXPERIMENT_ID}"
 
+if [[ "${PROVISION_GRAFANA_EXPERIMENT_DASHBOARDS}" == "true" ]]; then
+  echo "[4b/8] Provision Grafana dashboards for experiment ${SMOKE_EXPERIMENT_ID}"
+  grafana_device_ids="${TARGET_DEVICE_IDS_CSV}"
+  if [[ -z "${grafana_device_ids}" ]]; then
+    if [[ "${RUN_PI}" == "true" ]]; then
+      grafana_device_ids="${DEVICE_PI}"
+    else
+      grafana_device_ids="${DEVICE_MODEL}"
+    fi
+  fi
+  grafana_args=(--experiment-id "${SMOKE_EXPERIMENT_ID}" --device-ids "${grafana_device_ids}")
+  if [[ -n "${GRAFANA_EXPERIMENT_INSTANCE_REGEX}" ]]; then
+    grafana_args+=(--instance-regex "${GRAFANA_EXPERIMENT_INSTANCE_REGEX}")
+  fi
+  if [[ -n "${GRAFANA_EXPERIMENT_FOLDER_NAME}" ]]; then
+    grafana_args+=(--folder-name "${GRAFANA_EXPERIMENT_FOLDER_NAME}")
+  fi
+  scripts/grafana/provision_experiment_dashboards.py "${grafana_args[@]}"
+else
+  echo "[4b/8] Skip Grafana experiment dashboard provisioning (PROVISION_GRAFANA_EXPERIMENT_DASHBOARDS=${PROVISION_GRAFANA_EXPERIMENT_DASHBOARDS})"
+fi
+
 SMOKE_LAST_STEP="5_run_agent_cycle"
 if [[ "${RUN_PI}" == "true" && "${RUN_PI_PASSIVE}" != "true" ]]; then
   echo "[5/8] Run Raspberry Pi one-cycle report(s) (real Wi-Fi/BLE collection if tools are available)"
@@ -1354,6 +1386,8 @@ echo "[8b/8] Verify artifact uploads in eLabFTW experiment"
 run_elab_upload_check() {
 docker compose exec -T monad-fleet-service sh -lc "EXPERIMENT_ID='${SMOKE_EXPERIMENT_ID}' REAL_DATA_ENFORCE='${REAL_DATA_ENFORCE}' REQUIRE_REAL_WIFI='${REQUIRE_REAL_WIFI}' REQUIRE_REAL_BLE='${REQUIRE_REAL_BLE}' REQUIRE_REAL_CSI='${REQUIRE_REAL_CSI}' python - <<'PY'
 import os
+import io
+import tarfile
 import requests
 import urllib3
 
@@ -1379,6 +1413,27 @@ for row in rows[:12]:
     print('upload', row.get('id'), row.get('real_name'), row.get('comment', '')[:80])
 
 name_tokens = [(str(row.get('real_name') or '').lower(), str(row.get('comment') or '').lower()) for row in rows]
+for row in rows:
+    real_name = str(row.get('real_name') or '').lower()
+    comment = str(row.get('comment') or '').lower()
+    if 'wireless-run-evidence-bundle' not in real_name and 'artifact=wireless-run-evidence-bundle' not in comment:
+        continue
+    upload_id = row.get('id')
+    if not upload_id:
+        continue
+    try:
+        bundle_resp = requests.get(
+            f'{base}/experiments/{exp_id}/uploads/{upload_id}?format=binary',
+            headers={'Authorization': key},
+            verify=False,
+            timeout=20,
+        )
+        bundle_resp.raise_for_status()
+        with tarfile.open(fileobj=io.BytesIO(bundle_resp.content), mode='r:gz') as bundle:
+            for member in bundle.getmembers():
+                name_tokens.append((str(member.name or '').lower(), comment))
+    except Exception as exc:
+        print(f'upload_bundle_inspect_warning id={upload_id} error={type(exc).__name__}: {exc}')
 has_wifi = any(('wifi' in name) or ('artifact=wifi' in comment) for name, comment in name_tokens)
 has_ble = any(('ble' in name) or ('artifact=ble' in comment) for name, comment in name_tokens)
 has_csi = any(('csi' in name) or ('artifact=csi' in comment) for name, comment in name_tokens)

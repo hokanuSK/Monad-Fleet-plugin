@@ -11,6 +11,8 @@ tools/
 
 # Local scratch / secrets
 scripts/rpi/keys/
+tests/e2e/.auth/
+/Bakalarka/
 .env.aws
 .env.aws.local
 Poznamky.md
@@ -27,8 +29,15 @@ AGENT.MD
 
 # Local editor / generated deps
 .vscode/
+.ipython/
+.jupyter-config/
+.jupyter-data/
+.jupyter-runtime/
+Untitled.ipynb
+.venv-notebooks/
 node_modules/
 .playwright-cli/
+.ipynb_checkpoints/
 .claude/
 docs/diagrams/node_modules/
 docs/diagrams/legacy/
@@ -48,10 +57,17 @@ docs/adr/
 docs/handoffs/
 docs/handoofs/
 docs/ops/
+docs/sessions/
 docs/research/
 docs/runbooks/
 docs/knowledge-base/
 docs/DOCS_MAP.md
+docs/measurement_5ghz_ble_plan.md
+
+# Generated Grafana experiment folders. Regenerate with
+# scripts/grafana/provision_experiment_dashboards.py.
+infrastructure/observability/grafana/provisioning/dashboards/experiments/**
+!infrastructure/observability/grafana/provisioning/dashboards/experiments/.gitkeep
 
 # Stale generated scaffold; canonical infra lives under infrastructure/.
 infra/

@@ -250,6 +250,49 @@ Current important fields:
 - `failure_mode`
 - `commands`
 
+Optional targeting fields:
+
+- `target_selector` on the command group
+- `target_selector` on an individual command
+
+These selectors are evaluated server-side during runtime policy emission. A matched
+device still has to satisfy the policy-level selector first, then:
+
+- non-matching command groups are omitted for that device
+- non-matching commands are omitted for that device
+- empty groups are omitted for that device
+
+Example:
+
+```json
+{
+  "id": "ble-role-split",
+  "failure_mode": "CONTINUE_ON_ERROR",
+  "commands": [
+    {
+      "id": "ble-advertise-monad-02",
+      "type": "BLE_SCAN",
+      "target_selector": {
+        "device_ids": ["24:eb:16:e3:6a:07"]
+      },
+      "env": {
+        "BLE_SCAN_MODE": "advertise"
+      }
+    },
+    {
+      "id": "ble-collect-monad-03",
+      "type": "BLE_SCAN",
+      "target_selector": {
+        "device_ids": ["2c:cf:67:80:f5:86"]
+      },
+      "env": {
+        "BLE_SCAN_MODE": "continuous"
+      }
+    }
+  ]
+}
+```
+
 ### `failure_mode`
 
 The checked-in example uses `FAIL_FAST`, meaning a failure should stop later commands in the group. If you change this later, document the intended failure semantics clearly because it changes how the run behaves operationally.
@@ -294,15 +337,17 @@ end up attached to runtime commands such as `WIFI_SCAN`, `BLE_SCAN`, or `SHELL`.
 
 ### Artifact normalization
 
-Metrics are not eLabFTW artifacts. Wi-Fi RSSI, BLE RSSI, command status, and device health metrics should go through the agent metrics path into local Prometheus and Mimir/Grafana.
+Metrics are not eLabFTW artifacts. Wi-Fi RSSI, BLE RSSI, CSI summary counters, command status, and device health metrics should go through the agent metrics path into Prometheus, then Mimir for Grafana.
 
 eLabFTW should receive coarse run evidence only:
 
 - measurement output artifacts, such as a Wi-Fi scan log or PCAP, a BLE scan JSONL/log, or CSI files when CSI is re-enabled
-- one merged text/log bundle named like `wifi-ble-csi-artifacts-bundle-*.tar.gz`
-- one `run-summary.json`
+- one merged text/log bundle named like `wireless-run-evidence-bundle.tar.gz`
+- one `run-summary.json` for run status and pointers, not a duplicate telemetry store
 
-For Pi design runs, keep `ARTIFACT_UPLOAD_DURING_MEASURE=false`. That makes the agent merge text artifacts first and then upload the small normalized set during report replay.
+For Pi design runs, `ARTIFACT_UPLOAD_DURING_MEASURE=false` keeps pieces on the device until report replay. Fleet then stages those pieces server-side and uploads the same normalized eLabFTW artifact set.
+
+If a Pi needs to upload during measurement because local storage is limited, keep `ARTIFACT_UPLOAD_DURING_MEASURE=true` and set `ARTIFACT_EVICT_AFTER_UPLOAD=true`. Fleet stages those in-run artifacts under its data directory and uploads the same coarse `wireless-run-evidence-bundle.tar.gz` plus `run-summary.json` to eLabFTW when it receives the run summary.
 
 ### Runtime command filtering
 

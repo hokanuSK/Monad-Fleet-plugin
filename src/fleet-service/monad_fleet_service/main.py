@@ -1,6 +1,8 @@
 from concurrent import futures
 import os
 from pathlib import Path
+import threading
+import time
 
 import grpc
 
@@ -9,6 +11,7 @@ import fleet_gateway_v2_pb2_grpc
 import fleet_gateway_v3_pb2_grpc
 
 from . import core
+from .grafana_dashboards import DEFAULT_INSTANCE_MAP_TEXT
 from .servicer_v1 import FleetManagerServicer
 from .servicer_v2 import FleetManagerServicerV2
 
@@ -33,7 +36,9 @@ def serve() -> None:
         "poll_interval_s": int(os.environ.get("HELLO_POLL_INTERVAL_S", "30")),
         "required_min_agent_version": os.environ.get("REQUIRED_MIN_AGENT_VERSION", ""),
         "experiments_batch_size": int(os.environ.get("EXPERIMENTS_BATCH_SIZE", "200")),
+        "max_experiments_to_scan": int(os.environ.get("MAX_EXPERIMENTS_TO_SCAN", "20")),
         "max_event_history": int(os.environ.get("MAX_EVENT_HISTORY", "100")),
+        "device_item_cache_ttl_s": int(os.environ.get("DEVICE_ITEM_CACHE_TTL_S", "600")),
         "event_duration_minutes": int(os.environ.get("EVENT_DURATION_MINUTES", "60")),
         "book_max_minutes": int(os.environ.get("BOOK_MAX_MINUTES", "180")),
         "book_can_overlap": core.normalize_string(os.environ.get("BOOK_CAN_OVERLAP", "true")).lower() in {"1", "true", "yes"},
@@ -52,25 +57,87 @@ def serve() -> None:
         ),
         "ingest_api_token": os.environ.get("INGEST_API_TOKEN", ""),
         "artifact_max_bytes": int(os.environ.get("ARTIFACT_MAX_BYTES", str(20 * 1024 * 1024))),
+        "elab_request_timeout_s": int(os.environ.get("ELAB_REQUEST_TIMEOUT_S", "20")),
         "resource_status_id_map": core.parse_maybe_json(os.environ.get("RESOURCE_STATUS_ID_MAP_JSON"), {}),
+        "grafana_experiment_dashboards_enabled": core.normalize_string(
+            os.environ.get(
+                "GRAFANA_EXPERIMENT_DASHBOARDS_ENABLED",
+                os.environ.get("PROVISION_GRAFANA_EXPERIMENT_DASHBOARDS", "false"),
+            )
+        ).lower()
+        in {"1", "true", "yes", "on"},
+        "grafana_dashboard_template_dir": os.environ.get(
+            "GRAFANA_DASHBOARD_TEMPLATE_DIR",
+            "/etc/grafana/provisioning/dashboards/static",
+        ),
+        "grafana_dashboard_output_root": os.environ.get(
+            "GRAFANA_DASHBOARD_OUTPUT_ROOT",
+            "/etc/grafana/provisioning/dashboards/experiments",
+        ),
+        "grafana_experiment_instance_map": os.environ.get(
+            "GRAFANA_EXPERIMENT_INSTANCE_MAP",
+            DEFAULT_INSTANCE_MAP_TEXT,
+        ),
+        "grafana_experiment_default_instance_regex": os.environ.get("GRAFANA_EXPERIMENT_DEFAULT_INSTANCE_REGEX", ""),
+        "grafana_experiment_scan_interval_s": int(os.environ.get("GRAFANA_EXPERIMENT_SCAN_INTERVAL_S", "60")),
+        "device_interface_overrides_json": core.parse_maybe_json(
+            os.environ.get("DEVICE_INTERFACE_OVERRIDES_JSON"), {}
+        ),
     }
 
     data_dir = Path(os.environ.get("DATA_DIR", "/data"))
     data_dir.mkdir(parents=True, exist_ok=True)
-    core.INGEST_JOURNAL_PATH = data_dir / "ingest-metrics.ndjson"
+    enable_metrics_ingest_journal = core.normalize_string(
+        os.environ.get("ENABLE_METRICS_INGEST_JOURNAL", "false")
+    ).lower() in {"1", "true", "yes", "on"}
+    core.INGEST_JOURNAL_PATH = data_dir / "ingest-metrics.ndjson" if enable_metrics_ingest_journal else None
     core.ARTIFACT_INGEST_JOURNAL_PATH = data_dir / "ingest-artifacts.ndjson"
+    core.ARTIFACT_SERVER_SPOOL_DIR = data_dir / "artifact-spool"
     core.METRICS_EXCLUDE_PREFIXES = tuple(cfg.get("metrics_exclude_prefixes") or ())
+    if not enable_metrics_ingest_journal:
+        core.log.info("Metrics ingest journal disabled; Mimir is the durable metrics store")
     if core.METRICS_EXCLUDE_PREFIXES:
         core.log.info("Metrics export filter enabled, excluded prefixes: %s", ",".join(core.METRICS_EXCLUDE_PREFIXES))
     core.log.info("fleet.v3 device state metadata patching enabled=%s", cfg["enable_v2_device_state_patch"])
     state = core.LocalState(data_dir / "state.json", max_event_ids=cfg["max_dedupe_events"])
 
-    elab_client = core.ElabFTWClient(base_url=base_url, api_key=api_key, verify_tls=verify_tls)
+    elab_client = core.ElabFTWClient(
+        base_url=base_url,
+        api_key=api_key,
+        verify_tls=verify_tls,
+        request_timeout_s=int(cfg["elab_request_timeout_s"]),
+    )
     core.ELAB_CLIENT_FOR_HTTP = elab_client
     v1_servicer = FleetManagerServicer(elab_client, state, cfg)
     v2_servicer = FleetManagerServicerV2(v1_servicer, cfg)
 
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    if cfg["grafana_experiment_dashboards_enabled"]:
+        scan_interval_s = max(60, int(cfg.get("grafana_experiment_scan_interval_s", 600)))
+
+        def dashboard_scan_loop() -> None:
+            while True:
+                try:
+                    v1_servicer.scan_and_provision_grafana_dashboards()
+                except Exception:
+                    core.log.exception("Grafana dashboard background scan failed")
+                time.sleep(scan_interval_s)
+
+        threading.Thread(
+            target=dashboard_scan_loop,
+            name="grafana-dashboard-scan",
+            daemon=True,
+        ).start()
+        core.log.info("Grafana dashboard background scan enabled interval=%ss", scan_interval_s)
+
+    # Add 4 MB headroom for gRPC framing on top of the artifact payload limit.
+    grpc_max_bytes = cfg["artifact_max_bytes"] + 4 * 1024 * 1024
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=10),
+        options=[
+            ("grpc.max_receive_message_length", grpc_max_bytes),
+            ("grpc.max_send_message_length", grpc_max_bytes),
+        ],
+    )
     fleet_gateway_pb2_grpc.add_FleetManagerServicer_to_server(v1_servicer, server)
     # Primary endpoint (v3).
     fleet_gateway_v3_pb2_grpc.add_FleetManagerServicer_to_server(v2_servicer, server)

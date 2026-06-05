@@ -1,8 +1,148 @@
+import threading
+
 from .core import *  # noqa: F401,F403
 from .collectors import *  # noqa: F401,F403
 from .sinks import *  # noqa: F401,F403
 from . import core as core_mod
 from . import sinks as sinks_mod
+from . import prom_exposition as prom_exposition_mod
+
+
+def _raw_command_artifact_stem(cmd_id: str) -> str:
+    token = sanitize_name(cmd_id, "command")
+    lowered = token.lower()
+    if "rf-env" in lowered or ("environment" in lowered and "snapshot" in lowered):
+        return "device-rf-environment-snapshot"
+    return f"command-{token}-raw-output"
+
+
+def _policy_env_value(policy: fleet_gateway_v2_pb2.Policy, key: str) -> str:
+    target = normalize(key)
+    if not target:
+        return ""
+    for group in policy.command_groups:
+        for cmd in group.commands:
+            value = normalize(cmd.env.get(target))
+            if value:
+                return value
+    return ""
+
+
+def _policy_execution_config(policy: fleet_gateway_v2_pb2.Policy) -> dict[str, int | str]:
+    mode = normalize(_policy_env_value(policy, "EXECUTION_MODE")).lower() or "once"
+    if mode not in {"once", "recurring"}:
+        mode = "once"
+    interval_s = max(0, parse_int(_policy_env_value(policy, "EXECUTION_INTERVAL_S"), 0))
+    max_runs = max(0, parse_int(_policy_env_value(policy, "EXECUTION_MAX_RUNS"), 0))
+    return {
+        "mode": mode,
+        "interval_s": interval_s,
+        "max_runs": max_runs,
+    }
+
+
+def _policy_execution_key(
+    *,
+    agent_id: str,
+    experiment_id: str,
+    policy_id: str,
+    measurement_from: str,
+    measurement_to: str,
+) -> str:
+    parts = [
+        normalize(agent_id).lower(),
+        normalize(experiment_id),
+        normalize(policy_id),
+        normalize(measurement_from),
+        normalize(measurement_to),
+    ]
+    return "|".join(parts)
+
+
+def _execution_skip_reason(
+    store: RunStore,
+    execution_key: str,
+    execution_cfg: dict[str, int | str],
+) -> str:
+    record = store.get_execution_record(execution_key)
+    if not record:
+        return ""
+    state = normalize(record.get("state")).lower()
+    mode = normalize(execution_cfg.get("mode")).lower() or "once"
+    if state == "in_progress":
+        measure_to_raw = normalize(record.get("measurement_to"))
+        if measure_to_raw:
+            measure_to_dt = parse_iso(measure_to_raw)
+            if measure_to_dt is not None and now_utc() > measure_to_dt:
+                return ""
+        return "execution already in progress"
+    if mode == "once":
+        if state in {"completed", "reported", "failed"}:
+            return f"execution already {state}"
+        return ""
+    if mode != "recurring":
+        return ""
+    max_runs = max(0, int(execution_cfg.get("max_runs", 0) or 0))
+    completed_runs = max(0, int(record.get("completed_runs", 0) or 0))
+    if max_runs > 0 and completed_runs >= max_runs:
+        return f"recurring execution reached max_runs={max_runs}"
+    interval_s = max(0, int(execution_cfg.get("interval_s", 0) or 0))
+    if interval_s <= 0:
+        return ""
+    last_completed_raw = normalize(record.get("last_completed_at") or record.get("last_started_at"))
+    last_completed = parse_iso(last_completed_raw) if last_completed_raw else None
+    if last_completed is None:
+        return ""
+    next_due = last_completed + timedelta(seconds=interval_s)
+    now = now_utc()
+    if now < next_due:
+        wait_s = max(1, int((next_due - now).total_seconds()))
+        return f"recurring execution not due for another {wait_s}s"
+    return ""
+
+
+def _measurement_window_timeout_ms(
+    policy: fleet_gateway_v2_pb2.Policy,
+    *,
+    default_timeout_ms: int,
+    reserve_ms: int = 2000,
+) -> int:
+    end_ts = getattr(policy, "measurement_to", None)
+    if end_ts is None:
+        return max(1000, int(default_timeout_ms))
+    if int(getattr(end_ts, "seconds", 0) or 0) == 0 and int(getattr(end_ts, "nanos", 0) or 0) == 0:
+        return max(1000, int(default_timeout_ms))
+    remaining_ms = int((ts_to_datetime(end_ts) - now_utc()).total_seconds() * 1000) - max(0, int(reserve_ms))
+    return max(1000, remaining_ms)
+
+
+def _rf_command_timeout_ms(
+    policy: fleet_gateway_v2_pb2.Policy,
+    *,
+    cmd_type: int,
+    cmd_env: dict[str, str],
+    default_timeout_ms: int,
+) -> int:
+    base_timeout_ms = max(1000, int(default_timeout_ms))
+    if int(cmd_type) == int(fleet_gateway_v2_pb2.WIFI_SCAN):
+        scan_mode = normalize(cmd_env.get("WIFI_SCAN_MODE")).lower()
+        use_measure_window = parse_bool(
+            cmd_env.get("WIFI_SCAN_USE_MEASURE_WINDOW"),
+            scan_mode == "passive_monitor",
+        )
+        if use_measure_window:
+            return _measurement_window_timeout_ms(policy, default_timeout_ms=base_timeout_ms)
+        return base_timeout_ms
+    if int(cmd_type) == int(fleet_gateway_v2_pb2.BLE_SCAN):
+        use_measure_window = parse_bool(
+            cmd_env.get("BLE_SCAN_USE_MEASURE_WINDOW"),
+            True,
+        )
+        if use_measure_window:
+            return _measurement_window_timeout_ms(policy, default_timeout_ms=base_timeout_ms)
+        return base_timeout_ms
+    return base_timeout_ms
+
 
 def main() -> None:
     fleet_host = os.environ.get("FLEET_MANAGER_HOST", "monad-fleet-service")
@@ -25,6 +165,8 @@ def main() -> None:
     sent_retention_days = int(os.environ.get("SENT_RETENTION_DAYS", "14"))
     global_upload_during_measure = parse_bool(os.environ.get("ARTIFACT_UPLOAD_DURING_MEASURE"), False)
     global_artifact_upload_target = sinks_mod._artifact_upload_target(os.environ.get("ARTIFACT_UPLOAD_TARGET"))
+    enable_command_status_reports = parse_bool(os.environ.get("ENABLE_COMMAND_STATUS_REPORTS"), True)
+    enable_upload_status_reports = parse_bool(os.environ.get("ENABLE_UPLOAD_STATUS_REPORTS"), True)
     run_artifact_soft_limit_bytes = max(0, parse_int(os.environ.get("RUN_ARTIFACT_SOFT_LIMIT_BYTES"), 0))
     separate_measure_and_report = parse_bool(os.environ.get("SEPARATE_MEASURE_AND_REPORT"), False)
     restart_control_plane_before_send = parse_bool(
@@ -63,6 +205,14 @@ def main() -> None:
     active_upload_cfg = dict(base_upload_cfg)
 
     store = RunStore(data_root, sent_retention_days=sent_retention_days)
+
+    # Bring up the Prometheus exposition endpoint before we start polling so
+    # the Pi-side Prometheus has something to scrape from the moment this
+    # agent is alive. This is the path the new measurement metrics
+    # (power, 5 GHz aggregates, BLE rates) ride; it is independent of the
+    # legacy fleet-service /ingest/v1/metrics push.
+    prom_exposition_mod.start_exposition_server()
+
     channel = grpc.insecure_channel(target)
     stub = fleet_gateway_v2_pb2_grpc.FleetManagerStub(channel)
 
@@ -84,6 +234,8 @@ def main() -> None:
         exit_code: int = 0,
         measure_type: str = "",
     ) -> None:
+        if not enable_command_status_reports:
+            return
         payload_metrics = {
             normalize(k): normalize(v)
             for k, v in (metrics or {}).items()
@@ -127,6 +279,8 @@ def main() -> None:
             )
 
     def report_upload_status_from_report(run_id: str, report: fleet_gateway_v2_pb2.Report, metrics_state: str, reason: str) -> None:
+        if not enable_upload_status_reports:
+            return
         token = normalize(metrics_state).upper()
         status_value = fleet_gateway_v2_pb2.UPLOAD_PENDING
         if token == "UPLOADED":
@@ -139,14 +293,14 @@ def main() -> None:
         try:
             ack = stub.ReportUploadStatus(
                 fleet_gateway_v2_pb2.ReportUploadStatusRequest(
-                    event_id=f"{normalize(run_id)}:upload:metrics_logs:{token.lower() or 'pending'}",
+                    event_id=f"{normalize(run_id)}:upload:metrics:{token.lower() or 'pending'}",
                     agent_id=agent_id,
                     run_id=normalize(run_id),
                     experiment_id=normalize(report.experiment_id),
                     policy_id=normalize(report.policy_id),
                     payload_kind=fleet_gateway_v2_pb2.METRICS_LOGS,
                     status=status_value,
-                    message=normalize(reason) or f"metrics/logs upload status={token or 'PENDING'}",
+                    message=normalize(reason) or f"metrics upload status={token or 'PENDING'}",
                     metrics={
                         "metrics_upload_state": token or "PENDING",
                         "upload_hook_reason": normalize(reason),
@@ -172,9 +326,11 @@ def main() -> None:
         artifact_status: str,
         reason: str,
     ) -> None:
+        if not enable_upload_status_reports:
+            return
         token = normalize(artifact_status).lower()
         status_value = fleet_gateway_v2_pb2.UPLOAD_PENDING
-        if token == "uploaded":
+        if token in {"uploaded", "spooled"}:
             status_value = fleet_gateway_v2_pb2.UPLOAD_ACK
         elif token == "failed":
             status_value = fleet_gateway_v2_pb2.UPLOAD_ERROR
@@ -223,15 +379,28 @@ def main() -> None:
                 exc,
             )
 
-    def flush_pending_reports_guarded(reason: str) -> set[str]:
+    def flush_pending_reports_guarded(reason: str, *, bypass_slot_gate: bool = False) -> set[str]:
         upload_allowed, upload_reason = core_mod._upload_window_send_allowed(active_upload_cfg, agent_id)
         if not upload_allowed:
-            log.info(
-                "Skip flush_pending_reports (%s): upload gate=%s",
-                normalize(reason),
-                normalize(upload_reason),
-            )
-            return set()
+            # Slot-related blocks ("before_device_slot", "after_device_slot") mean we're within
+            # the upload window but outside our assigned time slice.  For replay of runs that
+            # were queued while the gate was closed (e.g. scan finished 1-2 s before window
+            # opened), respecting the slot can prevent the upload from ever being retried during
+            # the window.  bypass_slot_gate lets callers (execution-skipped path) proceed as
+            # long as the outer window is open.
+            if bypass_slot_gate and upload_reason in ("before_device_slot", "after_device_slot"):
+                log.info(
+                    "flush_pending_reports (%s): slot gate=%s bypassed for pending-run replay",
+                    normalize(reason),
+                    normalize(upload_reason),
+                )
+            else:
+                log.info(
+                    "Skip flush_pending_reports (%s): upload gate=%s",
+                    normalize(reason),
+                    normalize(upload_reason),
+                )
+                return set()
 
         if single_radio_route_gate:
             ready, route_iface = wait_for_route_ready(
@@ -288,21 +457,36 @@ def main() -> None:
                     normalize(remote_write_off_reason),
                 )
 
-    hello = stub.Hello(
-        fleet_gateway_v2_pb2.HelloRequest(
-            agent=fleet_gateway_v2_pb2.AgentDescriptor(
-                agent_id=agent_id,
-                hostname=socket.gethostname(),
-                agent_version=agent_version,
-                interfaces=detect_interfaces(),
-                requested_mode=requested_mode,
-                control_plane_iface=control_plane_iface,
-                fleet_manager_target=target,
-                capabilities=capabilities,
+    _hello_attempts = 0
+    _hello_max = 20
+    _hello_backoff_s = 30
+    hello = None
+    while hello is None:
+        _hello_attempts += 1
+        try:
+            hello = stub.Hello(
+                fleet_gateway_v2_pb2.HelloRequest(
+                    agent=fleet_gateway_v2_pb2.AgentDescriptor(
+                        agent_id=agent_id,
+                        hostname=socket.gethostname(),
+                        agent_version=agent_version,
+                        interfaces=detect_interfaces(),
+                        requested_mode=requested_mode,
+                        control_plane_iface=control_plane_iface,
+                        fleet_manager_target=target,
+                        capabilities=capabilities,
+                    )
+                ),
+                timeout=hello_rpc_timeout_s,
             )
-        ),
-        timeout=hello_rpc_timeout_s,
-    )
+        except grpc.RpcError as _exc:
+            if _hello_attempts >= _hello_max:
+                raise
+            log.warning(
+                "Hello(v2) attempt %d/%d failed: %s; retrying in %ds",
+                _hello_attempts, _hello_max, _exc.code(), _hello_backoff_s,
+            )
+            time.sleep(_hello_backoff_s)
     log.info("Hello(v2) ok: allowed_mode=%s reason=%s", int(hello.allowed_mode), hello.mode_reason)
 
     poll = int(hello.recommended_prepare_poll_sec or default_poll_seconds)
@@ -316,15 +500,21 @@ def main() -> None:
     while max_cycles <= 0 or cycles < max_cycles:
         cycles += 1
 
-        policy_resp = stub.GetPolicy(
-            fleet_gateway_v2_pb2.GetPolicyRequest(
-                agent_id=agent_id,
-                last_policy_id=last_policy_id,
-            ),
-            timeout=policy_rpc_timeout_s,
-        )
+        try:
+            policy_resp = stub.GetPolicy(
+                fleet_gateway_v2_pb2.GetPolicyRequest(
+                    agent_id=agent_id,
+                    last_policy_id=last_policy_id,
+                ),
+                timeout=policy_rpc_timeout_s,
+            )
+        except grpc.RpcError as _rpc_exc:
+            log.warning("GetPolicy RPC failed: %s; sleeping %ds before retry", _rpc_exc.code(), poll)
+            time.sleep(poll)
+            continue
         if policy_resp.status == fleet_gateway_v2_pb2.GetPolicyResponse.NO_WORK:
             log.info("No assignment/work")
+            active_upload_cfg = dict(base_upload_cfg)
             flush_pending_reports_guarded("no-work")
             if reached_max_cycles(cycles, max_cycles):
                 break
@@ -350,6 +540,7 @@ def main() -> None:
                 log.info("Policy not modified: using locally cached policy_id=%s", last_policy_id)
             else:
                 log.warning("Policy not modified but no cached policy body is available; skipping execution")
+                active_upload_cfg = dict(base_upload_cfg)
                 flush_pending_reports_guarded("policy-not-modified-no-cache")
                 if reached_max_cycles(cycles, max_cycles):
                     break
@@ -357,6 +548,7 @@ def main() -> None:
                 continue
         elif policy_resp.status != fleet_gateway_v2_pb2.GetPolicyResponse.OK:
             log.info("No policy available")
+            active_upload_cfg = dict(base_upload_cfg)
             flush_pending_reports_guarded("policy-unavailable")
             if reached_max_cycles(cycles, max_cycles):
                 break
@@ -369,6 +561,7 @@ def main() -> None:
 
         if policy is None:
             log.warning("No executable policy payload after policy resolution; skipping cycle")
+            active_upload_cfg = dict(base_upload_cfg)
             flush_pending_reports_guarded("policy-empty")
             if reached_max_cycles(cycles, max_cycles):
                 break
@@ -393,20 +586,71 @@ def main() -> None:
         if policy.allowed_mode == fleet_gateway_v2_pb2.DUAL_NIC:
             route_verified = bool(route_iface and route_iface == normalize(policy.control_plane_iface))
 
-        prep = stub.AckPrepared(
-            fleet_gateway_v2_pb2.AckPreparedRequest(
-                agent_id=agent_id,
-                experiment_id=policy.experiment_id,
-                policy_id=policy.policy_id,
-                preparation_id=str(uuid.uuid4()),
-                mode=policy.allowed_mode,
-                control_plane_iface=policy.control_plane_iface,
-                route_verified=route_verified,
-                checks_ok=["route_verified"] if route_verified else [],
-                warnings=[] if route_verified else [f"route via {route_iface or 'unknown'}"],
-            ),
-            timeout=ack_prepared_rpc_timeout_s,
+        measure_from_iso = ts_to_iso(policy.measurement_from)
+        measure_to_iso = ts_to_iso(policy.measurement_to)
+        execution_cfg = _policy_execution_config(policy)
+        execution_key = _policy_execution_key(
+            agent_id=agent_id,
+            experiment_id=policy.experiment_id,
+            policy_id=policy.policy_id,
+            measurement_from=measure_from_iso,
+            measurement_to=measure_to_iso,
         )
+        skip_reason = _execution_skip_reason(store, execution_key, execution_cfg)
+        if skip_reason:
+            log.info(
+                "Skip execution for policy_id=%s experiment_id=%s mode=%s reason=%s",
+                normalize(policy.policy_id),
+                normalize(policy.experiment_id),
+                normalize(execution_cfg.get("mode")),
+                skip_reason,
+            )
+            flush_pending_reports_guarded("execution-skipped", bypass_slot_gate=True)
+            if reached_max_cycles(cycles, max_cycles):
+                break
+            time.sleep(poll)
+            continue
+
+        # Defer execution if measure window hasn't opened yet. Without this,
+        # in_window() at the per-group level returns False, every group is
+        # skipped, and the agent commits an empty "completed" run that future
+        # polls then skip with `execution already completed`.
+        measure_from_dt = parse_iso(measure_from_iso) if measure_from_iso else None
+        if measure_from_dt is not None and measure_from_dt > now_utc():
+            wait_s = max(0.0, (measure_from_dt - now_utc()).total_seconds())
+            log.info(
+                "Measure window not yet open: deferring (opens in %.0fs at %s)",
+                wait_s,
+                measure_from_iso,
+            )
+            flush_pending_reports_guarded("waiting-for-measure-window", bypass_slot_gate=True)
+            if reached_max_cycles(cycles, max_cycles):
+                break
+            time.sleep(poll)
+            continue
+
+        try:
+            prep = stub.AckPrepared(
+                fleet_gateway_v2_pb2.AckPreparedRequest(
+                    agent_id=agent_id,
+                    experiment_id=policy.experiment_id,
+                    policy_id=policy.policy_id,
+                    preparation_id=str(uuid.uuid4()),
+                    mode=policy.allowed_mode,
+                    control_plane_iface=policy.control_plane_iface,
+                    route_verified=route_verified,
+                    checks_ok=["route_verified"] if route_verified else [],
+                    warnings=[] if route_verified else [f"route via {route_iface or 'unknown'}"],
+                ),
+                timeout=ack_prepared_rpc_timeout_s,
+            )
+        except grpc.RpcError as exc:
+            log.warning("AckPrepared RPC failed: %s; will retry", exc.code())
+            flush_pending_reports_guarded("ack-prepared-rpc-error")
+            if reached_max_cycles(cycles, max_cycles):
+                break
+            time.sleep(poll)
+            continue
         if prep.status != fleet_gateway_v2_pb2.AckPreparedResponse.ACCEPTED:
             log.warning("AckPrepared rejected: %s", prep.reason)
             flush_pending_reports_guarded("ack-prepared-rejected")
@@ -416,6 +660,15 @@ def main() -> None:
             continue
 
         run_id = str(uuid.uuid4())
+        store.mark_execution_state(
+            execution_key,
+            state="in_progress",
+            run_id=run_id,
+            policy_id=normalize(policy.policy_id),
+            experiment_id=normalize(policy.experiment_id),
+            measurement_from=measure_from_iso,
+            measurement_to=measure_to_iso,
+        )
         store.start_run(
             run_id,
             {
@@ -423,6 +676,10 @@ def main() -> None:
                 "agent_id": agent_id,
                 "policy_id": policy.policy_id,
                 "experiment_id": policy.experiment_id,
+                "execution_key": execution_key,
+                "execution_mode": normalize(execution_cfg.get("mode")),
+                "measurement_from": measure_from_iso,
+                "measurement_to": measure_to_iso,
                 "started_at": now_utc().isoformat().replace("+00:00", "Z"),
             },
         )
@@ -466,6 +723,7 @@ def main() -> None:
             if not in_window(group_from, group.to):
                 continue
 
+            _async_tasks: list = []
             for cmd in group.commands:
                 commands_total += 1
                 cmd_id = normalize(cmd.id) or f"cmd-{commands_total}"
@@ -517,11 +775,20 @@ def main() -> None:
                     measure_type=measure_type,
                 )
 
-                timeout_ms = int(cmd.timeout_ms or 60000)
+                timeout_ms = _rf_command_timeout_ms(
+                    policy,
+                    cmd_type=int(cmd.type),
+                    cmd_env=cmd_env,
+                    default_timeout_ms=int(cmd.timeout_ms or 60000),
+                )
                 extra_artifacts: list[fleet_gateway_v2_pb2.ArtifactRef] = []
 
                 if int(cmd.type) == int(fleet_gateway_v2_pb2.WIFI_SCAN):
-                    wifi_iface = normalize(os.environ.get("WIFI_SCAN_IFACE") or control_plane_iface)
+                    wifi_iface = normalize(
+                        cmd_env.get("WIFI_SCAN_IFACE")
+                        or os.environ.get("WIFI_SCAN_IFACE")
+                        or control_plane_iface
+                    )
                     requested_interval_s = parse_int(
                         cmd_env.get("WIFI_SAMPLE_INTERVAL_S") or cmd_env.get("SAMPLE_INTERVAL_S"),
                         0,
@@ -542,6 +809,11 @@ def main() -> None:
                     )
                     if emit_live_samples and route_iface and route_iface.startswith("wl") and not allow_wifi_live_ingest:
                         emit_live_samples = False
+                    wifi_scan_mode = normalize(cmd_env.get("WIFI_SCAN_MODE")).lower()
+                    wifi_run_async = (
+                        wifi_scan_mode == "passive_monitor"
+                        and parse_bool(cmd_env.get("WIFI_SCAN_RUN_ASYNC"), False)
+                    )
                     if requested_interval_s > 0 and requested_duration_s > 0:
                         exit_code, duration_ms, message, parsed, extra_artifacts = collect_wifi_scan_series(
                             wifi_iface,
@@ -562,6 +834,18 @@ def main() -> None:
                             override_argv=cmd_argv,
                             override_env=cmd_env,
                         )
+                    elif wifi_run_async:
+                        _box: list = []
+                        def _wifi_worker(
+                            _b=_box, _iface=wifi_iface, _tms=timeout_ms,
+                            _ep=execute_policy, _s=store, _rid=run_id, _cid=cmd_id,
+                            _cl=cmdline, _av=cmd_argv, _ev=cmd_env,
+                        ):
+                            _b.append(collect_wifi_scan(_iface, _tms, _ep, _s, _rid, _cid, override_cmdline=_cl, override_argv=_av, override_env=_ev))
+                        _t = threading.Thread(target=_wifi_worker, daemon=True)
+                        _t.start()
+                        _async_tasks.append((_t, _box, "wifi", upload_during_measure, artifact_upload_target))
+                        exit_code, duration_ms, message, parsed, extra_artifacts = 0, 0, "passive_monitor started async", {"wifi_capture_mode": "passive_monitor", "async": "true"}, []
                     else:
                         exit_code, duration_ms, message, parsed, extra_artifacts = collect_wifi_scan(
                             wifi_iface,
@@ -577,20 +861,56 @@ def main() -> None:
                     wifi_ap_count = int(parsed.get("wifi_ap_count", "0") or 0)
                     wifi_ap_total += max(0, wifi_ap_count)
                     event_metrics = parsed
+                    try:
+                        prom_exposition_mod.record_wifi_run_metrics(
+                            experiment_id=policy.experiment_id,
+                            run_id=run_id,
+                            agent_id=agent_id,
+                            metrics=event_metrics,
+                        )
+                    except Exception:
+                        log.debug("Failed to publish wifi run metrics", exc_info=True)
                 elif int(cmd.type) == int(fleet_gateway_v2_pb2.BLE_SCAN):
-                    exit_code, duration_ms, message, parsed, extra_artifacts = collect_ble_scan(
-                        timeout_ms,
-                        execute_policy,
-                        store,
-                        run_id,
-                        cmd_id,
-                        override_cmdline=cmdline,
-                        override_argv=cmd_argv,
-                        override_env=cmd_env,
+                    ble_scan_mode = normalize(cmd_env.get("BLE_SCAN_MODE")).lower()
+                    ble_run_async = (
+                        ble_scan_mode == "advertise"
+                        and parse_bool(cmd_env.get("BLE_SCAN_RUN_ASYNC"), False)
                     )
+                    if ble_run_async:
+                        _bbox: list = []
+                        def _ble_worker(
+                            _b=_bbox, _tms=timeout_ms, _ep=execute_policy,
+                            _s=store, _rid=run_id, _cid=cmd_id,
+                            _cl=cmdline, _av=cmd_argv, _ev=cmd_env,
+                        ):
+                            _b.append(collect_ble_scan(_tms, _ep, _s, _rid, _cid, override_cmdline=_cl, override_argv=_av, override_env=_ev))
+                        _bt = threading.Thread(target=_ble_worker, daemon=True)
+                        _bt.start()
+                        _async_tasks.append((_bt, _bbox, "ble", upload_during_measure, artifact_upload_target))
+                        exit_code, duration_ms, message, parsed, extra_artifacts = 0, 0, "ble advertise started async", {"ble_mode": "advertise", "async": "true"}, []
+                    else:
+                        exit_code, duration_ms, message, parsed, extra_artifacts = collect_ble_scan(
+                            timeout_ms,
+                            execute_policy,
+                            store,
+                            run_id,
+                            cmd_id,
+                            override_cmdline=cmdline,
+                            override_argv=cmd_argv,
+                            override_env=cmd_env,
+                        )
                     ble_adv_count = int(parsed.get("ble_adv_count", "0") or 0)
                     ble_adv_total += max(0, ble_adv_count)
                     event_metrics = parsed
+                    try:
+                        prom_exposition_mod.record_ble_run_metrics(
+                            experiment_id=policy.experiment_id,
+                            run_id=run_id,
+                            agent_id=agent_id,
+                            metrics=event_metrics,
+                        )
+                    except Exception:
+                        log.debug("Failed to publish BLE run metrics", exc_info=True)
                 elif int(cmd.type) == int(fleet_gateway_v2_pb2.CAPTURE_CSI):
                     exit_code, duration_ms, message, parsed, extra_artifacts = collect_csi_capture(
                         timeout_ms,
@@ -618,7 +938,14 @@ def main() -> None:
                     # Store raw output for arbitrary shell commands too (useful for parsing later).
                     if full:
                         try:
-                            extra_artifacts.append(store.write_text_artifact(run_id, f"cmd-{cmd_id}-output", full))
+                            extra_artifacts.append(
+                                store.write_text_artifact(
+                                    run_id,
+                                    _raw_command_artifact_stem(cmd_id),
+                                    full,
+                                    include_timestamp=False,
+                                )
+                            )
                         except Exception:
                             log.exception("Failed to persist command output artifact for cmd_id=%s", cmd_id)
 
@@ -750,6 +1077,43 @@ def main() -> None:
                 if exit_code != 0 and group.failure_mode == fleet_gateway_v2_pb2.FAIL_FAST:
                     break
 
+            for _at, _ab, _atype, _async_upload_during, _async_upload_target in _async_tasks:
+                _at.join()
+                if _ab:
+                    _aec, _adur, _amsg, _aparsed, _aex = _ab[0]
+                    try:
+                        if _atype == "wifi":
+                            prom_exposition_mod.record_wifi_run_metrics(
+                                experiment_id=policy.experiment_id,
+                                run_id=run_id,
+                                agent_id=agent_id,
+                                metrics=_aparsed,
+                            )
+                        elif _atype == "ble":
+                            prom_exposition_mod.record_ble_run_metrics(
+                                experiment_id=policy.experiment_id,
+                                run_id=run_id,
+                                agent_id=agent_id,
+                                metrics=_aparsed,
+                            )
+                    except Exception:
+                        log.debug("Failed to publish async %s run metrics", _atype, exc_info=True)
+                    for _art in _aex:
+                        artifacts.append(_art)
+                    if _async_upload_during and _aex:
+                        _up, _fail = opportunistic_upload_artifacts_to_elab(
+                            run_id,
+                            policy.experiment_id,
+                            agent_id,
+                            _aex,
+                            store,
+                            enabled=True,
+                            target=_async_upload_target,
+                        )
+                        artifacts_uploaded_during_measure += _up
+                        artifacts_upload_failed_during_measure += _fail
+            _async_tasks.clear()
+
         status = "OK" if commands_failed == 0 else "FAILED"
         record(
             fleet_gateway_v2_pb2.Event(
@@ -773,7 +1137,8 @@ def main() -> None:
         )
 
         merged_artifacts_count = 0
-        if sinks_mod._merge_text_artifacts_enabled():
+        server_side_bundling = sinks_mod._server_side_artifact_bundling_enabled()
+        if sinks_mod._merge_text_artifacts_enabled() and not server_side_bundling:
             artifacts, merged_artifacts_count = merge_text_artifacts_for_run(run_id, artifacts, store)
 
         try:
@@ -794,13 +1159,19 @@ def main() -> None:
                     "command_sink_artifacts_uploaded": command_sink_artifacts_uploaded,
                     "command_sink_artifacts_upload_failed": command_sink_artifacts_upload_failed,
                     "merged_artifacts_count": merged_artifacts_count,
+                    "server_side_artifact_bundling": 1 if server_side_bundling else 0,
                     "run_storage_pressure_hits": run_storage_pressure_hits,
-                    "latest_metrics": latest_observed_metrics,
+                    "metrics_destination": {
+                        "primary": "mimir",
+                        "path": "agent /metrics -> Pi Prometheus -> remote_write -> Mimir -> Grafana",
+                        "note": "Numeric telemetry values are intentionally omitted from this artifact; query Mimir/Grafana for metrics.",
+                    },
+                    "hardware_inventory": core_mod._collect_hardware_inventory(),
                     "generated_at": now_utc().isoformat().replace("+00:00", "Z"),
                 },
             )
             artifacts.append(summary_artifact)
-            if global_upload_during_measure:
+            if global_upload_during_measure and not server_side_bundling:
                 uploaded_now, failed_now = opportunistic_upload_artifacts_to_elab(
                     run_id,
                     policy.experiment_id,
@@ -830,6 +1201,7 @@ def main() -> None:
             "command_sink_artifacts_uploaded": str(command_sink_artifacts_uploaded),
             "command_sink_artifacts_upload_failed": str(command_sink_artifacts_upload_failed),
             "merged_artifacts_count": str(merged_artifacts_count),
+            "server_side_artifact_bundling": "1" if server_side_bundling else "0",
             "run_storage_pressure_hits": str(run_storage_pressure_hits),
             "wifi_ap_total": str(wifi_ap_total),
             "ble_adv_total": str(ble_adv_total),

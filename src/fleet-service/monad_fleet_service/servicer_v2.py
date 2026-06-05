@@ -21,6 +21,92 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
                     normalized_map[key] = value
         self._resource_status_id_map = normalized_map
 
+    def _item_metadata(self, item: dict[str, Any] | None) -> dict[str, Any]:
+        metadata = parse_maybe_json((item or {}).get("metadata"), {})
+        return metadata if isinstance(metadata, dict) else {}
+
+    def _reported_wifi_ifaces(self, item: dict[str, Any] | None) -> list[str]:
+        metadata = self._item_metadata(item)
+        interfaces = metadata.get("interfaces")
+        if not isinstance(interfaces, list):
+            return []
+        seen: set[str] = set()
+        out: list[str] = []
+        for iface in interfaces:
+            if not isinstance(iface, dict):
+                continue
+            name = normalize_string(iface.get("name")).lower()
+            kind = normalize_string(iface.get("kind")).lower()
+            if not name or name in seen:
+                continue
+            if kind not in {"wifi", "wireless", "wlan"} and not name.startswith("wl"):
+                continue
+            seen.add(name)
+            out.append(name)
+        return out
+
+    def _interface_override_entry(self, agent_id: str) -> dict[str, Any]:
+        raw = self._cfg.get("device_interface_overrides_json")
+        if not isinstance(raw, dict):
+            return {}
+        entry = raw.get(normalize_device_id(agent_id)) or raw.get(normalize_string(agent_id))
+        return entry if isinstance(entry, dict) else {}
+
+    def _resolve_wifi_scan_iface(
+        self,
+        *,
+        agent_id: str,
+        item: dict[str, Any] | None,
+        env_map: dict[str, str],
+    ) -> str:
+        metadata = self._item_metadata(item)
+        override_entry = self._interface_override_entry(agent_id)
+        reported_ifaces = self._reported_wifi_ifaces(item)
+        reported_set = set(reported_ifaces)
+
+        configured = normalize_string(override_entry.get("wifi_scan_iface")).lower()
+        if not configured:
+            configured = normalize_string(read_metadata_value(metadata, "wifi_scan_iface")).lower()
+        preferred = normalize_string(env_map.get("WIFI_SCAN_IFACE")).lower()
+        control_plane = normalize_string(
+            override_entry.get("control_plane_iface")
+            or read_metadata_value(metadata, "control_plane_iface")
+        ).lower()
+
+        measurement_candidates = [name for name in reported_ifaces if name and name != control_plane and not name.startswith("wg")]
+        if configured:
+            return configured
+        if preferred and preferred in measurement_candidates:
+            return preferred
+        if len(measurement_candidates) == 1:
+            return measurement_candidates[0]
+        for prefix in ("wlp", "wlan", "wlx"):
+            for candidate in measurement_candidates:
+                if candidate.startswith(prefix):
+                    return candidate
+        if preferred and preferred != control_plane:
+            return preferred
+        if configured:
+            return configured
+        return ""
+
+    def _resolve_command_env_for_agent(
+        self,
+        *,
+        agent_id: str,
+        item: dict[str, Any] | None,
+        command_type: int,
+        env_map: dict[str, str],
+    ) -> dict[str, str]:
+        resolved = dict(env_map)
+        if int(command_type) == int(fleet_gateway_v2_pb2.WIFI_SCAN):
+            scan_mode = normalize_string(resolved.get("WIFI_SCAN_MODE")).lower()
+            if scan_mode == "passive_monitor":
+                iface = self._resolve_wifi_scan_iface(agent_id=agent_id, item=item, env_map=resolved)
+                if iface:
+                    resolved["WIFI_SCAN_IFACE"] = iface
+        return resolved
+
     def _choose_allowed_mode(self, agent: fleet_gateway_v2_pb2.AgentDescriptor) -> tuple[int, str]:
         requested = int(agent.requested_mode)
         interfaces = list(agent.interfaces)
@@ -82,6 +168,26 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
         if not item:
             return None, None
         return item, self._core._select_policy_for_device(item, agent_id)
+
+    def _node_matches_target_selector(
+        self,
+        *,
+        item: dict[str, Any] | None,
+        node: dict[str, Any] | None,
+        agent_id: str,
+    ) -> bool:
+        if not isinstance(node, dict):
+            return True
+        selector = node.get("target_selector")
+        if not isinstance(selector, dict):
+            return True
+        if not isinstance(item, dict):
+            return True
+        return self._core._item_matches_policy_selector(
+            item,
+            {"target_selector": selector},
+            agent_id,
+        )
 
     def _resource_status_title_for_runtime_state(self, state: str) -> str | None:
         token = normalize_string(state).upper()
@@ -395,7 +501,7 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
 
     def _upload_payload_kind_text(self, kind_value: int) -> str:
         mapping = {
-            int(fleet_gateway_v2_pb2.METRICS_LOGS): "metrics_logs",
+            int(fleet_gateway_v2_pb2.METRICS_LOGS): "metrics",
             int(fleet_gateway_v2_pb2.ARTIFACT): "artifact",
         }
         return mapping.get(int(kind_value), "unspecified")
@@ -434,15 +540,19 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
             return rows
         return []
 
-    def _policy_to_v2(self, policy: dict[str, Any], policy_id: str) -> fleet_gateway_v2_pb2.Policy:
+    def _policy_to_v2(self, policy: dict[str, Any], policy_id: str, *, agent_id: str = "", item: dict[str, Any] | None = None) -> fleet_gateway_v2_pb2.Policy:
         start_iso, end_iso = self._measurement_window(policy)
         reporting_env = self._policy_reporting_env(policy, start_iso, end_iso)
         command_groups: list[fleet_gateway_v2_pb2.CommandGroup] = []
         for group in policy.get("command_groups", []):
             if not isinstance(group, dict):
                 continue
+            if not self._node_matches_target_selector(item=item, node=group, agent_id=agent_id):
+                continue
             commands_msg: list[fleet_gateway_v2_pb2.Command] = []
             for cmd in self._iter_commands(group):
+                if not self._node_matches_target_selector(item=item, node=cmd, agent_id=agent_id):
+                    continue
                 retry = cmd.get("retry")
                 retries = int(cmd.get("retries", 0))
                 backoff_ms = 0
@@ -473,6 +583,12 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
                         )
                     )
                 command_type = self._command_type(cmd)
+                merged_env = self._resolve_command_env_for_agent(
+                    agent_id=agent_id,
+                    item=item,
+                    command_type=command_type,
+                    env_map=merged_env,
+                )
                 cmdline = normalize_string(cmd.get("cmdline") or cmd.get("cmd"))
                 if not cmdline and command_type == fleet_gateway_v2_pb2.SHELL:
                     cmdline = normalize_string(env_map.get("cmdline") or env_map.get("CMDLINE"))
@@ -488,6 +604,8 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
                         expected_artifacts=expected_artifacts,
                     )
                 )
+            if not commands_msg:
+                continue
             group_range = group.get("range") if isinstance(group.get("range"), dict) else {}
             group_start = normalize_string(group_range.get("from")) or start_iso
             group_end = normalize_string(group_range.get("to")) or end_iso
@@ -630,25 +748,9 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
         try:
             v1 = self._agent_to_v1(agent)
             item = self._core._get_or_create_device_item(agent_id, v1)
-            self._update_v2_presence(item, agent)
             allowed_mode, reason = self._choose_allowed_mode(agent)
-            self._set_device_runtime_state(
-                agent_id,
-                "ONLINE",
-                item=item,
-                details={
-                    "last_hello": {
-                        "allowed_mode": mode_enum_to_text(allowed_mode),
-                        "mode_reason": normalize_string(reason),
-                        "requested_mode": mode_enum_to_text(int(agent.requested_mode)),
-                        "control_plane_iface": normalize_string(agent.control_plane_iface),
-                        "fleet_manager_target": normalize_string(agent.fleet_manager_target),
-                        "at": utc_now_iso(),
-                    }
-                },
-            )
             mark_device_seen(agent_id)
-            return fleet_gateway_v2_pb2.HelloResponse(
+            response = fleet_gateway_v2_pb2.HelloResponse(
                 server_version="monad-fleet-service-v2-draft",
                 server_time=timestamp_from_unix_ms(int(time.time() * 1000)),
                 recommended_prepare_poll_sec=max(1, int(self._cfg["poll_interval_s"])),
@@ -656,9 +758,37 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
                 allowed_mode=allowed_mode,
                 mode_reason=reason,
             )
+            # Presence and state patches are slow MySQL writes; run async so they
+            # don't hold up the Hello response.
+            details = {
+                "last_hello": {
+                    "allowed_mode": mode_enum_to_text(allowed_mode),
+                    "mode_reason": normalize_string(reason),
+                    "requested_mode": mode_enum_to_text(int(agent.requested_mode)),
+                    "control_plane_iface": normalize_string(agent.control_plane_iface),
+                    "fleet_manager_target": normalize_string(agent.fleet_manager_target),
+                    "at": utc_now_iso(),
+                }
+            }
+            def _async_presence():
+                try:
+                    if bool(self._cfg.get("enable_v2_device_state_patch", True)):
+                        self._update_v2_presence(item, agent)
+                    self._set_device_runtime_state(agent_id, "ONLINE", item=item, details=details)
+                except Exception:
+                    pass
+            threading.Thread(target=_async_presence, daemon=True).start()
+            return response
         except Exception as exc:
             log.exception("Hello(v2) failed for agent_id=%s", agent_id)
             context.abort(grpc.StatusCode.INTERNAL, f"Hello(v2) failed: {exc}")
+
+    def _fire_state_async(self, agent_id: str, state: str, *, item: Any, details: dict[str, Any]) -> None:
+        threading.Thread(
+            target=self._set_device_runtime_state,
+            kwargs={"agent_id": agent_id, "state": state, "item": item, "details": details},
+            daemon=True,
+        ).start()
 
     def GetPolicy(self, request, context):
         agent_id = normalize_device_id(request.agent_id)
@@ -667,19 +797,11 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
         try:
             item, policy_ctx = self._resolve_item_and_policy_ctx(agent_id)
             if not policy_ctx:
-                self._set_device_runtime_state(
-                    agent_id,
-                    "IDLE",
-                    item=item,
+                self._fire_state_async(
+                    agent_id, "IDLE", item=item,
                     details={
-                        "last_assignment": {
-                            "status": "NO_WORK",
-                            "at": utc_now_iso(),
-                        },
-                        "last_policy_fetch": {
-                            "status": "NO_WORK",
-                            "at": utc_now_iso(),
-                        }
+                        "last_assignment": {"status": "NO_WORK", "at": utc_now_iso()},
+                        "last_policy_fetch": {"status": "NO_WORK", "at": utc_now_iso()},
                     },
                 )
                 return fleet_gateway_v2_pb2.GetPolicyResponse(
@@ -689,10 +811,8 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
             start_iso, end_iso = self._measurement_window(policy)
             experiment_id = normalize_string(policy.get("experiment_id"))
             policy_id = normalize_string(policy_ctx["policy_revision"])
-            self._set_device_runtime_state(
-                agent_id,
-                "ASSIGNED",
-                item=item,
+            self._fire_state_async(
+                agent_id, "ASSIGNED", item=item,
                 details={
                     "last_assignment": {
                         "status": "ASSIGNED",
@@ -706,10 +826,8 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
             )
             requested_experiment_id = normalize_string(request.experiment_id)
             if requested_experiment_id and requested_experiment_id != experiment_id:
-                self._set_device_runtime_state(
-                    agent_id,
-                    "WAITING_POLICY",
-                    item=item,
+                self._fire_state_async(
+                    agent_id, "WAITING_POLICY", item=item,
                     details={
                         "last_policy_fetch": {
                             "status": "NO_WORK",
@@ -729,10 +847,8 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
                     measurement_to=timestamp_from_iso(end_iso),
                 )
             if normalize_string(request.last_policy_id) == policy_id:
-                self._set_device_runtime_state(
-                    agent_id,
-                    "POLICY_CACHED",
-                    item=item,
+                self._fire_state_async(
+                    agent_id, "POLICY_CACHED", item=item,
                     details={
                         "last_policy_fetch": {
                             "status": "NOT_MODIFIED",
@@ -749,10 +865,8 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
                     measurement_from=timestamp_from_iso(start_iso),
                     measurement_to=timestamp_from_iso(end_iso),
                 )
-            self._set_device_runtime_state(
-                agent_id,
-                "POLICY_READY",
-                item=item,
+            self._fire_state_async(
+                agent_id, "POLICY_READY", item=item,
                 details={
                     "last_policy_fetch": {
                         "status": "OK",
@@ -764,7 +878,7 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
             )
             return fleet_gateway_v2_pb2.GetPolicyResponse(
                 status=fleet_gateway_v2_pb2.GetPolicyResponse.OK,
-                policy=self._policy_to_v2(policy, policy_id),
+                policy=self._policy_to_v2(policy, policy_id, agent_id=agent_id, item=item),
                 experiment_id=experiment_id,
                 policy_id=policy_id,
                 measurement_from=timestamp_from_iso(start_iso),
@@ -959,13 +1073,150 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
             log.exception("ReportArtifactUploadStatus(v2) failed for agent_id=%s run_id=%s", agent_id, run_id)
             context.abort(grpc.StatusCode.INTERNAL, f"ReportArtifactUploadStatus(v2) failed: {exc}")
 
+    def UploadArtifact(self, request_iterator, context):
+        try:
+            first = next(request_iterator)
+        except StopIteration:
+            ARTIFACT_UPLOADS_TOTAL.labels(status="rejected").inc()
+            return fleet_gateway_v2_pb2.UploadArtifactResponse(
+                status=fleet_gateway_v2_pb2.UploadArtifactResponse.REJECTED,
+                reason="empty upload stream",
+            )
+
+        if first.WhichOneof("payload") != "header":
+            ARTIFACT_UPLOADS_TOTAL.labels(status="rejected").inc()
+            return fleet_gateway_v2_pb2.UploadArtifactResponse(
+                status=fleet_gateway_v2_pb2.UploadArtifactResponse.REJECTED,
+                reason="first upload stream message must be header",
+            )
+
+        header = first.header
+        exp_id = parse_experiment_numeric_id(header.experiment_id)
+        run_id = normalize_string(header.run_id)
+        agent_id = normalize_device_id(header.agent_id)
+        artifact_name = normalize_string(header.artifact_name)
+        if exp_id is None or not run_id or not agent_id or not artifact_name:
+            ARTIFACT_UPLOADS_TOTAL.labels(status="rejected").inc()
+            return fleet_gateway_v2_pb2.UploadArtifactResponse(
+                status=fleet_gateway_v2_pb2.UploadArtifactResponse.REJECTED,
+                reason="experiment_id, run_id, agent_id, and artifact_name are required",
+            )
+
+        max_bytes = max(1024, int(self._cfg.get("artifact_max_bytes", 20 * 1024 * 1024)))
+        chunks = []
+        size_bytes = 0
+        for msg in request_iterator:
+            payload_kind = msg.WhichOneof("payload")
+            if payload_kind == "header":
+                ARTIFACT_UPLOADS_TOTAL.labels(status="rejected").inc()
+                return fleet_gateway_v2_pb2.UploadArtifactResponse(
+                    status=fleet_gateway_v2_pb2.UploadArtifactResponse.REJECTED,
+                    reason="duplicate upload header",
+                )
+            if payload_kind != "content":
+                continue
+            raw_chunk = bytes(msg.content)
+            size_bytes += len(raw_chunk)
+            if size_bytes > max_bytes:
+                ARTIFACT_UPLOADS_TOTAL.labels(status="rejected").inc()
+                return fleet_gateway_v2_pb2.UploadArtifactResponse(
+                    status=fleet_gateway_v2_pb2.UploadArtifactResponse.REJECTED,
+                    reason=f"artifact too large ({size_bytes} > {max_bytes})",
+                )
+            chunks.append(raw_chunk)
+
+        raw = b"".join(chunks)
+        expected_size = int(header.size_bytes or 0)
+        if expected_size > 0 and expected_size != len(raw):
+            ARTIFACT_UPLOADS_TOTAL.labels(status="rejected").inc()
+            return fleet_gateway_v2_pb2.UploadArtifactResponse(
+                status=fleet_gateway_v2_pb2.UploadArtifactResponse.REJECTED,
+                reason=f"size mismatch ({len(raw)} != {expected_size})",
+            )
+
+        actual_sha256 = hashlib.sha256(raw).hexdigest()
+        expected_sha256 = normalize_string(header.sha256)
+        if expected_sha256 and expected_sha256 != actual_sha256:
+            ARTIFACT_UPLOADS_TOTAL.labels(status="rejected").inc()
+            return fleet_gateway_v2_pb2.UploadArtifactResponse(
+                status=fleet_gateway_v2_pb2.UploadArtifactResponse.REJECTED,
+                reason="sha256 mismatch",
+                sha256=actual_sha256,
+                size_bytes=len(raw),
+            )
+
+        mime = normalize_string(header.mime) or "application/octet-stream"
+        upload_phase = normalize_string(header.upload_phase) or "grpc_upload"
+        comment = normalize_string(header.comment)
+        if not comment:
+            comment = (
+                f"fleet-v3 run={run_id} agent={agent_id} artifact={artifact_name} "
+                f"sha256={actual_sha256} size={len(raw)}"
+            )
+
+        if Path(artifact_name).name == "run-summary.json":
+            try:
+                finalized = finalize_server_spooled_run(
+                    experiment_id=exp_id,
+                    run_id=run_id,
+                    agent_id=agent_id,
+                    summary_raw=raw,
+                    summary_mime=mime,
+                    summary_comment=comment,
+                )
+            except Exception as exc:
+                ARTIFACT_UPLOADS_TOTAL.labels(status="error").inc()
+                return fleet_gateway_v2_pb2.UploadArtifactResponse(
+                    status=fleet_gateway_v2_pb2.UploadArtifactResponse.REJECTED,
+                    reason=f"server finalize failed: {exc}",
+                )
+
+            summary_upload = finalized.get("summary_upload") if isinstance(finalized.get("summary_upload"), dict) else {}
+            ARTIFACT_UPLOADS_TOTAL.labels(status="uploaded").inc()
+            return fleet_gateway_v2_pb2.UploadArtifactResponse(
+                status=fleet_gateway_v2_pb2.UploadArtifactResponse.ACCEPTED,
+                reason="artifact uploaded and run finalized",
+                artifact_uri=normalize_string(summary_upload.get("artifact_uri")),
+                location=normalize_string(summary_upload.get("location")),
+                stored_artifact_name=normalize_string(summary_upload.get("stored_artifact_name")),
+                sha256=actual_sha256,
+                size_bytes=len(raw),
+                server_finalized=True,
+                bundled_artifacts_count=int(finalized.get("bundled_artifacts_count", 0) or 0),
+                raw_artifacts_count=int(finalized.get("raw_artifacts_count", 0) or 0),
+            )
+
+        meta = store_server_spooled_artifact(
+            experiment_id=exp_id,
+            run_id=run_id,
+            agent_id=agent_id,
+            artifact_name=artifact_name,
+            raw=raw,
+            mime=mime,
+            comment=comment,
+            upload_phase=upload_phase,
+            sha256_value=expected_sha256,
+        )
+        ARTIFACT_UPLOADS_TOTAL.labels(status="spooled").inc()
+        spool_uri = normalize_string(meta.get("server_spool_uri"))
+        return fleet_gateway_v2_pb2.UploadArtifactResponse(
+            status=fleet_gateway_v2_pb2.UploadArtifactResponse.ACCEPTED,
+            reason="artifact spooled",
+            artifact_uri=spool_uri,
+            location=spool_uri,
+            stored_artifact_name=normalize_string(meta.get("stored_spool_name")),
+            sha256=normalize_string(meta.get("actual_sha256") or meta.get("sha256")),
+            size_bytes=int(meta.get("size_bytes", len(raw)) or len(raw)),
+        )
+
     def AckPrepared(self, request, context):
         agent_id = normalize_device_id(request.agent_id)
         preparation_id = normalize_string(request.preparation_id)
         if not agent_id or not preparation_id:
-            self._set_device_runtime_state(
+            self._fire_state_async(
                 agent_id,
                 "PREPARE_REJECTED",
+                item=None,
                 details={
                     "last_prepare": {
                         "status": "REJECTED",
@@ -982,9 +1233,10 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
                 reason="agent_id and preparation_id are required",
             )
         if self._state.has_preparation(preparation_id):
-            self._set_device_runtime_state(
+            self._fire_state_async(
                 agent_id,
                 "PREPARED",
+                item=None,
                 details={
                     "last_prepare": {
                         "status": "ACCEPTED",
@@ -1008,9 +1260,10 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
         iface = normalize_string(request.control_plane_iface).lower()
         if requested_mode == fleet_gateway_v2_pb2.DUAL_NIC:
             if not request.route_verified:
-                self._set_device_runtime_state(
+                self._fire_state_async(
                     agent_id,
                     "PREPARE_REJECTED",
+                    item=None,
                     details={
                         "last_prepare": {
                             "status": "REJECTED",
@@ -1030,9 +1283,10 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
                     reason="DUAL_NIC requires route_verified=true",
                 )
             if iface and not iface.startswith("eth"):
-                self._set_device_runtime_state(
+                self._fire_state_async(
                     agent_id,
                     "PREPARE_REJECTED",
+                    item=None,
                     details={
                         "last_prepare": {
                             "status": "REJECTED",
@@ -1052,57 +1306,11 @@ class FleetManagerServicerV2(fleet_gateway_v2_pb2_grpc.FleetManagerServicer):
                     reason="DUAL_NIC requires ethernet control_plane_iface",
                 )
 
-        policy_ctx = self._resolve_policy_ctx(agent_id)
-        if not policy_ctx:
-            self._set_device_runtime_state(
-                agent_id,
-                "PREPARE_REJECTED",
-                details={
-                    "last_prepare": {
-                        "status": "REJECTED",
-                        "reason": "no policy assigned",
-                        "preparation_id": preparation_id,
-                        "policy_id": normalize_string(request.policy_id),
-                        "experiment_id": normalize_string(request.experiment_id),
-                        "mode": mode_enum_to_text(requested_mode),
-                        "control_plane_iface": normalize_string(request.control_plane_iface),
-                        "route_verified": bool(request.route_verified),
-                        "at": utc_now_iso(),
-                    }
-                },
-            )
-            return fleet_gateway_v2_pb2.AckPreparedResponse(
-                status=fleet_gateway_v2_pb2.AckPreparedResponse.REJECTED,
-                reason="no policy assigned",
-            )
-        if normalize_string(request.policy_id) != normalize_string(policy_ctx["policy_revision"]):
-            self._set_device_runtime_state(
-                agent_id,
-                "PREPARE_REJECTED",
-                details={
-                    "last_prepare": {
-                        "status": "REJECTED",
-                        "reason": "policy_id mismatch",
-                        "preparation_id": preparation_id,
-                        "policy_id": normalize_string(request.policy_id),
-                        "expected_policy_id": normalize_string(policy_ctx["policy_revision"]),
-                        "experiment_id": normalize_string(request.experiment_id),
-                        "mode": mode_enum_to_text(requested_mode),
-                        "control_plane_iface": normalize_string(request.control_plane_iface),
-                        "route_verified": bool(request.route_verified),
-                        "at": utc_now_iso(),
-                    }
-                },
-            )
-            return fleet_gateway_v2_pb2.AckPreparedResponse(
-                status=fleet_gateway_v2_pb2.AckPreparedResponse.REJECTED,
-                reason="policy_id mismatch",
-            )
-
         self._state.mark_preparation(preparation_id)
-        self._set_device_runtime_state(
+        self._fire_state_async(
             agent_id,
             "PREPARED",
+            item=None,
             details={
                 "last_prepare": {
                     "status": "ACCEPTED",

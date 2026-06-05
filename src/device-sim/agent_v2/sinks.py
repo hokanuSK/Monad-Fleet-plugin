@@ -15,6 +15,67 @@ def _resolve_sink_list(primary: Any, fallback: Any = "") -> list[str]:
 def _safe_float(value: Any) -> float | None:
     return core_mod._safe_float(value)
 
+
+def _report_artifact_transfer_counts(report: fleet_gateway_v2_pb2.Report) -> tuple[int, int, int]:
+    total = max(0, len(report.artifacts))
+    uploaded = max(
+        parse_int(report.summary_metrics.get("artifacts_uploaded_elab"), 0),
+        parse_int(report.summary_metrics.get("artifacts_transferred_fleet_or_elab"), 0),
+    )
+    failed = max(0, parse_int(report.summary_metrics.get("artifacts_upload_failed"), 0))
+    return total, max(0, int(uploaded)), failed
+
+
+def report_ready_for_closeout(report: fleet_gateway_v2_pb2.Report) -> bool:
+    total, uploaded, failed = _report_artifact_transfer_counts(report)
+    if failed > 0:
+        return False
+    if total <= 0:
+        return True
+    return uploaded >= total
+
+
+def _publish_report_with_confirmation(
+    stub: fleet_gateway_v2_pb2_grpc.FleetManagerStub,
+    agent_id: str,
+    report: fleet_gateway_v2_pb2.Report,
+    *,
+    timeout_s: int,
+) -> fleet_gateway_v2_pb2.PublishReportResponse:
+    request = fleet_gateway_v2_pb2.PublishReportRequest(agent_id=agent_id, report=report)
+    try:
+        return stub.PublishReport(request, timeout=float(timeout_s))
+    except grpc.RpcError as exc:
+        if exc.code() != grpc.StatusCode.DEADLINE_EXCEEDED:
+            raise
+
+    confirm_retries = max(1, parse_int(os.environ.get("REPORT_RPC_CONFIRM_RETRIES"), 2))
+    confirm_timeout_s = max(
+        5,
+        parse_int(
+            os.environ.get("REPORT_RPC_CONFIRM_TIMEOUT_S"),
+            min(max(5, int(timeout_s)), 15),
+        ),
+    )
+    last_exc: grpc.RpcError | None = None
+    for attempt in range(1, confirm_retries + 1):
+        try:
+            log.info(
+                "PublishReport confirmation retry %d/%d run_id=%s timeout=%ss",
+                attempt,
+                confirm_retries,
+                normalize(report.run_id),
+                confirm_timeout_s,
+            )
+            return stub.PublishReport(request, timeout=float(confirm_timeout_s))
+        except grpc.RpcError as exc:
+            last_exc = exc
+            if exc.code() != grpc.StatusCode.DEADLINE_EXCEEDED:
+                raise
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("PublishReport confirmation unexpectedly produced no result")
+
 def flush_pending_reports(
     stub: fleet_gateway_v2_pb2_grpc.FleetManagerStub,
     agent_id: str,
@@ -48,22 +109,33 @@ def flush_pending_reports(
             report,
             store,
             fallback_agent_id=agent_id,
+            artifact_upload_stub=stub,
             artifact_status_hook=artifact_upload_status_hook,
         )
         if uploaded_count or failed_count:
+            report.summary_metrics["artifacts_transferred_fleet_or_elab"] = str(uploaded_count)
             report.summary_metrics["artifacts_uploaded_elab"] = str(uploaded_count)
             report.summary_metrics["artifacts_upload_failed"] = str(failed_count)
             report_changed = True
         if report_changed:
             store.persist_report(report)
+        if failed_count > 0 and _server_side_artifact_bundling_enabled():
+            log.warning(
+                "Deferring PublishReport until artifact finalization succeeds run_id=%s failed_artifacts=%d",
+                normalize(report.run_id),
+                failed_count,
+            )
+            continue
         try:
-            resp = stub.PublishReport(
-                fleet_gateway_v2_pb2.PublishReportRequest(agent_id=agent_id, report=report),
-                timeout=float(report_timeout_s),
+            resp = _publish_report_with_confirmation(
+                stub,
+                agent_id,
+                report,
+                timeout_s=report_timeout_s,
             )
         except grpc.RpcError as exc:
             log.warning("PublishReport replay failed for run_id=%s: %s", run_id, exc)
-            break
+            continue
 
         status = int(resp.status)
         if status in (
@@ -163,6 +235,8 @@ def _artifact_upload_target(value: str) -> str:
         return "none"
     if target == "fleet_http":
         return "fleet_http"
+    if target == "fleet_grpc":
+        return "fleet_grpc"
     if target == "elabftw":
         return "elabftw"
     return target
@@ -175,9 +249,15 @@ def _artifact_upload_endpoint_and_limit(override_env: dict[str, str] | None = No
     host = normalize(env.get("FLEET_MANAGER_HOST") or os.environ.get("FLEET_MANAGER_HOST"))
     if not host:
         return None
-    port = parse_int(env.get("METRICS_PORT") or os.environ.get("METRICS_PORT"), 9108)
+    port = parse_int(env.get("FLEET_ARTIFACT_INGEST_PORT") or os.environ.get("FLEET_ARTIFACT_INGEST_PORT"), 9108)
     endpoint = normalize(env.get("FLEET_ARTIFACT_INGEST_URL") or os.environ.get("FLEET_ARTIFACT_INGEST_URL")) or f"http://{host}:{max(1, port)}/ingest/v1/artifacts"
-    max_bytes = max(1024, parse_int(env.get("ARTIFACT_UPLOAD_MAX_BYTES") or os.environ.get("ARTIFACT_UPLOAD_MAX_BYTES"), 20 * 1024 * 1024))
+    max_bytes = max(
+        1024,
+        parse_int(
+            env.get("ARTIFACT_UPLOAD_MAX_BYTES") or os.environ.get("ARTIFACT_UPLOAD_MAX_BYTES"),
+            512 * 1024 * 1024,
+        ),
+    )
     return endpoint, max_bytes
 
 
@@ -200,7 +280,7 @@ def _upload_spool_artifact_to_elab(
     path = store.artifact_path(run_id, artifact.name)
     if path is None:
         log.warning("artifact upload skipped: local file missing run_id=%s name=%s", run_id, artifact.name)
-        return "failed"
+        return "skipped"
 
     try:
         size_bytes = int(path.stat().st_size)
@@ -245,10 +325,107 @@ def _upload_spool_artifact_to_elab(
                 path.unlink(missing_ok=True)
             except Exception:
                 pass
-        return "uploaded"
+        return "spooled" if response.get("spooled") else "uploaded"
     except Exception as exc:
         log.warning("artifact upload failed run_id=%s name=%s err=%s", run_id, artifact.name, exc)
         return "failed"
+
+
+def _upload_spool_artifact_to_fleet_grpc(
+    artifact: fleet_gateway_v2_pb2.ArtifactRef,
+    store: RunStore,
+    *,
+    stub: Any,
+    run_id: str,
+    experiment_id: str,
+    policy_id: str,
+    agent_id: str,
+    upload_phase: str,
+    max_bytes: int,
+    timeout_s: int,
+) -> str:
+    if not normalize(artifact.uri).startswith("spool://"):
+        return "skipped"
+    if stub is None or not hasattr(stub, "UploadArtifact"):
+        log.warning("artifact gRPC upload skipped: Fleet stub does not expose UploadArtifact")
+        return "failed"
+
+    path = store.artifact_path(run_id, artifact.name)
+    if path is None:
+        log.warning("artifact gRPC upload skipped: local file missing run_id=%s name=%s", run_id, artifact.name)
+        return "skipped"
+
+    try:
+        size_bytes = int(path.stat().st_size)
+        if size_bytes > max_bytes:
+            log.warning(
+                "artifact gRPC upload skipped: too large run_id=%s name=%s size=%d max=%d",
+                run_id,
+                artifact.name,
+                size_bytes,
+                max_bytes,
+            )
+            return "failed"
+        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        chunk_bytes = max(512, parse_int(os.environ.get("GRPC_ARTIFACT_CHUNK_BYTES"), 1024))
+
+        def stream_messages():
+            yield fleet_gateway_v2_pb2.UploadArtifactChunk(
+                header=fleet_gateway_v2_pb2.ArtifactUploadHeader(
+                    agent_id=normalize(agent_id),
+                    run_id=normalize(run_id),
+                    experiment_id=normalize(experiment_id),
+                    policy_id=normalize(policy_id),
+                    artifact_name=normalize(artifact.name) or path.name,
+                    size_bytes=max(0, size_bytes),
+                    sha256=normalize(artifact.sha256),
+                    mime=mime,
+                    upload_phase=normalize(upload_phase) or "report_replay",
+                    comment=f"fleet-v3 run={run_id} agent={agent_id} artifact={normalize(artifact.name)}",
+                )
+            )
+            with path.open("rb") as fh:
+                while True:
+                    chunk = fh.read(chunk_bytes)
+                    if not chunk:
+                        break
+                    yield fleet_gateway_v2_pb2.UploadArtifactChunk(content=chunk)
+
+        response = stub.UploadArtifact(stream_messages(), timeout=max(2, int(timeout_s)))
+        if int(response.status) != int(fleet_gateway_v2_pb2.UploadArtifactResponse.ACCEPTED):
+            log.warning(
+                "artifact gRPC upload rejected run_id=%s name=%s reason=%s",
+                run_id,
+                artifact.name,
+                normalize(getattr(response, "reason", "")),
+            )
+            return "failed"
+        new_uri = normalize(response.artifact_uri or response.location)
+        if new_uri:
+            artifact.uri = new_uri
+        if parse_bool(os.environ.get("ARTIFACT_EVICT_AFTER_UPLOAD"), False):
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        return "uploaded" if bool(getattr(response, "server_finalized", False)) else "spooled"
+    except Exception as exc:
+        log.warning("artifact gRPC upload failed run_id=%s name=%s err=%s", run_id, artifact.name, exc)
+        return "failed"
+
+
+def _artifact_transfer_ok(status: str) -> bool:
+    return status in {"uploaded", "spooled"}
+
+
+def _artifact_status_reason(status: str) -> str:
+    if status == "uploaded":
+        return "uploaded_to_elab"
+    if status == "spooled":
+        return "spooled_to_fleet"
+    if status == "failed":
+        return "upload_failed"
+    return "skipped"
 
 
 def opportunistic_upload_artifacts_to_elab(
@@ -280,7 +457,7 @@ def opportunistic_upload_artifacts_to_elab(
         return (0, 0)
 
     endpoint, max_bytes = config
-    timeout_s = max(2, parse_int(os.environ.get("ARTIFACT_UPLOAD_DURING_MEASURE_TIMEOUT_S"), 3))
+    timeout_s = max(2, parse_int(os.environ.get("ARTIFACT_UPLOAD_DURING_MEASURE_TIMEOUT_S"), 30))
     ingest_token = normalize(os.environ.get("INGEST_API_TOKEN"))
     uploaded = 0
     failed = 0
@@ -298,7 +475,7 @@ def opportunistic_upload_artifacts_to_elab(
             timeout_s=timeout_s,
             ingest_token=ingest_token,
         )
-        if status == "uploaded":
+        if _artifact_transfer_ok(status):
             uploaded += 1
         elif status == "failed":
             failed += 1
@@ -317,39 +494,62 @@ def upload_report_artifacts_to_elab(
     store: RunStore,
     *,
     fallback_agent_id: str,
+    artifact_upload_stub: Any = None,
     artifact_status_hook: Any = None,
 ) -> tuple[int, int]:
     experiment_numeric_id = parse_experiment_numeric_id(report.experiment_id)
     if experiment_numeric_id is None:
         return (0, 0)
 
-    config = _artifact_upload_endpoint_and_limit()
-    if config is None:
-        return (0, 0)
-    endpoint, max_bytes = config
+    target = _artifact_upload_target(os.environ.get("ARTIFACT_UPLOAD_TARGET"))
+    max_bytes = max(1024, parse_int(os.environ.get("ARTIFACT_UPLOAD_MAX_BYTES"), 512 * 1024 * 1024))
+    endpoint = ""
+    if target != "fleet_grpc":
+        config = _artifact_upload_endpoint_and_limit()
+        if config is None:
+            return (0, 0)
+        endpoint, max_bytes = config
 
     uploaded = 0
     failed = 0
     agent_id = normalize(report.agent_id) or normalize(fallback_agent_id)
-    timeout_s = max(10, min(60, parse_int(os.environ.get("ARTIFACT_UPLOAD_TIMEOUT_S"), 30)))
+    timeout_s = max(10, parse_int(os.environ.get("ARTIFACT_UPLOAD_TIMEOUT_S"), 300))
     ingest_token = normalize(os.environ.get("INGEST_API_TOKEN"))
 
-    for artifact in report.artifacts:
-        status = _upload_spool_artifact_to_elab(
-            artifact,
-            store,
-            run_id=report.run_id,
-            experiment_numeric_id=experiment_numeric_id,
-            agent_id=agent_id,
-            upload_phase="report_replay",
-            endpoint=endpoint,
-            max_bytes=max_bytes,
-            timeout_s=timeout_s,
-            ingest_token=ingest_token,
-        )
+    artifacts = sorted(
+        report.artifacts,
+        key=lambda a: 1 if Path(normalize(a.name) or "").name == "run-summary.json" else 0,
+    )
+    for artifact in artifacts:
+        if target == "fleet_grpc":
+            status = _upload_spool_artifact_to_fleet_grpc(
+                artifact,
+                store,
+                stub=artifact_upload_stub,
+                run_id=report.run_id,
+                experiment_id=report.experiment_id,
+                policy_id=report.policy_id,
+                agent_id=agent_id,
+                upload_phase="report_replay",
+                max_bytes=max_bytes,
+                timeout_s=timeout_s,
+            )
+        else:
+            status = _upload_spool_artifact_to_elab(
+                artifact,
+                store,
+                run_id=report.run_id,
+                experiment_numeric_id=experiment_numeric_id,
+                agent_id=agent_id,
+                upload_phase="report_replay",
+                endpoint=endpoint,
+                max_bytes=max_bytes,
+                timeout_s=timeout_s,
+                ingest_token=ingest_token,
+            )
         if callable(artifact_status_hook):
             try:
-                reason = "uploaded_to_elab" if status == "uploaded" else "upload_failed" if status == "failed" else "skipped"
+                reason = _artifact_status_reason(status)
                 artifact_status_hook(report, artifact, status, reason)
             except Exception:
                 log.debug(
@@ -358,7 +558,7 @@ def upload_report_artifacts_to_elab(
                     normalize(artifact.name),
                     exc_info=True,
                 )
-        if status == "uploaded":
+        if _artifact_transfer_ok(status):
             uploaded += 1
         elif status == "failed":
             failed += 1
@@ -621,7 +821,7 @@ def _upload_artifacts_for_command_sink(
             timeout_s=timeout_s,
             ingest_token=ingest_token,
         )
-        if status == "uploaded":
+        if _artifact_transfer_ok(status):
             uploaded += 1
         elif status == "failed":
             failed += 1
@@ -763,8 +963,43 @@ def _merge_text_artifacts_enabled() -> bool:
     return parse_bool(os.environ.get("MERGE_TEXT_ARTIFACTS"), True)
 
 
+def _server_side_artifact_bundling_enabled() -> bool:
+    return parse_bool(os.environ.get("SERVER_SIDE_ARTIFACT_BUNDLING"), True)
+
+
 def _merge_text_artifacts_delete_sources() -> bool:
     return parse_bool(os.environ.get("MERGE_TEXT_ARTIFACTS_DELETE_SOURCES"), True)
+
+
+def _artifact_description(name: str) -> str:
+    stem = Path(normalize(name)).stem.lower()
+    if stem == "run-summary":
+        return "Machine-readable summary of run status, command counts, and aggregate metrics."
+    if stem.startswith("command-") and stem.endswith("-execution-status"):
+        return "Command wrapper log with command id, command line, exit code, duration, and short message."
+    if stem.startswith("wifi-link-status"):
+        return "Wi-Fi link snapshot from iw, including SSID, channel/frequency, RSSI, and bitrate when available."
+    if stem.startswith("wifi-access-point-scan"):
+        return "Wi-Fi access point scan output from iw."
+    if stem.startswith("wifi-proc-wireless-status"):
+        return "Fallback Wi-Fi status from /proc/net/wireless."
+    if stem.startswith("wifi-diagnostics-debug"):
+        return "Wi-Fi diagnostic output captured when scan/link evidence was missing."
+    if stem.startswith("ble-discovery-raw-bluetoothctl-scan"):
+        return "Raw bluetoothctl discovery output captured during the BLE scan window."
+    if stem.startswith("csi-status-disabled"):
+        return "CSI status note showing capture was disabled by configuration."
+    if stem.startswith("csi-status-not-configured"):
+        return "CSI status note showing no collector command or output path was configured."
+    if stem.startswith("csi-collector-output"):
+        return "CSI collector stdout/stderr and timeout/evidence notes."
+    if stem.startswith("csi-capture-raw-data-file"):
+        return "Raw CSI capture output file imported from the collector."
+    if stem.startswith("device-rf-environment-snapshot"):
+        return "Device RF environment snapshot with kernel, Wi-Fi interface, link, wireless, and Bluetooth state."
+    if stem.startswith("command-") and stem.endswith("-raw-output"):
+        return "Raw stdout/stderr from a shell command artifact."
+    return "Run evidence artifact captured by the device agent."
 
 
 def merge_text_artifacts_for_run(
@@ -808,6 +1043,7 @@ def merge_text_artifacts_for_run(
             "name": normalize(artifact.name),
             "sha256": normalize(artifact.sha256),
             "size_bytes": int(artifact.size_bytes or 0),
+            "description": _artifact_description(normalize(artifact.name)),
         }
         for artifact, _ in merge_candidates
     ]
@@ -821,9 +1057,12 @@ def merge_text_artifacts_for_run(
     }
 
     artifacts_dir = merge_candidates[0][1].parent
-    stamp = int(time.time() * 1000)
-    bundle_name = f"wifi-ble-csi-artifacts-bundle-{stamp}.tar.gz"
+    bundle_name = "wireless-run-evidence-bundle.tar.gz"
     bundle_path = artifacts_dir / bundle_name
+    if bundle_path.exists():
+        stamp = int(time.time() * 1000)
+        bundle_name = f"wireless-run-evidence-bundle-{stamp}.tar.gz"
+        bundle_path = artifacts_dir / bundle_name
     bundle_tmp_path = artifacts_dir / f"{bundle_name}.tmp"
 
     try:

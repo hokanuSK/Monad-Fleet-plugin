@@ -1,2 +1,2 @@
 grpcio
-grpcio-tools
+prometheus-client

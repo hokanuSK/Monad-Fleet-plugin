@@ -219,7 +219,7 @@ Report command start/finish/failure in real time; keep stable \texttt{event\_id}
 \texttt{ReportUploadStatus} &
 \texttt{agent\_id}, \texttt{run\_id}, \texttt{experiment\_id}, \texttt{policy\_id}, \texttt{payload\_kind}, \texttt{status} &
 \texttt{StatusAck(ok=true)} &
-Report maintenance metrics/logs upload state before/alongside report replay. \\
+Report maintenance metrics upload state before/alongside report replay. \\
 \texttt{ReportArtifactUploadStatus} &
 \texttt{agent\_id}, \texttt{run\_id}, \texttt{experiment\_id}, \texttt{policy\_id}, \texttt{artifact\_name}, \texttt{status} &
 \texttt{StatusAck(ok=true)} &
@@ -427,7 +427,7 @@ duplicate \texttt{preparation\_id} is accepted and treated as already acknowledg
 
 \textbf{Purpose:}
 \begin{itemize}
-  \item report maintenance-window upload state for metrics/logs spool data,
+  \item report maintenance-window upload state for metrics sink data,
   \item expose \texttt{ACK}/\texttt{ERROR}/\texttt{PENDING}/\texttt{SKIPPED} to backend metadata.
 \end{itemize}
 
@@ -831,27 +831,29 @@ elabftw://experiments/<id>/uploads/<upload_id>
 If upload fails or is disabled, URI remains \texttt{spool://...} and run reporting still succeeds.
 
 \subsection{Artifact bundling profile (current default)}
-To reduce artifact fan-out per run, the agent bundles text artifacts before final report upload:
+To reduce artifact fan-out per run, Fleet stages individual text artifacts and builds the final eLabFTW bundle when the run summary arrives:
 \begin{itemize}
   \item merge target: \texttt{.txt}, \texttt{.log}, \texttt{.json} (except \texttt{run-summary.json})
-  \item bundle artifact name: \texttt{wifi-ble-csi-artifacts-bundle-<timestamp>.tar.gz}
+  \item bundle artifact name: \texttt{wireless-run-evidence-bundle.tar.gz}
   \item bundle contents:
     \begin{itemize}
       \item \texttt{entries/<original-files>}
-      \item \texttt{manifest.json} (metadata only: name/checksum/size)
+      \item \texttt{manifest.json} (metadata only: name/checksum/size/description)
     \end{itemize}
   \item binary/raw capture outputs (for example CSI \texttt{.dat}) remain separate artifacts
-  \item by default, merged source text files are deleted locally after bundle creation
+  \item agents may delete source files after Fleet acknowledges staging when \texttt{ARTIFACT\_EVICT\_AFTER\_UPLOAD=true}
 \end{itemize}
 
-Bundle controls:
+Compatibility controls for the older agent-side merge path:
 \begin{itemize}
   \item \texttt{MERGE\_TEXT\_ARTIFACTS=true|false} (default \texttt{true})
   \item \texttt{MERGE\_TEXT\_ARTIFACTS\_DELETE\_SOURCES=true|false} (default \texttt{true})
 \end{itemize}
 
 With this profile enabled, a typical real Pi run publishes three primary artifacts:
-\texttt{wifi-ble-csi-artifacts-bundle-*.tar.gz}, CSI binary output, and \texttt{run-summary.json}.
+\texttt{wireless-run-evidence-bundle.tar.gz}, CSI binary output, and \texttt{run-summary.json}.
+
+In-run artifact upload is a server-side staging path, not direct eLabFTW fan-out. With \texttt{ARTIFACT\_UPLOAD\_DURING\_MEASURE=true} and \texttt{ARTIFACT\_EVICT\_AFTER\_UPLOAD=true}, the agent uploads individual files to Fleet during measurement and may delete local copies after acknowledgment. With \texttt{ARTIFACT\_UPLOAD\_DURING\_MEASURE=false}, the agent sends those same pieces during report replay. In both modes, Fleet stores the pieces under its data directory, then builds and uploads the same final bundle when \texttt{run-summary.json} arrives.
 
 Relevant artifact classes for experiment analysis:
 \begin{itemize}
@@ -873,9 +875,10 @@ Store numeric Wi-Fi/BLE/CSI-derived metrics in time-series backend (Mimir) and v
 
 \subsection{Path}
 \begin{verbatim}
-Agent summary/event metrics -> PublishReport -> Fleet /metrics -> Prometheus
-                                                               -> remote_write -> Mimir -> Grafana
-Low-resource sender JSON   -> /ingest/v1/metrics -> Fleet /metrics -> ...
+Agent live metrics     -> /ingest/v1/metrics -> Fleet /metrics -> Prometheus
+                                                            -> remote_write -> Mimir -> Grafana
+Agent report metrics   -> PublishReport -> Fleet /metrics -> ...
+Low-resource sender JSON -> /ingest/v1/metrics -> Fleet /metrics -> ...
 \end{verbatim}
 
 \subsection{Low-resource sender payload}
@@ -914,11 +917,11 @@ Reference assets in this repository:
 Mimir stores numeric samples, not binary capture blobs.
 Therefore:
 \begin{itemize}
-  \item raw CSI/BLE/PCAP data should be persisted as artifacts (local/object storage and optionally mirrored to eLabFTW uploads)
+  \item raw CSI/BLE/PCAP data and logs should be persisted as artifacts (local/object storage and optionally mirrored to eLabFTW uploads)
   \item derived numeric metrics should be sent via event/summary maps
 \end{itemize}
-\textbf{Current deployment profile:} CSI numeric keys (\texttt{csi\_*}) are excluded from time-series export to Prometheus/Mimir/Grafana.
-CSI remains artifact-first (run artifacts and optional eLabFTW uploads).
+\textbf{Current deployment profile:} numeric CSI summary keys are exportable to Prometheus/Mimir/Grafana by default.
+Raw CSI capture files remain artifact-first (run artifacts and optional eLabFTW uploads).
 
 \section{eLabFTW Mapping Profile}
 \subsection{Experiment authoring}
@@ -1081,7 +1084,7 @@ It resets fleet runtime and metrics storage state only.
 \textbf{Does reset:}
 \begin{itemize}
   \item \texttt{./artifacts/data/fleet/state.json}
-  \item \texttt{./artifacts/data/fleet/ingest-metrics.ndjson}
+  \item optional \texttt{./artifacts/data/fleet/ingest-metrics.ndjson} when metric ingest journaling is enabled
   \item \texttt{./artifacts/data/fleet/ingest-artifacts.ndjson}
   \item Prometheus local TSDB volume
   \item Mimir local TSDB volume
@@ -1335,19 +1338,24 @@ scripts/smoke/v3_end_to_end_smoke.sh
 \subsection{Grafana dashboard (provisioned)}
 This repository provisions a Grafana dashboard focused on Raspberry Pi wireless smoke runs:
 \begin{itemize}
-  \item dashboard UID: \texttt{monad-fleet-wireless-v3}
-  \item dashboard URL path: \texttt{/d/monad-fleet-wireless-v3/monad-fleet-wireless-sensing-pi-smoke-v3}
+  \item static dashboard folder: \texttt{Monad Fleet}
+  \item generated per-experiment folders: \texttt{experiment-\textless id\textgreater}
   \item provisioning files:
   \begin{itemize}
     \item \texttt{infrastructure/observability/grafana/provisioning/dashboards/monad-fleet.yml}
-    \item \texttt{infrastructure/observability/grafana/provisioning/dashboards/monad-fleet-wireless-sensing-v3.json}
+    \item \texttt{infrastructure/observability/grafana/provisioning/dashboards/static/*.json}
+    \item \texttt{infrastructure/observability/grafana/provisioning/dashboards/experiments/experiment-\textless id\textgreater/*.json}
   \end{itemize}
 \end{itemize}
 
+\textbf{Experiment dashboards include:} Power, BLE, Wi-Fi, and CSI views seeded from the
+experiment target device list. The smoke script regenerates the folder after creating the eLabFTW
+experiment.
 \textbf{Panels include:} Wi-Fi RSSI, BLE advertisement count, Wi-Fi AP count, Wi-Fi connected status,
-BLE scan status, artifact upload counters, command health, full metric snapshot table, and service counters.
-\textbf{Note:} CSI metrics are excluded from Prometheus/Mimir export in this deployment (\texttt{METRICS\_EXCLUDE\_PREFIXES=csi\_}).
-Use report artifacts/summary and \texttt{scripts/rpi/verify\_real\_run.sh} to validate CSI capture.
+BLE scan status, CSI capture status and frame counters, artifact upload counters, command health,
+full metric snapshot table, and service counters.
+\textbf{Note:} CSI summary counters can be graphed when the agent reports them, but raw CSI captures remain artifact data.
+Use report artifacts and \texttt{scripts/rpi/verify\_real\_run.sh} to validate raw CSI capture.
 
 \subsection{PromQL examples}
 \begin{verbatim}
@@ -1431,8 +1439,8 @@ monad_fleet_artifact_uploads_total
   \item metric forwarding target can change at Prometheus \texttt{remote\_write} without changing the device gRPC contract.
   \item this deployment sets \texttt{METRICS\_EXCLUDE\_PREFIXES=csi\_} on Fleet service, so CSI metrics are not exported to Grafana.
   \item artifact upload to eLabFTW is implemented through \texttt{/ingest/v1/artifacts}; upload can be disabled per-agent if needed.
-  \item default Pi profile bundles text artifacts into \texttt{wifi-ble-csi-artifacts-bundle-*.tar.gz} and uploads CSI binary + run summary as separate artifacts.
-  \item bundle manifest stores metadata only (no inlined artifact text payload fields); merged source text files are removed locally by default.
+  \item default Pi profile stages text artifacts in Fleet, bundles them into \texttt{wireless-run-evidence-bundle.tar.gz}, and uploads CSI binary + run summary as separate artifacts.
+  \item bundle manifest stores metadata only (no inlined artifact text payload fields); device source files can be evicted after Fleet staging acknowledgment.
   \item sampled Wi-Fi runs throttle artifact fan-out by default (first+last sample artifact retention) to prevent oversized report processing on long sampling windows.
   \item agent-side report replay timeout is configurable via \texttt{REPORT\_RPC\_TIMEOUT\_S} and defaults to a higher value for Pi smoke runs.
   \item control-plane RPC timeouts can be tuned globally via \texttt{CONTROL\_RPC\_TIMEOUT\_S} or per method via \texttt{HELLO\_RPC\_TIMEOUT\_S}, \texttt{ASSIGNMENT\_RPC\_TIMEOUT\_S}, \texttt{POLICY\_RPC\_TIMEOUT\_S}, and \texttt{ACK\_PREPARED\_RPC\_TIMEOUT\_S}.

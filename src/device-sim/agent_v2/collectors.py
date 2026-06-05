@@ -18,6 +18,200 @@ _run_local_cmd = core_mod._run_local_cmd
 _safe_float = core_mod._safe_float
 _safe_int = core_mod._safe_int
 from .sinks import _ingest_metrics_http, opportunistic_upload_artifacts_to_elab
+from . import wifi5g_capture as _wifi5g_capture
+from . import ble_advertise as _ble_advertise
+
+
+def _artifact_stem(base: str, detail: str = "") -> str:
+    clean_base = sanitize_name(base, "artifact")
+    clean_detail = sanitize_name(detail, "")
+    if clean_detail:
+        return f"{clean_base}-{clean_detail}"
+    return clean_base
+
+
+def _wifi_sample_label(index: int, total: int) -> str:
+    index = max(1, int(index))
+    total = max(1, int(total))
+    if total <= 1:
+        return "single-sample"
+    if index == 1:
+        return "first-sample"
+    if index == total:
+        return "last-sample"
+    width = max(3, len(str(total)))
+    return f"sample-{index:0{width}d}-of-{total:0{width}d}"
+
+
+def collect_wifi_monitor_capture(
+    *,
+    iface: str,
+    timeout_ms: int,
+    execute_policy: bool,
+    store: RunStore,
+    run_id: str,
+    cmd_id: str,
+    override_env: dict[str, str],
+    persist_artifacts: bool,
+) -> tuple[int, int, str, dict[str, str], list[fleet_gateway_v2_pb2.ArtifactRef]]:
+    """Phase 2 WIFI_SCAN branch: passive monitor + channel hopping capture.
+
+    Reads ``WIFI_SCAN_CHANNELS`` (CSV), ``WIFI_SCAN_CHANNEL_DWELL_S``, and
+    ``WIFI_SCAN_CHANNEL_WIDTH_MHZ`` from ``override_env`` and runs a
+    monitor-mode capture for ~``timeout_ms`` minus a short teardown buffer.
+
+    On success returns the standard collector tuple with a pcap +
+    channel-schedule artifact pair. On any failure (missing tools, iface
+    cannot enter monitor mode, tcpdump dies) returns rc=1 with an empty
+    artifact list and a descriptive message; callers should not treat
+    that as fatal for the rest of the run.
+    """
+    env = override_env or {}
+    metrics: dict[str, str] = {"wifi_capture_mode": "passive_monitor"}
+    artifacts: list[fleet_gateway_v2_pb2.ArtifactRef] = []
+
+    iface = normalize(iface)
+    if not iface:
+        metrics["wifi_capture_status"] = "no_iface"
+        return 1, 0, "passive_monitor: no interface configured", metrics, []
+
+    if not execute_policy:
+        metrics["wifi_capture_status"] = "dry_run"
+        return 0, 100, "passive_monitor dry run (execute_policy=false)", metrics, []
+
+    channels = _wifi5g_capture.parse_channel_list(env.get("WIFI_SCAN_CHANNELS", ""))
+    try:
+        dwell_s = float(env.get("WIFI_SCAN_CHANNEL_DWELL_S") or _wifi5g_capture.DEFAULT_DWELL_S)
+    except (TypeError, ValueError):
+        dwell_s = _wifi5g_capture.DEFAULT_DWELL_S
+    try:
+        width_mhz = int(env.get("WIFI_SCAN_CHANNEL_WIDTH_MHZ") or _wifi5g_capture.DEFAULT_CHANNEL_WIDTH_MHZ)
+    except (TypeError, ValueError):
+        width_mhz = _wifi5g_capture.DEFAULT_CHANNEL_WIDTH_MHZ
+    try:
+        rotate_mb = int(env.get("WIFI_SCAN_PCAP_ROTATE_MB") or "0")
+    except (TypeError, ValueError):
+        rotate_mb = 0
+
+    # Stage capture outputs in /tmp; we copy them into the run-artifact dir
+    # after stop so the partial pcap won't pollute the spool if we crash.
+    stamp = int(time.time())
+    pcap_scratch = f"/tmp/wifi-5g-monitor-{run_id}-{stamp}.pcap"
+    schedule_scratch = f"/tmp/wifi-5g-schedule-{run_id}-{stamp}.log"
+
+    try:
+        from . import prom_exposition as _prom
+    except Exception:
+        _prom = None  # type: ignore[assignment]
+
+    def _prom_set(name: str, value: float) -> None:
+        if _prom is None:
+            return
+        gauge = getattr(_prom, name, None)
+        if gauge is None:
+            return
+        try:
+            gauge.set(value)
+        except Exception:
+            pass
+
+    _prom_set("wifi5g_capture_active", 1.0)
+
+    handles = _wifi5g_capture.start_capture(
+        iface=iface,
+        pcap_path=pcap_scratch,
+        schedule_log_path=schedule_scratch,
+        channels=channels,
+        dwell_s=dwell_s,
+        width_mhz=width_mhz,
+        rotate_mb=rotate_mb,
+    )
+    if handles is None:
+        _prom_set("wifi5g_capture_active", 0.0)
+        metrics["wifi_capture_status"] = "start_failed"
+        return 1, 0, "passive_monitor: could not start monitor-mode capture", metrics, []
+
+    # Block for the configured capture duration, leaving a small teardown
+    # buffer so the pcap gets a clean flush before the run finalizer fires.
+    capture_duration_s = max(1, int(timeout_ms / 1000) - 2)
+    deadline_ns = time.monotonic_ns() + capture_duration_s * 1_000_000_000
+    while time.monotonic_ns() < deadline_ns:
+        time.sleep(0.5)
+        if handles.tcpdump_proc.poll() is not None:
+            log.warning(
+                "wifi5g_capture: tcpdump exited early rc=%s",
+                handles.tcpdump_proc.returncode,
+            )
+            break
+
+    stats = _wifi5g_capture.stop_capture(handles)
+    _prom_set("wifi5g_capture_active", 0.0)
+    _prom_set("wifi5g_current_channel", 0)
+
+    if persist_artifacts:
+        try:
+            pcap_paths = [Path(path) for path in stats.get("pcap_segment_paths") or []]
+            if not pcap_paths and Path(pcap_scratch).exists():
+                pcap_paths = [Path(pcap_scratch)]
+            if len(pcap_paths) == 1:
+                artifacts.append(
+                    store.import_file_artifact(
+                        run_id,
+                        pcap_paths[0],
+                        artifact_name="wifi-5g-monitor.pcap",
+                    )
+                )
+            else:
+                for idx, pcap_path in enumerate(pcap_paths, start=1):
+                    artifacts.append(
+                        store.import_file_artifact(
+                            run_id,
+                            pcap_path,
+                            artifact_name=f"wifi-5g-monitor-part-{idx:03d}.pcap",
+                        )
+                    )
+        except Exception:
+            log.exception("Failed to import wifi-5g-monitor.pcap as run artifact")
+        try:
+            if Path(schedule_scratch).exists():
+                sched_text = Path(schedule_scratch).read_text(encoding="utf-8")
+                artifacts.append(
+                    store.write_text_artifact(
+                        run_id,
+                        "wifi-5g-channel-schedule",
+                        sched_text,
+                        suffix=".log",
+                        include_timestamp=False,
+                    )
+                )
+        except Exception:
+            log.exception("Failed to persist wifi-5g-channel-schedule.log")
+
+    scratch_paths = {pcap_scratch, schedule_scratch, *[str(path) for path in stats.get("pcap_segment_paths") or []]}
+    for scratch in scratch_paths:
+        try:
+            Path(scratch).unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:
+            log.debug("Failed to unlink scratch file %s", scratch, exc_info=True)
+
+    metrics["wifi_capture_status"] = "ok"
+    metrics["wifi_capture_pcap_bytes"] = str(stats["pcap_bytes"])
+    metrics["wifi_capture_pcap_segments"] = str(stats.get("pcap_segment_count") or 0)
+    metrics["wifi_capture_dwell_changes"] = str(stats["dwell_changes"])
+    metrics["wifi_capture_elapsed_s"] = f"{stats['elapsed_s']:.2f}"
+    metrics["wifi_capture_channels"] = str(len(channels))
+    metrics["wifi_capture_dwell_s"] = f"{dwell_s:.2f}"
+    duration_ms = int(stats["elapsed_s"] * 1000)
+    msg = (
+        f"passive_monitor: {stats['pcap_bytes']}B pcap, "
+        f"{stats['dwell_changes']} dwells over {len(channels)} channels"
+    )
+    if int(stats.get("pcap_segment_count") or 0) > 1:
+        msg += f" (segments={int(stats['pcap_segment_count'])})"
+    return 0, duration_ms, msg, metrics, artifacts
+
 
 def collect_wifi_scan(
     iface: str,
@@ -31,7 +225,24 @@ def collect_wifi_scan(
     override_cmdline: str = "",
     override_argv: list[str] | None = None,
     override_env: dict[str, str] | None = None,
+    artifact_label: str = "",
 ) -> tuple[int, int, str, dict[str, str], list[fleet_gateway_v2_pb2.ArtifactRef]]:
+    # Phase 2: branch on WIFI_SCAN_MODE before any default-path work so a
+    # passive_monitor policy gets routed to the new pcap-based capture without
+    # the legacy `iw scan` running first.
+    scan_mode = normalize((override_env or {}).get("WIFI_SCAN_MODE")).lower()
+    if scan_mode == "passive_monitor":
+        return collect_wifi_monitor_capture(
+            iface=iface,
+            timeout_ms=timeout_ms,
+            execute_policy=execute_policy,
+            store=store,
+            run_id=run_id,
+            cmd_id=cmd_id,
+            override_env=override_env or {},
+            persist_artifacts=persist_artifacts,
+        )
+
     metrics: dict[str, str] = {}
     artifacts: list[fleet_gateway_v2_pb2.ArtifactRef] = []
 
@@ -50,7 +261,14 @@ def collect_wifi_scan(
         )
         if persist_artifacts:
             try:
-                artifacts.append(store.write_text_artifact(run_id, f"wifi-{cmd_id}-override", full))
+                artifacts.append(
+                    store.write_text_artifact(
+                        run_id,
+                        _artifact_stem("wifi-command-override-output", artifact_label),
+                        full,
+                        include_timestamp=False,
+                    )
+                )
             except Exception:
                 log.exception("Failed to persist wifi override output artifact")
 
@@ -137,7 +355,14 @@ def collect_wifi_scan(
             msg = f"{msg}; {iface_note}"
         if persist_artifacts:
             try:
-                artifacts.append(store.write_text_artifact(run_id, f"wifi-{cmd_id}-scan", out))
+                artifacts.append(
+                    store.write_text_artifact(
+                        run_id,
+                        _artifact_stem("wifi-access-point-scan", artifact_label or "current"),
+                        out,
+                        include_timestamp=False,
+                    )
+                )
             except Exception:
                 log.exception("Failed to persist wifi scan artifact")
         return 0, duration_ms, msg, metrics, artifacts
@@ -159,7 +384,14 @@ def collect_wifi_scan(
         msg = f"{msg}; {iface_note}"
     if persist_artifacts:
         try:
-            artifacts.append(store.write_text_artifact(run_id, f"wifi-{cmd_id}-link", out2))
+            artifacts.append(
+                store.write_text_artifact(
+                    run_id,
+                    _artifact_stem("wifi-link-status", artifact_label or "current"),
+                    out2,
+                    include_timestamp=False,
+                )
+            )
         except Exception:
             log.exception("Failed to persist wifi link artifact")
 
@@ -191,7 +423,14 @@ def collect_wifi_scan(
             msg = f"{msg}; {iface_note}"
         if persist_artifacts:
             try:
-                artifacts.append(store.write_text_artifact(run_id, f"wifi-{cmd_id}-proc-wireless", proc_text))
+                artifacts.append(
+                    store.write_text_artifact(
+                        run_id,
+                        _artifact_stem("wifi-proc-wireless-status", artifact_label or "current"),
+                        proc_text,
+                        include_timestamp=False,
+                    )
+                )
             except Exception:
                 log.exception("Failed to persist proc wireless artifact")
         has_channel_context = metrics.get("wifi_channel") is not None or metrics.get("wifi_freq_mhz") is not None
@@ -221,7 +460,14 @@ def collect_wifi_scan(
                 f"iw_scan_output:\n{out or '<empty>'}\n\n"
                 f"iw_link_output:\n{out2 if 'out2' in locals() else '<empty>'}\n"
             )
-            artifacts.append(store.write_text_artifact(run_id, f"wifi-{cmd_id}-debug", debug_payload))
+            artifacts.append(
+                store.write_text_artifact(
+                    run_id,
+                    _artifact_stem("wifi-diagnostics-debug", artifact_label or "current"),
+                    debug_payload,
+                    include_timestamp=False,
+                )
+            )
         except Exception:
             log.exception("Failed to persist wifi debug artifact")
     return 65, duration_ms2 if "duration_ms2" in locals() else duration_ms, failure_msg, metrics, artifacts
@@ -329,6 +575,7 @@ def collect_wifi_scan_series(
             override_cmdline=override_cmdline,
             override_argv=override_argv,
             override_env=override_env,
+            artifact_label=_wifi_sample_label(idx, effective_points),
         )
         total_duration_ms += max(0, int(duration_ms))
         all_artifacts.extend(artifacts)
@@ -449,6 +696,90 @@ def collect_wifi_scan_series(
     return 0, max(total_duration_ms, wall_ms), message, aggregate, all_artifacts
 
 
+def collect_ble_advertise(
+    *,
+    timeout_ms: int,
+    execute_policy: bool,
+    store: RunStore,
+    run_id: str,
+    cmd_id: str,
+    override_env: dict[str, str],
+) -> tuple[int, int, str, dict[str, str], list[fleet_gateway_v2_pb2.ArtifactRef]]:
+    """Phase 3 BLE_SCAN branch: drive ``bluetoothctl`` to broadcast LE
+    advertisements with rotating ``adv_id`` payloads for the duration of
+    the measure window.
+
+    Reads ``BLE_ADV_UPDATE_INTERVAL_S`` and ``BLE_ADV_PAYLOAD_PREFIX`` from
+    ``override_env``. Stages the JSONL log in /tmp then imports it into the
+    run-artifact dir as ``ble-tx-log.json`` so it lands in the bundled
+    wireless-evidence tarball via the ``.json`` extension routing.
+    """
+    env = override_env or {}
+    metrics: dict[str, str] = {"ble_mode": "advertise"}
+    artifacts: list[fleet_gateway_v2_pb2.ArtifactRef] = []
+
+    if not execute_policy:
+        metrics["ble_advertise_status"] = "dry_run"
+        return 0, 100, "ble advertise dry run (execute_policy=false)", metrics, []
+
+    try:
+        update_interval_s = float(
+            env.get("BLE_ADV_UPDATE_INTERVAL_S") or _ble_advertise.DEFAULT_UPDATE_INTERVAL_S
+        )
+    except (TypeError, ValueError):
+        update_interval_s = _ble_advertise.DEFAULT_UPDATE_INTERVAL_S
+    payload_prefix = (
+        normalize(env.get("BLE_ADV_PAYLOAD_PREFIX")) or _ble_advertise.DEFAULT_PAYLOAD_PREFIX
+    )
+
+    duration_s = max(1.0, (timeout_ms / 1000.0) - 1.0)
+
+    stamp = int(time.time())
+    log_scratch = f"/tmp/ble-tx-log-{run_id}-{stamp}.json"
+
+    handles = _ble_advertise.start_advertise(
+        log_path=log_scratch,
+        duration_s=duration_s,
+        update_interval_s=update_interval_s,
+        payload_prefix=payload_prefix,
+    )
+    if handles is None:
+        metrics["ble_advertise_status"] = "start_failed"
+        return 1, 0, "ble advertise: could not start (bluetoothctl missing or refused)", metrics, []
+
+    # Block until the runner thread finishes (or measure window deadline expires).
+    # The runner loop honors its own deadline; we just join the thread.
+    handles.runner_thread.join()
+    stats = _ble_advertise.stop_advertise(handles)
+
+    if Path(log_scratch).exists():
+        try:
+            log_text = Path(log_scratch).read_text(encoding="utf-8")
+            artifacts.append(
+                store.write_text_artifact(
+                    run_id,
+                    "ble-tx-log",
+                    log_text,
+                    suffix=".json",
+                    include_timestamp=False,
+                )
+            )
+        except Exception:
+            log.exception("Failed to persist ble-tx-log.json")
+        try:
+            Path(log_scratch).unlink()
+        except Exception:
+            pass
+
+    metrics["ble_advertise_status"] = "ok"
+    metrics["ble_tx_count"] = str(stats["tx_count"])
+    metrics["ble_adv_count"] = str(stats["tx_count"])
+    metrics["ble_advertise_elapsed_s"] = f"{stats['elapsed_s']:.2f}"
+    metrics["ble_advertise_update_interval_s"] = f"{update_interval_s:.2f}"
+    duration_ms = int(stats["elapsed_s"] * 1000)
+    return 0, duration_ms, f"advertised {stats['tx_count']} adv_ids over {duration_ms}ms", metrics, artifacts
+
+
 def collect_ble_scan(
     timeout_ms: int,
     execute_policy: bool,
@@ -460,6 +791,20 @@ def collect_ble_scan(
     override_argv: list[str] | None = None,
     override_env: dict[str, str] | None = None,
 ) -> tuple[int, int, str, dict[str, str], list[fleet_gateway_v2_pb2.ArtifactRef]]:
+    # Phase 3: branch on BLE_SCAN_MODE before any default-path work so an
+    # `advertise` policy gets routed to the bluetoothctl-driven advertise
+    # branch without the legacy `bluetoothctl scan on` running first.
+    ble_mode = normalize((override_env or {}).get("BLE_SCAN_MODE")).lower()
+    if ble_mode == "advertise":
+        return collect_ble_advertise(
+            timeout_ms=timeout_ms,
+            execute_policy=execute_policy,
+            store=store,
+            run_id=run_id,
+            cmd_id=cmd_id,
+            override_env=override_env or {},
+        )
+
     metrics: dict[str, str] = {}
     artifacts: list[fleet_gateway_v2_pb2.ArtifactRef] = []
 
@@ -472,7 +817,14 @@ def collect_ble_scan(
             execute_policy=True,
         )
         try:
-            artifacts.append(store.write_text_artifact(run_id, f"ble-{cmd_id}-override", full))
+            artifacts.append(
+                store.write_text_artifact(
+                    run_id,
+                    "ble-command-override-output",
+                    full,
+                    include_timestamp=False,
+                )
+            )
         except Exception:
             log.exception("Failed to persist ble override output artifact")
 
@@ -499,12 +851,146 @@ def collect_ble_scan(
             [],
         )
 
-    # bluetoothctl is the most common unprivileged interface to BlueZ; it may still fail if bluetoothd isn't running.
-    exit_code, duration_ms, out = _run_capture_args(
-        ["bluetoothctl", "--timeout", str(max(1, int(timeout_ms / 1000))), "scan", "on"],
-        timeout_ms,
-    )
-    adv_count, avg_rssi = _parse_bluetoothctl_scan(out)
+    # Run bluetoothctl keeping stdin open for the full scan window.
+    # IMPORTANT: calling communicate() closes stdin immediately, which sends
+    # EOF to bluetoothctl causing it to exit in ~14 ms instead of scanning.
+    # Fix: keep stdin open, drain stdout via a background thread to prevent
+    # pipe-buffer deadlock, then send "scan off\nquit\n" after the window.
+    try:
+        from . import prom_exposition as _prom_ble
+    except Exception:
+        _prom_ble = None
+    if _prom_ble is not None and getattr(_prom_ble, "ble_scan_active", None) is not None:
+        try:
+            _prom_ble.ble_scan_active.set(1.0)
+        except Exception:
+            pass
+    import subprocess as _subprocess
+    import threading as _threading
+    _scan_timeout_s = max(1, int(timeout_ms / 1000))
+    _t0 = time.time()
+    _live_adv_count = 0
+    _live_rssi_sum = 0.0
+    _live_rssi_count = 0
+    _live_saw_name_event = False
+    _live_seen_addrs: set[str] = set()
+    try:
+        _btproc = _subprocess.Popen(
+            ["bluetoothctl"],
+            stdin=_subprocess.PIPE,
+            stdout=_subprocess.PIPE,
+            stderr=_subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        # Disable duplicate-advertisement filtering so BlueZ reports every
+        # [CHG] Name: event when the advertiser MAC is static. Without this,
+        # BlueZ suppresses repeated PDUs from the same address after first discovery.
+        _btproc.stdin.write("power on\nmenu scan\nduplicate-data off\nback\nscan on\n")
+        _btproc.stdin.flush()
+        # Drain stdout continuously so the pipe buffer never fills and deadlocks,
+        # and update Prometheus live as advertisements arrive.
+        _lines: list[str] = []
+
+        def _observe_ble_line(line: str) -> None:
+            nonlocal _live_adv_count, _live_rssi_sum, _live_rssi_count
+            nonlocal _live_saw_name_event, _live_seen_addrs
+            _name_match = re.search(
+                r"\[(?:NEW|CHG)\]\s+Device\s+[0-9A-F]{2}(?::[0-9A-F]{2}){5}\s+Name:",
+                line,
+                flags=re.IGNORECASE,
+            )
+            _addr_match = re.search(
+                r"\[(?:NEW|CHG)\]\s+Device\s+([0-9A-F]{2}(?::[0-9A-F]{2}){5})\b",
+                line,
+                flags=re.IGNORECASE,
+            )
+            _should_increment = False
+            if _name_match:
+                _live_saw_name_event = True
+                _should_increment = True
+            elif _addr_match and not _live_saw_name_event:
+                _addr = _addr_match.group(1).lower()
+                if _addr not in _live_seen_addrs:
+                    _live_seen_addrs.add(_addr)
+                    _should_increment = True
+            if _should_increment:
+                _live_adv_count += 1
+                if _prom_ble is not None and getattr(_prom_ble, "ble_rx_total", None) is not None:
+                    try:
+                        _prom_ble.ble_rx_total.inc()
+                    except Exception:
+                        pass
+            _rssi_match = re.search(r"\bRSSI:\s*(-?\d+(?:\.\d+)?)\b", line, flags=re.IGNORECASE)
+            if _rssi_match:
+                try:
+                    _live_rssi_sum += float(_rssi_match.group(1))
+                    _live_rssi_count += 1
+                except Exception:
+                    pass
+
+        def _drain() -> None:
+            assert _btproc.stdout is not None
+            for line in _btproc.stdout:
+                _lines.append(line)
+                _observe_ble_line(line)
+        _drain_thread = _threading.Thread(target=_drain, daemon=True)
+        _drain_thread.start()
+        # Wait for the scan window, checking for early exit every 0.5 s.
+        _waited = 0.0
+        while _waited < _scan_timeout_s:
+            if _btproc.poll() is not None:
+                break
+            time.sleep(min(0.5, _scan_timeout_s - _waited))
+            _waited += 0.5
+        # Graceful stop.
+        try:
+            _btproc.stdin.write("scan off\nquit\n")
+            _btproc.stdin.flush()
+            _btproc.stdin.close()
+        except Exception:
+            pass
+        try:
+            _btproc.wait(timeout=5)
+        except _subprocess.TimeoutExpired:
+            _btproc.kill()
+            try:
+                _btproc.wait(timeout=2)
+            except Exception:
+                pass
+        _drain_thread.join(timeout=3)
+        out = "".join(_lines)
+        exit_code = _btproc.returncode if _btproc.returncode is not None else 0
+        if "discovering: yes" not in out.lower() and "discovery started" not in out.lower():
+            log.warning(
+                "ble_scan: BLE discovery may not have started — 'Discovery started' missing from "
+                "bluetoothctl output; check hci0 adapter state. output_head=%r",
+                out[:300],
+            )
+    except FileNotFoundError:
+        out = "missing: bluetoothctl"
+        exit_code = 127
+    except Exception as _ble_exc:
+        out = str(_ble_exc)
+        exit_code = 1
+    duration_ms = int((time.time() - _t0) * 1000)
+    # Mark scan as finished in Prometheus.
+    if _prom_ble is not None and getattr(_prom_ble, "ble_scan_active", None) is not None:
+        try:
+            _prom_ble.ble_scan_active.set(0.0)
+        except Exception:
+            pass
+    parsed_adv_count, parsed_avg_rssi = _parse_bluetoothctl_scan(out)
+    adv_count = max(_live_adv_count, parsed_adv_count)
+    if _live_adv_count == 0 and parsed_adv_count > 0:
+        if _prom_ble is not None and getattr(_prom_ble, "ble_rx_total", None) is not None:
+            try:
+                _prom_ble.ble_rx_total.inc(parsed_adv_count)
+            except Exception:
+                pass
+    avg_rssi = (_live_rssi_sum / _live_rssi_count) if _live_rssi_count > 0 else parsed_avg_rssi
     metrics["ble_adv_count"] = str(max(0, int(adv_count)))
     if avg_rssi is not None:
         metrics["ble_avg_rssi_dbm"] = f"{avg_rssi:.2f}"
@@ -513,7 +999,15 @@ def collect_ble_scan(
     metrics.update(_collect_device_status_metrics())
     msg = f"bluetoothctl scan {'ok' if exit_code in (0,124) else 'failed'}: adv_count={adv_count}"
     try:
-        artifacts.append(store.write_text_artifact(run_id, f"ble-{cmd_id}-scan", out))
+        artifacts.append(
+            store.write_text_artifact(
+                run_id,
+                "ble-discovery-raw-bluetoothctl-scan",
+                out,
+                suffix=".log",
+                include_timestamp=False,
+            )
+        )
     except Exception:
         log.exception("Failed to persist ble scan artifact")
     # Do not fail the run on BLE unavailability by default (many devices lack BLE).
@@ -580,8 +1074,9 @@ def collect_csi_capture(
             artifacts.append(
                 store.write_text_artifact(
                     run_id,
-                    f"csi-{cmd_id}-disabled",
+                    "csi-status-disabled",
                     "CSI capture disabled by configuration (DISABLE_CSI_CAPTURE=true).\n",
+                    include_timestamp=False,
                 )
             )
         except Exception:
@@ -850,7 +1345,7 @@ def collect_csi_capture(
                     store.import_file_artifact(
                         run_id,
                         output_file,
-                        artifact_name=f"csi-{cmd_id}-{idx}-{output_file.name}",
+                        artifact_name=f"csi-capture-raw-data-file-{idx:03d}-{output_file.name}",
                     )
                 )
                 imported_files += 1
@@ -938,7 +1433,15 @@ def collect_csi_capture(
             else:
                 artifact_payload = summary + "\n\n" + body + "\n"
         try:
-            artifacts.append(store.write_text_artifact(run_id, f"csi-{cmd_id}-output", artifact_payload))
+            artifacts.append(
+                store.write_text_artifact(
+                    run_id,
+                    "csi-collector-output",
+                    artifact_payload,
+                    suffix=".log",
+                    include_timestamp=False,
+                )
+            )
         except Exception:
             log.exception("Failed to persist csi output artifact")
         return int(exit_code), duration_ms, msg, metrics, artifacts
@@ -948,9 +1451,10 @@ def collect_csi_capture(
         artifacts.append(
             store.write_text_artifact(
                 run_id,
-                f"csi-{cmd_id}-note",
+                "csi-status-not-configured",
                 "CSI capture not configured on this agent.\n"
                 "Set command/env CSI_COLLECTOR_CMD (and optional CSI_OUTPUT_PATH or CSI_OUTPUT_GLOB).\n",
+                include_timestamp=False,
             )
         )
     except Exception:

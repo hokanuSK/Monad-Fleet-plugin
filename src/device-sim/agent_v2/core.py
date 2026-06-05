@@ -74,6 +74,13 @@ def ts_to_iso(ts: Timestamp) -> str:
     return ts_to_datetime(ts).isoformat().replace("+00:00", "Z")
 
 
+def parse_iso(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(normalize(value).replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+
+
 def iso_to_ts(value: str) -> Timestamp:
     ts = Timestamp()
     dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -344,22 +351,32 @@ def _upload_window_send_allowed(
         return True, "window_not_configured"
 
     if end_dt <= start_dt:
-        return False, "window_invalid"
+        if required:
+            return False, "window_invalid"
+        if now_dt < start_dt:
+            return False, "before_upload_window"
+        return True, "window_invalid_not_required"
 
     if now_dt < start_dt:
         return False, "before_upload_window"
     if now_dt > end_dt:
-        return False, "after_upload_window"
+        if required:
+            return False, "after_upload_window"
+        return True, "after_upload_window_not_required"
 
     slot_start, slot_end = _upload_slot_window_bounds(cfg, agent_id)
     if slot_start is None or slot_end is None:
         return True, "window_active_no_slot"
     if slot_end <= slot_start:
-        return False, "slot_invalid"
+        if required:
+            return False, "slot_invalid"
+        return True, "slot_invalid_not_required"
     if now_dt < slot_start:
         return False, "before_device_slot"
     if now_dt > slot_end:
-        return False, "after_device_slot"
+        if required:
+            return False, "after_device_slot"
+        return True, "after_device_slot_not_required"
     return True, "slot_active"
 
 
@@ -1503,10 +1520,56 @@ def _collect_iface_counters(iface: str) -> dict[str, str]:
     return metrics
 
 
+def _read_pi_pmic_rails(rails: tuple[str, ...] = ("3V3_SYS",)) -> dict[str, dict[str, float]]:
+    """Best-effort read of named Pi 5 PMIC ADC rails via `vcgencmd pmic_read_adc`.
+
+    Returns a dict like ``{"3V3_SYS": {"current_a": 0.087, "voltage_v": 3.302}}``
+    for each rail in ``rails`` that vcgencmd reports. Rails not present in the
+    output (or older hardware that lacks ``pmic_read_adc``) are simply omitted;
+    callers should treat empty values as "not available" rather than zero.
+
+    The expected output format from vcgencmd looks like::
+
+        3V3_SYS_A current(1)=0.08685777A
+        3V3_SYS_V volt(9)=3.30260900V
+    """
+    out: dict[str, dict[str, float]] = {}
+    vcgencmd = resolve_executable("vcgencmd", ["/usr/bin/vcgencmd"])
+    if not vcgencmd:
+        return out
+    rc, _, raw = _run_capture_args([vcgencmd, "pmic_read_adc"], 3000)
+    if rc != 0 or not raw:
+        return out
+    wanted = {r.upper() for r in rails}
+    for line in raw.splitlines():
+        m = re.search(
+            r"^\s*([A-Z0-9_]+?)_(A|V)\s+(?:current|volt)\(\d+\)=([\d.]+)\s*[AV]\s*$",
+            line,
+        )
+        if not m:
+            continue
+        rail = m.group(1).upper()
+        if rail not in wanted:
+            continue
+        kind = m.group(2)
+        try:
+            val = float(m.group(3))
+        except ValueError:
+            continue
+        out.setdefault(rail, {})[("current_a" if kind == "A" else "voltage_v")] = val
+    return out
+
+
 def _collect_device_status_metrics() -> dict[str, str]:
     metrics: dict[str, str] = {}
     if not parse_bool(os.environ.get("ENABLE_DEVICE_STATUS_METRICS"), True):
         return metrics
+
+    # Lazy import so a missing prometheus_client doesn't break this function.
+    try:
+        from . import prom_exposition as _prom
+    except Exception:
+        _prom = None  # type: ignore[assignment]
 
     try:
         load1, load5, load15 = os.getloadavg()
@@ -1557,7 +1620,13 @@ def _collect_device_status_metrics() -> dict[str, str]:
         temp_mc = _read_int_file(temp_path)
         if temp_mc is None:
             continue
-        metrics["device_cpu_temp_c"] = f"{(float(temp_mc) / 1000.0):.2f}"
+        temp_c = float(temp_mc) / 1000.0
+        metrics["device_cpu_temp_c"] = f"{temp_c:.2f}"
+        if _prom is not None and getattr(_prom, "cpu_temp_celsius", None) is not None:
+            try:
+                _prom.cpu_temp_celsius.set(temp_c)
+            except Exception:
+                pass
         break
 
     vcgencmd = resolve_executable("vcgencmd", ["/usr/bin/vcgencmd"])
@@ -1570,8 +1639,135 @@ def _collect_device_status_metrics() -> dict[str, str]:
                 metrics["device_throttled_flags"] = str(flags)
                 metrics["device_throttled_now"] = "1" if (flags & 0x1) else "0"
                 metrics["device_under_voltage_now"] = "1" if (flags & 0x1) else "0"
+                if _prom is not None:
+                    try:
+                        if getattr(_prom, "power_throttled_state", None) is not None:
+                            _prom.power_throttled_state.set(flags)
+                        if getattr(_prom, "power_under_voltage", None) is not None:
+                            _prom.power_under_voltage.set(1.0 if (flags & 0x1) else 0.0)
+                    except Exception:
+                        pass
+
+        exit_code, _, out = _run_capture_args([vcgencmd, "measure_volts", "core"], 2000)
+        if exit_code == 0:
+            mm = re.search(r"volt=([\d.]+)", out)
+            if mm:
+                volts = float(mm.group(1))
+                metrics["device_core_volts"] = f"{volts:.4f}"
+                if _prom is not None and getattr(_prom, "power_voltage_volts", None) is not None:
+                    try:
+                        _prom.power_voltage_volts.set(volts)
+                    except Exception:
+                        pass
+
+    _PMIC_RAILS = (
+        ("VDD_CORE",  "vdd_core"),
+        ("EXT5V",     "ext5v"),
+        ("3V7_WL_SW", "3v7_wl_sw"),
+        ("3V3_SYS",   "3v3_sys"),
+        ("1V8_SYS",   "1v8_sys"),
+        ("1V1_SYS",   "1v1_sys"),
+        ("0V8_SW",    "0v8_sw"),
+        ("HDMI",      "hdmi"),
+    )
+    pmic = _read_pi_pmic_rails(tuple(r for r, _ in _PMIC_RAILS))
+    for rail_name, slug in _PMIC_RAILS:
+        rail_data = pmic.get(rail_name)
+        if rail_data is None:
+            continue
+        for kind, suffix, gauge_suffix in (
+            ("current_a", "current_a", "current_amps"),
+            ("voltage_v", "voltage_v", "voltage_volts"),
+        ):
+            if kind not in rail_data:
+                continue
+            val = rail_data[kind]
+            metrics[f"device_pmic_{slug}_{suffix}"] = f"{val:.4f}"
+            gauge_attr = f"pmic_{slug}_{gauge_suffix}"
+            if _prom is not None and getattr(_prom, gauge_attr, None) is not None:
+                try:
+                    getattr(_prom, gauge_attr).set(val)
+                except Exception:
+                    pass
 
     return metrics
+
+
+def _collect_hardware_inventory() -> dict[str, Any]:
+    """Best-effort enumeration of radios + I2C devices for run-summary.json.
+
+    Each key is always present; the value is empty when the underlying tool
+    is missing or returns nothing. This is observation only -- nothing in the
+    runtime gates on these values.
+    """
+    inv: dict[str, Any] = {
+        "kernel": "",
+        "model": "",
+        "wifi_interfaces": [],
+        "bluetooth_adapters": [],
+        "i2c_devices_bus1": [],
+    }
+
+    iw_bin = resolve_executable("iw", ["/usr/sbin/iw", "/sbin/iw"])
+    if iw_bin:
+        rc, _, out = _run_capture_args([iw_bin, "dev"], 3000)
+        if rc == 0 and out:
+            interfaces: list[dict[str, str]] = []
+            current: dict[str, str] | None = None
+            for line in out.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("Interface "):
+                    name = stripped[len("Interface "):].strip()
+                    if name:
+                        current = {"name": name}
+                        interfaces.append(current)
+                elif current is not None and stripped.startswith("type "):
+                    current["type"] = stripped[len("type "):].strip()
+                elif current is not None and stripped.startswith("addr "):
+                    current["addr"] = stripped[len("addr "):].strip()
+            inv["wifi_interfaces"] = interfaces
+
+    btctl = resolve_executable("bluetoothctl", ["/usr/bin/bluetoothctl"])
+    if btctl:
+        rc, _, out = _run_capture_args([btctl, "list"], 3000)
+        if rc == 0 and out:
+            adapters: list[dict[str, str]] = []
+            for line in out.splitlines():
+                m = re.match(
+                    r"^Controller\s+([0-9A-Fa-f:]{17})\s+(.+?)(?:\s+\[.*\])?\s*$",
+                    line.strip(),
+                )
+                if m:
+                    adapters.append({"address": m.group(1), "name": m.group(2)})
+            inv["bluetooth_adapters"] = adapters
+
+    i2cdetect = resolve_executable("i2cdetect", ["/usr/sbin/i2cdetect", "/sbin/i2cdetect"])
+    if i2cdetect:
+        rc, _, out = _run_capture_args([i2cdetect, "-y", "1"], 3000)
+        if rc == 0 and out:
+            addrs: list[str] = []
+            for line in out.splitlines():
+                m = re.match(r"^([0-9a-fA-F]{2}):\s*(.*)$", line)
+                if not m:
+                    continue
+                base = int(m.group(1), 16)
+                fields = m.group(2).strip().split()
+                for i, field in enumerate(fields):
+                    if re.match(r"^[0-9a-fA-F]{2}$", field):
+                        addrs.append(f"0x{(base + i):02x}")
+            inv["i2c_devices_bus1"] = addrs
+
+    rc, _, out = _run_capture_args(["uname", "-a"], 1500)
+    if rc == 0 and out:
+        first = out.strip().splitlines()[:1]
+        if first:
+            inv["kernel"] = first[0]
+
+    model = _read_text_file("/sys/firmware/devicetree/base/model")
+    if model:
+        inv["model"] = model.strip().rstrip("\x00")
+
+    return inv
 
 
 def _collect_wifi_observability_metrics(iface: str, timeout_ms: int, iw_bin: str | None = None) -> dict[str, str]:
@@ -1606,8 +1802,18 @@ def _collect_wifi_observability_metrics(iface: str, timeout_ms: int, iw_bin: str
 
 
 def _parse_bluetoothctl_scan(text: str) -> tuple[int, float | None]:
-    # Count unique device addresses observed in output; average RSSI when available.
-    addrs = set(re.findall(r"\b([0-9A-F]{2}(?::[0-9A-F]{2}){5})\b", text, flags=re.IGNORECASE))
+    # Count [NEW] and [CHG] Name: events — each is a new adv_id payload from the advertiser.
+    # [NEW] fires on first discovery of a MAC; [CHG] fires on subsequent name changes.
+    # Both must be counted when DuplicateData filtering is off.
+    # Fall back to unique-address count when no name lines are present.
+    name_events = re.findall(
+        r"\[(?:NEW|CHG)\]\s+Device\s+[0-9A-F]{2}(?::[0-9A-F]{2}){5}\s+Name:",
+        text,
+        flags=re.IGNORECASE,
+    )
+    count = len(name_events) if name_events else len(
+        set(re.findall(r"\b([0-9A-F]{2}(?::[0-9A-F]{2}){5})\b", text, flags=re.IGNORECASE))
+    )
     rssis: list[float] = []
     for m in re.finditer(r"\bRSSI:\s*(-?\d+(?:\.\d+)?)\b", text, flags=re.IGNORECASE):
         try:
@@ -1615,7 +1821,7 @@ def _parse_bluetoothctl_scan(text: str) -> tuple[int, float | None]:
         except Exception:
             continue
     avg_rssi = (sum(rssis) / len(rssis)) if rssis else None
-    return len(addrs), avg_rssi
+    return count, avg_rssi
 
 
 def event_type_for_exit(exit_code: int) -> int:
@@ -1747,6 +1953,7 @@ class RunStore:
         self.pending_dir = root / "pending"
         self.sent_dir = root / "sent"
         self.failed_dir = root / "failed"
+        self.execution_index_path = root / "execution-index.json"
         self.sent_retention_days = max(1, int(sent_retention_days))
         self.pending_dir.mkdir(parents=True, exist_ok=True)
         self.sent_dir.mkdir(parents=True, exist_ok=True)
@@ -1766,6 +1973,72 @@ class RunStore:
 
     def _write_json_atomic(self, path: Path, payload: dict[str, Any]) -> None:
         self._write_text_atomic(path, json.dumps(payload, sort_keys=True, indent=2))
+
+    def _load_execution_index(self) -> dict[str, Any]:
+        if not self.execution_index_path.exists():
+            return {}
+        try:
+            payload = json.loads(self.execution_index_path.read_text(encoding="utf-8"))
+        except Exception:
+            log.exception("Failed to read execution index")
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _write_execution_index(self, payload: dict[str, Any]) -> None:
+        self._write_json_atomic(self.execution_index_path, payload)
+
+    def get_execution_record(self, execution_key: str) -> dict[str, Any]:
+        key = normalize(execution_key)
+        if not key:
+            return {}
+        payload = self._load_execution_index()
+        row = payload.get(key)
+        return row if isinstance(row, dict) else {}
+
+    def mark_execution_state(
+        self,
+        execution_key: str,
+        *,
+        state: str,
+        run_id: str = "",
+        policy_id: str = "",
+        experiment_id: str = "",
+        measurement_from: str = "",
+        measurement_to: str = "",
+    ) -> dict[str, Any]:
+        key = normalize(execution_key)
+        if not key:
+            return {}
+        payload = self._load_execution_index()
+        current = payload.get(key)
+        entry = dict(current) if isinstance(current, dict) else {"execution_key": key}
+        now_iso = now_utc().isoformat().replace("+00:00", "Z")
+        entry["execution_key"] = key
+        entry["state"] = normalize(state) or "unknown"
+        entry["updated_at"] = now_iso
+        if run_id:
+            entry["run_id"] = normalize(run_id)
+        if policy_id:
+            entry["policy_id"] = normalize(policy_id)
+        if experiment_id:
+            entry["experiment_id"] = normalize(experiment_id)
+        if measurement_from:
+            entry["measurement_from"] = normalize(measurement_from)
+        if measurement_to:
+            entry["measurement_to"] = normalize(measurement_to)
+        if state == "in_progress":
+            entry["last_started_at"] = now_iso
+            entry["started_runs"] = max(0, int(entry.get("started_runs", 0) or 0)) + 1
+        elif state in {"completed", "reported"}:
+            entry["last_completed_at"] = now_iso
+            if state == "completed":
+                entry["completed_runs"] = max(0, int(entry.get("completed_runs", 0) or 0)) + 1
+        elif state == "failed":
+            entry["last_failed_at"] = now_iso
+            entry["failed_runs"] = max(0, int(entry.get("failed_runs", 0) or 0)) + 1
+        payload[key] = entry
+        self._write_execution_index(payload)
+        return entry
 
     def start_run(self, run_id: str, context: dict[str, Any]) -> Path:
         run_dir = self._run_dir(run_id)
@@ -1801,8 +2074,12 @@ class RunStore:
         artifacts_dir = self._run_dir(run_id) / "artifacts"
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         safe_cmd = sanitize_name(cmd_id, "command")
-        file_name = f"{safe_cmd}-{int(time.time() * 1000)}.log"
+        stem = f"command-{safe_cmd}-execution-status"
+        file_name = f"{stem}.log"
         path = artifacts_dir / file_name
+        if path.exists():
+            file_name = f"{stem}-{int(time.time() * 1000)}.log"
+            path = artifacts_dir / file_name
         self._write_text_atomic(
             path,
             "\n".join(
@@ -1826,12 +2103,26 @@ class RunStore:
         self._write_text_atomic(path, json.dumps(payload, indent=2, sort_keys=True))
         return artifact_from_path("run-summary.json", path, run_id)
 
-    def write_text_artifact(self, run_id: str, prefix: str, content: str, *, suffix: str = ".txt") -> fleet_gateway_v2_pb2.ArtifactRef:
+    def write_text_artifact(
+        self,
+        run_id: str,
+        prefix: str,
+        content: str,
+        *,
+        suffix: str = ".txt",
+        include_timestamp: bool = True,
+    ) -> fleet_gateway_v2_pb2.ArtifactRef:
         artifacts_dir = self._run_dir(run_id) / "artifacts"
         artifacts_dir.mkdir(parents=True, exist_ok=True)
-        stamp = int(time.time() * 1000)
-        file_name = f"{sanitize_name(prefix, 'artifact')}-{stamp}{suffix}"
+        stem = sanitize_name(prefix, "artifact")
+        if include_timestamp:
+            file_name = f"{stem}-{int(time.time() * 1000)}{suffix}"
+        else:
+            file_name = f"{stem}{suffix}"
         path = artifacts_dir / file_name
+        if path.exists():
+            file_name = f"{stem}-{int(time.time() * 1000)}{suffix}"
+            path = artifacts_dir / file_name
         self._write_text_atomic(path, content or "")
         return artifact_from_path(file_name, path, run_id)
 
@@ -1887,10 +2178,20 @@ class RunStore:
     def persist_report(self, report: fleet_gateway_v2_pb2.Report) -> None:
         run_dir = self._run_dir(report.run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
+        context_path = run_dir / "context.json"
+        current_context: dict[str, Any] = {}
+        if context_path.exists():
+            try:
+                loaded = json.loads(context_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    current_context = loaded
+            except Exception:
+                pass
         self._write_json_atomic(run_dir / "report.json", report_to_dict(report))
         self._write_json_atomic(
-            run_dir / "context.json",
+            context_path,
             {
+                **current_context,
                 "state": "measured",
                 "updated_at": now_utc().isoformat().replace("+00:00", "Z"),
                 "run_id": normalize(report.run_id),
@@ -1898,6 +2199,15 @@ class RunStore:
                 "experiment_id": normalize(report.experiment_id),
             },
         )
+        execution_key = normalize(current_context.get("execution_key"))
+        if execution_key:
+            self.mark_execution_state(
+                execution_key,
+                state="completed",
+                run_id=normalize(report.run_id),
+                policy_id=normalize(report.policy_id),
+                experiment_id=normalize(report.experiment_id),
+            )
 
     def pending_run_ids(self) -> list[str]:
         runs: list[tuple[float, str]] = []
@@ -1978,6 +2288,15 @@ class RunStore:
                 target / "failure-reason.txt",
                 f"{now_utc().isoformat().replace('+00:00', 'Z')} {normalize(reason)}\n{detail}\n",
             )
+        execution_key = normalize(payload.get("execution_key"))
+        if execution_key:
+            self.mark_execution_state(
+                execution_key,
+                state="failed",
+                run_id=normalize(run_id),
+                policy_id=normalize(payload.get("policy_id")),
+                experiment_id=normalize(payload.get("experiment_id")),
+            )
         log.warning("Quarantined pending run run_id=%s reason=%s", run_id, normalize(reason))
 
     def mark_sent(self, run_id: str) -> None:
@@ -2004,6 +2323,15 @@ class RunStore:
         payload["state"] = "reported"
         payload["updated_at"] = now_utc().isoformat().replace("+00:00", "Z")
         self._write_json_atomic(context_path, payload)
+        execution_key = normalize(payload.get("execution_key"))
+        if execution_key:
+            self.mark_execution_state(
+                execution_key,
+                state="reported",
+                run_id=normalize(run_id),
+                policy_id=normalize(payload.get("policy_id")),
+                experiment_id=normalize(payload.get("experiment_id")),
+            )
 
     def prune_sent(self) -> None:
         cutoff = now_utc() - timedelta(days=self.sent_retention_days)

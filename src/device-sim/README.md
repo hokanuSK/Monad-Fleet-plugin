@@ -16,7 +16,7 @@ Runtime client for Fleet manager integration.
   - emits command runtime status via `ReportCommandStatus`
 - MAINTENANCE:
   - replays pending runs from local spool
-  - uploads metrics/logs and artifacts
+  - uploads metrics through the metrics sink and uploads artifacts for logs/evidence
   - publishes final report via `PublishReport`
 
 ## `NOT_MODIFIED` policy behavior
@@ -33,7 +33,7 @@ Runtime client for Fleet manager integration.
   - start -> `COMMAND_STATUS_STAGE_STARTED`
   - end success -> `COMMAND_STATUS_STAGE_FINISHED`
   - end failure -> `COMMAND_STATUS_STAGE_FAILED`
-- maintenance metrics/logs upload status: `ReportUploadStatus`
+- maintenance metrics upload status: `ReportUploadStatus`
 - maintenance artifact upload status: `ReportArtifactUploadStatus`
 
 When connected to an older server that does not implement these RPCs, `UNIMPLEMENTED` is tolerated and execution continues.
@@ -52,3 +52,4 @@ Default root: `DATA_ROOT` (default `./data`)
 - `MAX_SYNC_CYCLES`
 - `EXECUTE_POLICY`
 - `DATA_ROOT`, `SENT_RETENTION_DAYS`
+- `DEFAULT_METRICS_SINKS` (`fleet_http` in compose/systemd defaults; sends numeric command telemetry to Fleet `/ingest/v1/metrics`)

@@ -1,12 +1,24 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 RUNTIME_COMMAND_TYPES = {"SHELL", "CAPTURE_CSI", "BLE_SCAN", "WIFI_SCAN"}
 DESIGN_COMMAND_TYPES = {"SYNC", "OBSERVE"}
+DEFAULT_5GHZ_CHANNELS: tuple[int, ...] = (
+    36, 40, 44, 48,
+    52, 56, 60, 64,
+    100, 104, 108, 112,
+    116, 120, 124, 128,
+    132, 136, 140,
+    149, 153, 157, 161, 165,
+)
+ALLOWED_5GHZ_CHANNELS = set(DEFAULT_5GHZ_CHANNELS)
 
 
 def _deep_copy_json(value: Any) -> Any:
@@ -79,6 +91,14 @@ def _ensure_reporting(policy: dict[str, Any]) -> dict[str, Any]:
     return reporting
 
 
+def _ensure_execution(policy: dict[str, Any]) -> dict[str, Any]:
+    execution = policy.get("execution")
+    if not isinstance(execution, dict):
+        execution = {}
+        policy["execution"] = execution
+    return execution
+
+
 def _window_has_times(window: Any) -> bool:
     if not isinstance(window, dict):
         return False
@@ -101,10 +121,35 @@ def _copy_window(window: dict[str, Any]) -> dict[str, str]:
     return out
 
 
+def _merge_selector_values(current: Any, incoming: Any) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for source in (current, incoming):
+        if not isinstance(source, list):
+            continue
+        for raw_value in source:
+            value = _normalize(raw_value)
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            out.append(value)
+    return out
+
+
+def _merge_target_selector(policy: dict[str, Any], selector: dict[str, Any]) -> None:
+    existing = policy.get("target_selector")
+    merged = _deep_copy_json(existing) if isinstance(existing, dict) else {}
+    for key in ("device_ids", "device_types", "locations", "agent_ids"):
+        values = _merge_selector_values(merged.get(key), selector.get(key))
+        if values:
+            merged[key] = values
+    policy["target_selector"] = merged
+
+
 def _apply_sync_windows(policy: dict[str, Any], sync_cmd: dict[str, Any]) -> None:
     selector = sync_cmd.get("target_selector")
     if isinstance(selector, dict):
-        policy["target_selector"] = _deep_copy_json(selector)
+        _merge_target_selector(policy, selector)
 
     validity_window = sync_cmd.get("validity_policy_window")
     if _window_has_times(validity_window):
@@ -207,6 +252,31 @@ def _apply_sync_reporting(policy: dict[str, Any], sync_env: dict[str, str]) -> d
         if slotting:
             reporting["slotting"] = slotting
 
+    execution = _ensure_execution(policy)
+    execution_mode = _normalize(execution.get("mode")).lower()
+    if not execution_mode:
+        execution_mode = _normalize(sync_env.get("SYNC_EXECUTION_MODE") or sync_env.get("EXECUTION_MODE")).lower()
+    if not execution_mode:
+        execution_mode = "once"
+    if execution_mode not in {"once", "recurring"}:
+        execution_mode = "once"
+    execution["mode"] = execution_mode
+    derived_env["EXECUTION_MODE"] = execution_mode
+
+    interval_s = _parse_int(execution.get("interval_s"))
+    if interval_s is None:
+        interval_s = _parse_int(sync_env.get("SYNC_EXECUTION_INTERVAL_S") or sync_env.get("EXECUTION_INTERVAL_S"))
+    if execution_mode == "recurring" and interval_s is not None and interval_s > 0:
+        execution["interval_s"] = max(1, interval_s)
+        derived_env["EXECUTION_INTERVAL_S"] = str(max(1, interval_s))
+
+    max_runs = _parse_int(execution.get("max_runs"))
+    if max_runs is None:
+        max_runs = _parse_int(sync_env.get("SYNC_EXECUTION_MAX_RUNS") or sync_env.get("EXECUTION_MAX_RUNS"))
+    if max_runs is not None and max_runs >= 0:
+        execution["max_runs"] = max(0, max_runs)
+        derived_env["EXECUTION_MAX_RUNS"] = str(max(0, max_runs))
+
     return derived_env
 
 
@@ -225,6 +295,92 @@ def _iter_group_commands(group: dict[str, Any]) -> list[dict[str, Any]]:
         rows.sort(key=lambda row: int(row.get("order", 999999)))
         return rows
     return []
+
+
+def _parse_channel_csv(value: Any) -> list[int]:
+    text = _normalize(value)
+    if not text:
+        return []
+    out: list[int] = []
+    for part in text.split(","):
+        token = _normalize(part)
+        if not token:
+            continue
+        try:
+            out.append(int(token))
+        except Exception:
+            continue
+    return out
+
+
+def _enforce_wifi_measurement_policy(policy: dict[str, Any]) -> None:
+    groups = policy.get("command_groups")
+    if not isinstance(groups, list):
+        return
+
+    default_channels_csv = ",".join(str(ch) for ch in DEFAULT_5GHZ_CHANNELS)
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        commands = group.get("commands")
+        if not isinstance(commands, list):
+            continue
+        for cmd in commands:
+            if not isinstance(cmd, dict):
+                continue
+            cmd_type = _normalize(cmd.get("type") or cmd.get("command_type")).upper()
+            if cmd_type != "WIFI_SCAN":
+                continue
+            env = cmd.get("env")
+            if not isinstance(env, dict):
+                env = {}
+                cmd["env"] = env
+            scan_mode = _normalize(env.get("WIFI_SCAN_MODE")).lower()
+            if scan_mode != "passive_monitor":
+                continue
+
+            if not _normalize(env.get("WIFI_SCAN_CHANNEL_DWELL_S")):
+                env["WIFI_SCAN_CHANNEL_DWELL_S"] = "0.5"
+            if not _normalize(env.get("WIFI_SCAN_USE_MEASURE_WINDOW")):
+                env["WIFI_SCAN_USE_MEASURE_WINDOW"] = "true"
+
+            channels = _parse_channel_csv(env.get("WIFI_SCAN_CHANNELS"))
+            if not channels:
+                env["WIFI_SCAN_CHANNELS"] = default_channels_csv
+                channels = list(DEFAULT_5GHZ_CHANNELS)
+
+            invalid = [str(ch) for ch in channels if ch not in ALLOWED_5GHZ_CHANNELS]
+            if invalid:
+                cmd_id = _normalize(cmd.get("id") or cmd.get("name")) or "wifi-scan"
+                log.warning(
+                    "%s: passive_monitor mode has non-5GHz channels (%s); overriding to default 5GHz channel list",
+                    cmd_id, ",".join(invalid),
+                )
+                env["WIFI_SCAN_CHANNELS"] = default_channels_csv
+
+
+def _enforce_ble_measurement_policy(policy: dict[str, Any]) -> None:
+    groups = policy.get("command_groups")
+    if not isinstance(groups, list):
+        return
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        commands = group.get("commands")
+        if not isinstance(commands, list):
+            continue
+        for cmd in commands:
+            if not isinstance(cmd, dict):
+                continue
+            cmd_type = _normalize(cmd.get("type") or cmd.get("command_type")).upper()
+            if cmd_type != "BLE_SCAN":
+                continue
+            env = cmd.get("env")
+            if not isinstance(env, dict):
+                env = {}
+                cmd["env"] = env
+            if not _normalize(env.get("BLE_SCAN_USE_MEASURE_WINDOW")):
+                env["BLE_SCAN_USE_MEASURE_WINDOW"] = "true"
 
 
 def _promote_shell_env_cmdline(cmd: dict[str, Any], cmd_env: dict[str, str]) -> dict[str, str]:
@@ -263,6 +419,8 @@ def runtime_policy_from_design(policy: dict[str, Any]) -> dict[str, Any]:
         return {}
 
     result = _deep_copy_json(policy)
+    _enforce_wifi_measurement_policy(result)
+    _enforce_ble_measurement_policy(result)
     if not policy_uses_design_commands(result):
         return result
 
@@ -308,4 +466,6 @@ def runtime_policy_from_design(policy: dict[str, Any]) -> dict[str, Any]:
             transformed_groups.append(group)
 
     result["command_groups"] = transformed_groups
+    _enforce_wifi_measurement_policy(result)
+    _enforce_ble_measurement_policy(result)
     return result

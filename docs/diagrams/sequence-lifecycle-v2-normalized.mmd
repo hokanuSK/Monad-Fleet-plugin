@@ -20,7 +20,7 @@ sequenceDiagram
 
     rect rgb(232,245,233)
         Note over Agent,Mimir: PREPARE
-        Agent->>Fleet: GetPolicy(agent_id, last_policy_id)
+        Agent->>Fleet: gRPC GetPolicy(agent_id, last_policy_id)
         Fleet->>ELab: GET /items?search=agent_id
         alt resource item missing
             Fleet->>ELab: POST /items (create device resource)
@@ -31,14 +31,14 @@ sequenceDiagram
         Fleet->>Fleet: Select experiment_id + policy_id
 
         alt status = OK
-            Fleet-->>Agent: GetPolicyResponse(OK + policy_json from selected experiment metadata)
+            Fleet-->>Agent: gRPC GetPolicyResponse(OK + policy_json from selected experiment metadata)
             Fleet->>ELab: PATCH /items/{id} metadata(state=POLICY_SENT, policy_id)
         else status = NOT_MODIFIED
             Fleet->>ELab: PATCH /items/{id} metadata(state=POLICY_CACHED)
-            Fleet-->>Agent: GetPolicyResponse(NOT_MODIFIED)
+            Fleet-->>Agent: gRPC GetPolicyResponse(NOT_MODIFIED)
         else status = NO_WORK
             Fleet->>ELab: PATCH /items/{id} metadata(state=IDLE)
-            Fleet-->>Agent: GetPolicyResponse(NO_WORK)
+            Fleet-->>Agent: gRPC GetPolicyResponse(NO_WORK)
         end
     end
 
@@ -50,14 +50,14 @@ sequenceDiagram
             alt command = SYNC
                 rect rgb(255,228,230)
                     CmdExec->>RunStore: Stage maintenance window + slot/jitter policy
-                    Agent->>Fleet: ReportCommandStatus(COMMAND_STARTED/FINISHED, command_type=SYNC)
+                    Agent->>Fleet: gRPC ReportCommandStatus(COMMAND_STARTED/FINISHED, command_type=SYNC)
                     Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>SYNC window/slot policy
                 end
             else command = OBSERVE
                 rect rgb(254,249,195)
                     CmdExec->>CmdExec: Apply observability sinks + remote_write settings
                     CmdExec->>Mimir: Probe Mimir metrics path
-                    Agent->>Fleet: ReportCommandStatus(<br/>COMMAND_STARTED/FINISHED/FAILED,<br/>command_type=OBSERVE)
+                    Agent->>Fleet: gRPC ReportCommandStatus(<br/>COMMAND_STARTED/FINISHED/FAILED,<br/>command_type=OBSERVE)
                     Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>command state + last exit
                 end
             else command = WIFI_SCAN
@@ -65,7 +65,7 @@ sequenceDiagram
                     CmdExec->>CmdExec: Run WIFI_SCAN with RF setup env
                     CmdExec->>RunStore: Persist WiFi outputs + RF context metrics
                     CmdExec-)Mimir: Emit numeric observability metrics
-                    Agent->>Fleet: ReportCommandStatus(<br/>COMMAND_STARTED/FINISHED/FAILED,<br/>command_type=WIFI_SCAN, measure_type=WIFI)
+                    Agent->>Fleet: gRPC ReportCommandStatus(<br/>COMMAND_STARTED/FINISHED/FAILED,<br/>command_type=WIFI_SCAN, measure_type=WIFI)
                     Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>WIFI command state + RF context
                 end
             else command = BLE_SCAN
@@ -73,7 +73,7 @@ sequenceDiagram
                     CmdExec->>CmdExec: Run BLE_SCAN with RF setup env
                     CmdExec->>RunStore: Persist BLE outputs + RF context metrics
                     CmdExec-)Mimir: Emit numeric observability metrics
-                    Agent->>Fleet: ReportCommandStatus(<br/>COMMAND_STARTED/FINISHED/FAILED,<br/>command_type=BLE_SCAN, measure_type=BLE)
+                    Agent->>Fleet: gRPC ReportCommandStatus(<br/>COMMAND_STARTED/FINISHED/FAILED,<br/>command_type=BLE_SCAN, measure_type=BLE)
                     Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>BLE command state + RF context
                 end
             else command = CAPTURE_CSI
@@ -81,13 +81,13 @@ sequenceDiagram
                     CmdExec->>CmdExec: Run CAPTURE_CSI with RF setup env
                     CmdExec->>RunStore: Save CSI outputs/evidence + RF context metrics
                     CmdExec-)Mimir: Emit numeric observability metrics
-                    Agent->>Fleet: ReportCommandStatus(<br/>COMMAND_STARTED/FINISHED/FAILED,<br/>command_type=CAPTURE_CSI, measure_type=CSI)
+                    Agent->>Fleet: gRPC ReportCommandStatus(<br/>COMMAND_STARTED/FINISHED/FAILED,<br/>command_type=CAPTURE_CSI, measure_type=CSI)
                     Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>CSI command state + evidence
                 end
             else command = SHELL
                 rect rgb(226,232,240)
                     CmdExec->>RunStore: Record stdout/stderr/exit_code
-                    Agent->>Fleet: ReportCommandStatus(<br/>COMMAND_STARTED/FINISHED/FAILED,<br/>command_type=SHELL)
+                    Agent->>Fleet: gRPC ReportCommandStatus(<br/>COMMAND_STARTED/FINISHED/FAILED,<br/>command_type=SHELL)
                     Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>command state + last exit
                 end
             end
@@ -105,39 +105,48 @@ sequenceDiagram
             Agent-)Uploader: Set cron wake-up to re-check<br/>maintenance window + slot/jitter
             loop while window+slot is open
                 Uploader->>RunStore: Read staged upload params
-                Uploader->>RunStore: Check pending upload queues<br/>(metrics/logs, artifacts)
+                Uploader->>RunStore: Check pending upload queues<br/>(metrics, artifacts)
                 alt no pending upload data
                     Uploader->>Uploader: Skip upload for this maintenance tick
                 else pending upload data
-                    alt pending metrics/logs
-                        Uploader->>LocalTSDB: Read pending metrics/logs batch
-                        Uploader->>Mimir: Upload pending metrics + logs from local TSDB
-                        Mimir-->>Uploader: metrics/logs upload ACK/err
-                        Uploader->>Fleet: ReportUploadStatus(metrics/logs ACK/err)
-                        Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>metrics/logs upload state
-                    else no pending metrics/logs
-                        Uploader->>Uploader: Skip metrics/logs upload
+                    alt pending metrics
+                        Uploader->>LocalTSDB: Read pending metrics batch
+                        Uploader->>Mimir: Upload pending metrics from local TSDB
+                        Mimir-->>Uploader: metrics upload ACK/err
+                        Uploader->>Fleet: gRPC ReportUploadStatus(metrics ACK/err)
+                        Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>metrics upload state
+                    else no pending metrics
+                        Uploader->>Uploader: Skip metrics upload
                     end
                     alt pending artifacts
-                        Uploader->>RunStore: Read next artifact
-                        Uploader->>Fleet: Upload artifact from local spool
-                        Fleet-->>Uploader: artifact ACK/err
-                        Uploader->>Fleet: ReportArtifactUploadStatus(artifact_id, ACK/err)
-                        Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>artifacts state + last uploaded ptr
+                        Uploader->>RunStore: Read next artifact bytes + metadata
+                        Uploader->>Fleet: gRPC UploadArtifact(stream header + chunks)
+                        Fleet->>Fleet: Stage artifact in server spool
+                        alt artifact is run-summary.json
+                            Fleet->>Fleet: Build wireless-run-evidence-bundle.tar.gz
+                            Fleet->>ELab: POST /experiments/{id}/uploads<br/>bundle + run-summary.json
+                            Fleet-->>Uploader: gRPC UploadArtifactResponse(ACCEPTED,<br/>server_finalized=true)
+                        else normal artifact
+                            Fleet-->>Uploader: gRPC UploadArtifactResponse(ACCEPTED,<br/>server_finalized=false)
+                        end
+                        opt upload status events enabled
+                            Uploader->>Fleet: gRPC ReportArtifactUploadStatus(ACK/err)
+                            Fleet->>ELab: PATCH /event/{run_event_id} metadata:<br/>artifacts state + last uploaded ptr
+                        end
                     else no pending artifacts
                         Uploader->>Uploader: Skip artifacts upload
                     end
-                    Uploader->>Fleet: PublishReport(report with run_id)
+                    Uploader->>Fleet: gRPC PublishReport(report with run_id)
                     Fleet->>Fleet: Map upload/report status
                     Fleet->>ELab: PATCH /items/{id} metadata:<br/>last report upload state + run_id
                     alt ACCEPTED path
-                        Fleet-->>Uploader: ACCEPTED
+                        Fleet-->>Uploader: gRPC PublishReportResponse(ACCEPTED)
                         Uploader->>RunStore: Mark run local state = sent
                     else DUPLICATE path
-                        Fleet-->>Uploader: DUPLICATE
+                        Fleet-->>Uploader: gRPC PublishReportResponse(DUPLICATE)
                         Uploader->>RunStore: Mark run local state = sent
                     else RPC fail
-                        Fleet-->>Uploader: RPC error/timeout
+                        Fleet-->>Uploader: gRPC error/timeout
                         Uploader->>RunStore: Keep run local state = pending
                     end
                 end

@@ -29,7 +29,7 @@ sequenceDiagram
 
     rect rgb(232,245,233)
         Note over Researcher,ELab: DETAILED PREPARE
-        Agent->>Fleet: GetPolicy(agent_id, last_policy_id)
+        Agent->>Fleet: gRPC GetPolicy(agent_id, last_policy_id)
         Fleet->>ELab: GET /items?search=agent_id
         alt resource item missing
             Fleet->>ELab: POST /items (create device resource)
@@ -41,13 +41,13 @@ sequenceDiagram
         Fleet->>Selector: Apply tags + selectors + time-window filtering
         Selector-->>Fleet: Selected experiment_id + policy_id
         alt status = OK
-            Fleet-->>Agent: GetPolicyResponse(OK + policy_json from experiment metadata)
+            Fleet-->>Agent: gRPC GetPolicyResponse(OK + policy_json from experiment metadata)
             Fleet->>ELab: PATCH /items/{id} metadata(state=POLICY_SENT, policy_id)
         else status = NOT_MODIFIED
             Fleet->>ELab: PATCH /items/{id} metadata(state=POLICY_CACHED)
-            Fleet-->>Agent: GetPolicyResponse(NOT_MODIFIED)
+            Fleet-->>Agent: gRPC GetPolicyResponse(NOT_MODIFIED)
         else status = NO_WORK
             Fleet->>ELab: PATCH /items/{id} metadata(state=IDLE)
-            Fleet-->>Agent: GetPolicyResponse(NO_WORK)
+            Fleet-->>Agent: gRPC GetPolicyResponse(NO_WORK)
         end
     end
