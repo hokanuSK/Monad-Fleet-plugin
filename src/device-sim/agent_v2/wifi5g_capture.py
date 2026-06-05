@@ -78,6 +78,37 @@ class CaptureHandles:
     dwell_entries: list[dict] = field(default_factory=list)
 
 
+def _list_pcap_segments(base_path: str) -> list[Path]:
+    """Return the ordered set of pcap segment files produced for ``base_path``.
+
+    Without rotation, tcpdump writes exactly ``base_path``.
+    With ``-C`` rotation enabled, tcpdump keeps the base file and appends
+    numeric suffixes (for example ``.pcap1``, ``.pcap2``). We keep ordering
+    deterministic so callers can publish artifacts with stable part numbers.
+    """
+    base = Path(base_path)
+    parent = base.parent
+    prefix = base.name
+    rows: list[tuple[int, Path]] = []
+    try:
+        for child in parent.iterdir():
+            if not child.is_file():
+                continue
+            if child.name == prefix:
+                rows.append((0, child))
+                continue
+            if not child.name.startswith(prefix):
+                continue
+            suffix = child.name[len(prefix):]
+            if not suffix.isdigit():
+                continue
+            rows.append((int(suffix), child))
+    except FileNotFoundError:
+        return []
+    rows.sort(key=lambda item: item[0])
+    return [path for _, path in rows]
+
+
 def _find_tool(name: str) -> Optional[str]:
     """Locate ``name`` on PATH and in common sbin directories."""
     found = shutil.which(name)
@@ -298,6 +329,7 @@ def start_capture(
     channels: Optional[list[int]] = None,
     dwell_s: float = DEFAULT_DWELL_S,
     width_mhz: int = DEFAULT_CHANNEL_WIDTH_MHZ,
+    rotate_mb: int = 0,
 ) -> Optional[CaptureHandles]:
     """Begin a 5 GHz monitor-mode capture.
 
@@ -347,6 +379,8 @@ def start_capture(
         "-s", "256",
         "-n",
     ]
+    if int(rotate_mb or 0) > 0:
+        cmd.extend(["-C", str(int(rotate_mb))])
     try:
         proc = subprocess.Popen(
             cmd,
@@ -426,15 +460,19 @@ def stop_capture(handles: CaptureHandles) -> dict:
     except Exception:
         log.exception("wifi5g_capture: failed to write schedule log to %s", handles.schedule_log_path)
 
+    pcap_paths = _list_pcap_segments(handles.pcap_path)
     pcap_bytes = 0
-    try:
-        pcap_bytes = Path(handles.pcap_path).stat().st_size
-    except Exception:
-        pass
+    for path in pcap_paths:
+        try:
+            pcap_bytes += max(0, int(path.stat().st_size))
+        except Exception:
+            continue
 
     elapsed_s = max(0.0, (time.monotonic_ns() - handles.started_monotonic_ns) / 1_000_000_000)
     return {
         "pcap_bytes": pcap_bytes,
+        "pcap_segment_count": len(pcap_paths),
+        "pcap_segment_paths": [str(path) for path in pcap_paths],
         "dwell_changes": len(handles.dwell_entries),
         "elapsed_s": elapsed_s,
     }

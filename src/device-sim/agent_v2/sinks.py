@@ -15,6 +15,67 @@ def _resolve_sink_list(primary: Any, fallback: Any = "") -> list[str]:
 def _safe_float(value: Any) -> float | None:
     return core_mod._safe_float(value)
 
+
+def _report_artifact_transfer_counts(report: fleet_gateway_v2_pb2.Report) -> tuple[int, int, int]:
+    total = max(0, len(report.artifacts))
+    uploaded = max(
+        parse_int(report.summary_metrics.get("artifacts_uploaded_elab"), 0),
+        parse_int(report.summary_metrics.get("artifacts_transferred_fleet_or_elab"), 0),
+    )
+    failed = max(0, parse_int(report.summary_metrics.get("artifacts_upload_failed"), 0))
+    return total, max(0, int(uploaded)), failed
+
+
+def report_ready_for_closeout(report: fleet_gateway_v2_pb2.Report) -> bool:
+    total, uploaded, failed = _report_artifact_transfer_counts(report)
+    if failed > 0:
+        return False
+    if total <= 0:
+        return True
+    return uploaded >= total
+
+
+def _publish_report_with_confirmation(
+    stub: fleet_gateway_v2_pb2_grpc.FleetManagerStub,
+    agent_id: str,
+    report: fleet_gateway_v2_pb2.Report,
+    *,
+    timeout_s: int,
+) -> fleet_gateway_v2_pb2.PublishReportResponse:
+    request = fleet_gateway_v2_pb2.PublishReportRequest(agent_id=agent_id, report=report)
+    try:
+        return stub.PublishReport(request, timeout=float(timeout_s))
+    except grpc.RpcError as exc:
+        if exc.code() != grpc.StatusCode.DEADLINE_EXCEEDED:
+            raise
+
+    confirm_retries = max(1, parse_int(os.environ.get("REPORT_RPC_CONFIRM_RETRIES"), 2))
+    confirm_timeout_s = max(
+        5,
+        parse_int(
+            os.environ.get("REPORT_RPC_CONFIRM_TIMEOUT_S"),
+            min(max(5, int(timeout_s)), 15),
+        ),
+    )
+    last_exc: grpc.RpcError | None = None
+    for attempt in range(1, confirm_retries + 1):
+        try:
+            log.info(
+                "PublishReport confirmation retry %d/%d run_id=%s timeout=%ss",
+                attempt,
+                confirm_retries,
+                normalize(report.run_id),
+                confirm_timeout_s,
+            )
+            return stub.PublishReport(request, timeout=float(confirm_timeout_s))
+        except grpc.RpcError as exc:
+            last_exc = exc
+            if exc.code() != grpc.StatusCode.DEADLINE_EXCEEDED:
+                raise
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("PublishReport confirmation unexpectedly produced no result")
+
 def flush_pending_reports(
     stub: fleet_gateway_v2_pb2_grpc.FleetManagerStub,
     agent_id: str,
@@ -66,13 +127,15 @@ def flush_pending_reports(
             )
             continue
         try:
-            resp = stub.PublishReport(
-                fleet_gateway_v2_pb2.PublishReportRequest(agent_id=agent_id, report=report),
-                timeout=float(report_timeout_s),
+            resp = _publish_report_with_confirmation(
+                stub,
+                agent_id,
+                report,
+                timeout_s=report_timeout_s,
             )
         except grpc.RpcError as exc:
             log.warning("PublishReport replay failed for run_id=%s: %s", run_id, exc)
-            break
+            continue
 
         status = int(resp.status)
         if status in (

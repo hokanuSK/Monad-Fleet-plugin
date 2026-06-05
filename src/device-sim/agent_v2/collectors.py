@@ -88,6 +88,10 @@ def collect_wifi_monitor_capture(
         width_mhz = int(env.get("WIFI_SCAN_CHANNEL_WIDTH_MHZ") or _wifi5g_capture.DEFAULT_CHANNEL_WIDTH_MHZ)
     except (TypeError, ValueError):
         width_mhz = _wifi5g_capture.DEFAULT_CHANNEL_WIDTH_MHZ
+    try:
+        rotate_mb = int(env.get("WIFI_SCAN_PCAP_ROTATE_MB") or "0")
+    except (TypeError, ValueError):
+        rotate_mb = 0
 
     # Stage capture outputs in /tmp; we copy them into the run-artifact dir
     # after stop so the partial pcap won't pollute the spool if we crash.
@@ -120,6 +124,7 @@ def collect_wifi_monitor_capture(
         channels=channels,
         dwell_s=dwell_s,
         width_mhz=width_mhz,
+        rotate_mb=rotate_mb,
     )
     if handles is None:
         _prom_set("wifi5g_capture_active", 0.0)
@@ -145,14 +150,26 @@ def collect_wifi_monitor_capture(
 
     if persist_artifacts:
         try:
-            if Path(pcap_scratch).exists():
+            pcap_paths = [Path(path) for path in stats.get("pcap_segment_paths") or []]
+            if not pcap_paths and Path(pcap_scratch).exists():
+                pcap_paths = [Path(pcap_scratch)]
+            if len(pcap_paths) == 1:
                 artifacts.append(
                     store.import_file_artifact(
                         run_id,
-                        Path(pcap_scratch),
+                        pcap_paths[0],
                         artifact_name="wifi-5g-monitor.pcap",
                     )
                 )
+            else:
+                for idx, pcap_path in enumerate(pcap_paths, start=1):
+                    artifacts.append(
+                        store.import_file_artifact(
+                            run_id,
+                            pcap_path,
+                            artifact_name=f"wifi-5g-monitor-part-{idx:03d}.pcap",
+                        )
+                    )
         except Exception:
             log.exception("Failed to import wifi-5g-monitor.pcap as run artifact")
         try:
@@ -170,7 +187,8 @@ def collect_wifi_monitor_capture(
         except Exception:
             log.exception("Failed to persist wifi-5g-channel-schedule.log")
 
-    for scratch in (pcap_scratch, schedule_scratch):
+    scratch_paths = {pcap_scratch, schedule_scratch, *[str(path) for path in stats.get("pcap_segment_paths") or []]}
+    for scratch in scratch_paths:
         try:
             Path(scratch).unlink()
         except FileNotFoundError:
@@ -180,6 +198,7 @@ def collect_wifi_monitor_capture(
 
     metrics["wifi_capture_status"] = "ok"
     metrics["wifi_capture_pcap_bytes"] = str(stats["pcap_bytes"])
+    metrics["wifi_capture_pcap_segments"] = str(stats.get("pcap_segment_count") or 0)
     metrics["wifi_capture_dwell_changes"] = str(stats["dwell_changes"])
     metrics["wifi_capture_elapsed_s"] = f"{stats['elapsed_s']:.2f}"
     metrics["wifi_capture_channels"] = str(len(channels))
@@ -189,6 +208,8 @@ def collect_wifi_monitor_capture(
         f"passive_monitor: {stats['pcap_bytes']}B pcap, "
         f"{stats['dwell_changes']} dwells over {len(channels)} channels"
     )
+    if int(stats.get("pcap_segment_count") or 0) > 1:
+        msg += f" (segments={int(stats['pcap_segment_count'])})"
     return 0, duration_ms, msg, metrics, artifacts
 
 
@@ -752,6 +773,7 @@ def collect_ble_advertise(
 
     metrics["ble_advertise_status"] = "ok"
     metrics["ble_tx_count"] = str(stats["tx_count"])
+    metrics["ble_adv_count"] = str(stats["tx_count"])
     metrics["ble_advertise_elapsed_s"] = f"{stats['elapsed_s']:.2f}"
     metrics["ble_advertise_update_interval_s"] = f"{update_interval_s:.2f}"
     duration_ms = int(stats["elapsed_s"] * 1000)
@@ -847,26 +869,73 @@ def collect_ble_scan(
     import threading as _threading
     _scan_timeout_s = max(1, int(timeout_ms / 1000))
     _t0 = time.time()
+    _live_adv_count = 0
+    _live_rssi_sum = 0.0
+    _live_rssi_count = 0
+    _live_saw_name_event = False
+    _live_seen_addrs: set[str] = set()
     try:
         _btproc = _subprocess.Popen(
             ["bluetoothctl"],
             stdin=_subprocess.PIPE,
             stdout=_subprocess.PIPE,
             stderr=_subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
         )
         # Disable duplicate-advertisement filtering so BlueZ reports every
         # [CHG] Name: event when the advertiser MAC is static. Without this,
         # BlueZ suppresses repeated PDUs from the same address after first discovery.
-        _btproc.stdin.write(b"power on\nmenu scan\nduplicate-data off\nback\nscan on\n")
+        _btproc.stdin.write("power on\nmenu scan\nduplicate-data off\nback\nscan on\n")
         _btproc.stdin.flush()
-        # Drain stdout continuously so the pipe buffer never fills and deadlocks.
-        _chunks: list[bytes] = []
+        # Drain stdout continuously so the pipe buffer never fills and deadlocks,
+        # and update Prometheus live as advertisements arrive.
+        _lines: list[str] = []
+
+        def _observe_ble_line(line: str) -> None:
+            nonlocal _live_adv_count, _live_rssi_sum, _live_rssi_count
+            nonlocal _live_saw_name_event, _live_seen_addrs
+            _name_match = re.search(
+                r"\[(?:NEW|CHG)\]\s+Device\s+[0-9A-F]{2}(?::[0-9A-F]{2}){5}\s+Name:",
+                line,
+                flags=re.IGNORECASE,
+            )
+            _addr_match = re.search(
+                r"\[(?:NEW|CHG)\]\s+Device\s+([0-9A-F]{2}(?::[0-9A-F]{2}){5})\b",
+                line,
+                flags=re.IGNORECASE,
+            )
+            _should_increment = False
+            if _name_match:
+                _live_saw_name_event = True
+                _should_increment = True
+            elif _addr_match and not _live_saw_name_event:
+                _addr = _addr_match.group(1).lower()
+                if _addr not in _live_seen_addrs:
+                    _live_seen_addrs.add(_addr)
+                    _should_increment = True
+            if _should_increment:
+                _live_adv_count += 1
+                if _prom_ble is not None and getattr(_prom_ble, "ble_rx_total", None) is not None:
+                    try:
+                        _prom_ble.ble_rx_total.inc()
+                    except Exception:
+                        pass
+            _rssi_match = re.search(r"\bRSSI:\s*(-?\d+(?:\.\d+)?)\b", line, flags=re.IGNORECASE)
+            if _rssi_match:
+                try:
+                    _live_rssi_sum += float(_rssi_match.group(1))
+                    _live_rssi_count += 1
+                except Exception:
+                    pass
+
         def _drain() -> None:
-            while True:
-                chunk = _btproc.stdout.read(4096)
-                if not chunk:
-                    break
-                _chunks.append(chunk)
+            assert _btproc.stdout is not None
+            for line in _btproc.stdout:
+                _lines.append(line)
+                _observe_ble_line(line)
         _drain_thread = _threading.Thread(target=_drain, daemon=True)
         _drain_thread.start()
         # Wait for the scan window, checking for early exit every 0.5 s.
@@ -878,7 +947,7 @@ def collect_ble_scan(
             _waited += 0.5
         # Graceful stop.
         try:
-            _btproc.stdin.write(b"scan off\nquit\n")
+            _btproc.stdin.write("scan off\nquit\n")
             _btproc.stdin.flush()
             _btproc.stdin.close()
         except Exception:
@@ -892,7 +961,7 @@ def collect_ble_scan(
             except Exception:
                 pass
         _drain_thread.join(timeout=3)
-        out = b"".join(_chunks).decode("utf-8", errors="replace")
+        out = "".join(_lines)
         exit_code = _btproc.returncode if _btproc.returncode is not None else 0
         if "discovering: yes" not in out.lower() and "discovery started" not in out.lower():
             log.warning(
@@ -913,13 +982,15 @@ def collect_ble_scan(
             _prom_ble.ble_scan_active.set(0.0)
         except Exception:
             pass
-    adv_count, avg_rssi = _parse_bluetoothctl_scan(out)
-    # Increment RX counter by number of detected advertisements.
-    if _prom_ble is not None and getattr(_prom_ble, "ble_rx_total", None) is not None and adv_count > 0:
-        try:
-            _prom_ble.ble_rx_total.inc(adv_count)
-        except Exception:
-            pass
+    parsed_adv_count, parsed_avg_rssi = _parse_bluetoothctl_scan(out)
+    adv_count = max(_live_adv_count, parsed_adv_count)
+    if _live_adv_count == 0 and parsed_adv_count > 0:
+        if _prom_ble is not None and getattr(_prom_ble, "ble_rx_total", None) is not None:
+            try:
+                _prom_ble.ble_rx_total.inc(parsed_adv_count)
+            except Exception:
+                pass
+    avg_rssi = (_live_rssi_sum / _live_rssi_count) if _live_rssi_count > 0 else parsed_avg_rssi
     metrics["ble_adv_count"] = str(max(0, int(adv_count)))
     if avg_rssi is not None:
         metrics["ble_avg_rssi_dbm"] = f"{avg_rssi:.2f}"
